@@ -286,7 +286,7 @@ public final class VectorAArch64 extends VectorArchitecture {
     }
 
     @Override
-    public int getSupportedVectorCompressExpandLength(Stamp elementStamp, int maxLength) {
+    public int getSupportedVectorCompressExpandLength(Stamp elementStamp, int maxLength, CompressExpandOp op) {
         return 1;
     }
 

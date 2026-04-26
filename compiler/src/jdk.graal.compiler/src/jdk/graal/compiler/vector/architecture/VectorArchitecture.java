@@ -58,6 +58,12 @@ import jdk.vm.ci.meta.JavaKind;
  */
 public abstract class VectorArchitecture {
 
+    /** Distinguishes between vector compress and expand operation support. */
+    public enum CompressExpandOp {
+        COMPRESS,
+        EXPAND
+    }
+
     /**
      * The stride (in bytes) for vectors of ordinary object pointers in memory. That is, this is the
      * compressed reference size if compressed references are enabled.
@@ -244,6 +250,20 @@ public abstract class VectorArchitecture {
     public abstract int getSupportedVectorShiftWithScalarCount(Stamp stamp, int maxLength, ArithmeticOpTable.Op op);
 
     /**
+     * Get a natively supported vector length for a rotate operation.
+     *
+     * Platforms without dedicated rotate support can return {@code 1} and rely on shift/or
+     * expansion in higher-level vector API code.
+     *
+     * @param stamp the stamp of the individual vector elements
+     * @param maxLength the maximum length that should be returned
+     * @return a supported vector size, but at most {@code maxLength}
+     */
+    public int getSupportedVectorRotateLength(Stamp stamp, int maxLength) {
+        return 1;
+    }
+
+    /**
      * Returns whether the given vectorized operation may be rewritten to a narrower one.
      *
      * @param operation the existing vectorized arithmetic operation
@@ -365,11 +385,12 @@ public abstract class VectorArchitecture {
     /**
      * Get the maximum supported vector length for a vector compress/expand based on a mask.
      *
-     * @param elementStamp the stamp of the elements to be blended
+     * @param elementStamp the stamp of the elements to be compressed/expanded
      * @param maxLength the maximum length to return
+     * @param op the operation (compress or expand)
      * @return the number of elements that can be compressed/expanded by a single instruction
      */
-    public abstract int getSupportedVectorCompressExpandLength(Stamp elementStamp, int maxLength);
+    public abstract int getSupportedVectorCompressExpandLength(Stamp elementStamp, int maxLength, CompressExpandOp op);
 
     /**
      * Determine the minimum alignment in bytes that is guaranteed for objects.

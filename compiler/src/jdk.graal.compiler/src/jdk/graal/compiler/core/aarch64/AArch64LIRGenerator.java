@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -62,6 +62,8 @@ import jdk.graal.compiler.lir.aarch64.AArch64ArrayRegionCompareToOp;
 import jdk.graal.compiler.lir.aarch64.AArch64AtomicMove;
 import jdk.graal.compiler.lir.aarch64.AArch64AtomicMove.AtomicReadAndWriteOp;
 import jdk.graal.compiler.lir.aarch64.AArch64AtomicMove.CompareAndSwapOp;
+import jdk.graal.compiler.lir.aarch64.AArch64Base64DecodeOp;
+import jdk.graal.compiler.lir.aarch64.AArch64Base64EncodeOp;
 import jdk.graal.compiler.lir.aarch64.AArch64BigIntegerMulAddOp;
 import jdk.graal.compiler.lir.aarch64.AArch64BigIntegerMultiplyToLenOp;
 import jdk.graal.compiler.lir.aarch64.AArch64BigIntegerSquareToLenOp;
@@ -732,6 +734,42 @@ public abstract class AArch64LIRGenerator extends LIRGenerator {
     }
 
     @Override
+    public void emitBase64EncodeBlock(EnumSet<?> runtimeCheckedCPUFeatures, Value src, Value srcPos, Value sl, Value dst, Value dp, Value isURLFlag) {
+        RegisterValue rSrc = AArch64.r0.asValue(src.getValueKind());
+        RegisterValue rSp = AArch64.r1.asValue(srcPos.getValueKind());
+        RegisterValue rSl = AArch64.r2.asValue(sl.getValueKind());
+        RegisterValue rDst = AArch64.r3.asValue(dst.getValueKind());
+        RegisterValue rDp = AArch64.r4.asValue(dp.getValueKind());
+        RegisterValue rURL = AArch64.r5.asValue(isURLFlag.getValueKind());
+        emitMove(rSrc, src);
+        emitMove(rSp, srcPos);
+        emitMove(rSl, sl);
+        emitMove(rDst, dst);
+        emitMove(rDp, dp);
+        emitMove(rURL, isURLFlag);
+        append(new AArch64Base64EncodeOp(rSrc, rSp, rSl, rDst, rDp, rURL));
+    }
+
+    @Override
+    public Variable emitBase64DecodeBlock(EnumSet<?> runtimeCheckedCPUFeatures, Value src, Value srcPos, Value sl, Value dst, Value dp, Value isURLFlag, Value unusedIsMimeFlag) {
+        RegisterValue rSrc = AArch64.r0.asValue(src.getValueKind());
+        RegisterValue rSp = AArch64.r1.asValue(srcPos.getValueKind());
+        RegisterValue rSl = AArch64.r2.asValue(sl.getValueKind());
+        RegisterValue rDst = AArch64.r3.asValue(dst.getValueKind());
+        RegisterValue rDp = AArch64.r4.asValue(dp.getValueKind());
+        RegisterValue rURL = AArch64.r5.asValue(isURLFlag.getValueKind());
+        Variable result = newVariable(LIRKind.value(AArch64Kind.DWORD));
+        emitMove(rSrc, src);
+        emitMove(rSp, srcPos);
+        emitMove(rSl, sl);
+        emitMove(rDst, dst);
+        emitMove(rDp, dp);
+        emitMove(rURL, isURLFlag);
+        append(new AArch64Base64DecodeOp(result, rSrc, rSp, rSl, rDst, rDp, rURL));
+        return result;
+    }
+
+    @Override
     public void emitAESEncrypt(Value from, Value to, Value key) {
         append(new AArch64AESEncryptOp(asAllocatable(from), asAllocatable(to), asAllocatable(key), getArrayLengthOffset() - getArrayBaseOffset(JavaKind.Int)));
     }
@@ -785,7 +823,7 @@ public abstract class AArch64LIRGenerator extends LIRGenerator {
     }
 
     @Override
-    public void emitGHASHProcessBlocks(Value state, Value hashSubkey, Value data, Value blocks) {
+    public void emitGHASHProcessBlocks(EnumSet<?> runtimeCheckedCPUFeatures, Value state, Value hashSubkey, Value data, Value blocks) {
         append(new AArch64GHASHProcessBlocksOp(this, asAllocatable(state), asAllocatable(hashSubkey), asAllocatable(data), asAllocatable(blocks)));
     }
 
@@ -807,12 +845,12 @@ public abstract class AArch64LIRGenerator extends LIRGenerator {
     }
 
     @Override
-    public void emitSha1ImplCompress(Value buf, Value state) {
+    public void emitSha1ImplCompress(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state) {
         append(new AArch64SHA1Op(this, asAllocatable(buf), asAllocatable(state)));
     }
 
     @Override
-    public void emitSha256ImplCompress(Value buf, Value state) {
+    public void emitSha256ImplCompress(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state) {
         append(new AArch64SHA256Op(this, asAllocatable(buf), asAllocatable(state)));
     }
 

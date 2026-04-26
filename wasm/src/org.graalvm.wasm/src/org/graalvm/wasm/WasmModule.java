@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -341,7 +341,7 @@ public final class WasmModule extends SymbolTable implements TruffleObject {
                 case ImportIdentifier.FUNCTION -> requireCallable(member, descriptor, exceptionProvider);
                 case ImportIdentifier.TABLE -> requireWasmTable(member, descriptor, exceptionProvider);
                 case ImportIdentifier.MEMORY -> requireWasmMemory(member, descriptor, exceptionProvider);
-                case ImportIdentifier.GLOBAL -> requireWasmGlobal(member, descriptor, exceptionProvider);
+                case ImportIdentifier.GLOBAL -> requireOrAllocateWasmGlobal(member, descriptor, exceptionProvider);
                 case ImportIdentifier.TAG -> requireWasmTag(member, descriptor, exceptionProvider);
                 default -> throw WasmException.create(Failure.UNSPECIFIED_INTERNAL, "Unknown import descriptor type: " + descriptor.identifier());
             });
@@ -405,11 +405,19 @@ public final class WasmModule extends SymbolTable implements TruffleObject {
         return table;
     }
 
-    private static WasmGlobal requireWasmGlobal(Object member, ImportDescriptor importDescriptor, ExceptionProvider exceptionProvider) {
-        if (!(member instanceof WasmGlobal global)) {
-            throw exceptionProvider.createLinkError(Failure.INCOMPATIBLE_IMPORT_TYPE, "Member " + member + " " + importDescriptor + " is not a valid global.");
+    private WasmGlobal requireOrAllocateWasmGlobal(Object member, ImportDescriptor importDescriptor, ExceptionProvider exceptionProvider) {
+        if (member instanceof WasmGlobal global) {
+            return global;
         }
-        return global;
+        final int globalIndex = importDescriptor.targetIndex();
+        assert globalImported(globalIndex) : importDescriptor;
+        if (isGlobalMutable(globalIndex)) {
+            throw exceptionProvider.createLinkError(Failure.INCOMPATIBLE_IMPORT_TYPE, "Mutable global imports must be provided as global objects.");
+        }
+        if (!closedTypeOf(globalValueType(globalIndex)).matchesValue(member)) {
+            throw exceptionProvider.createLinkError(Failure.INCOMPATIBLE_IMPORT_TYPE, "Imported value does not match the expected global type.");
+        }
+        return new WasmGlobal(globalIndex, this, member);
     }
 
     private static WasmTag requireWasmTag(Object member, ImportDescriptor importDescriptor, ExceptionProvider exceptionProvider) {

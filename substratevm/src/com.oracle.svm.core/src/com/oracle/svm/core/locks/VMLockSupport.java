@@ -34,15 +34,16 @@ import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.core.SubstrateDiagnostics.DiagnosticThunk;
 import com.oracle.svm.core.SubstrateDiagnostics.ErrorContext;
-import com.oracle.svm.guest.staging.Uninterruptible;
-import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.util.ImageHeapList;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
-import com.oracle.svm.core.util.ImageHeapList;
+import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
 
@@ -125,27 +126,21 @@ public abstract class VMLockSupport {
 
     /**
      * Destroys all {@link VMMutex}, {@link VMCondition}, and {@link VMSemaphore} objects.
-     *
-     * @return {@code true} if the destruction was successful, {@code false} if an error occurred.
      */
     @Uninterruptible(reason = "The isolate teardown is in progress.")
-    public final boolean destroy() {
+    public final void destroy() {
         for (int i = 0; i < semaphores.size(); i++) {
-            if (semaphores.get(i).destroy() != 0) {
-                return false;
-            }
+            int code = semaphores.get(i).destroy();
+            VMError.guarantee(code == 0, "VMSemaphore.destroy() failed.");
         }
         for (int i = 0; i < conditions.size(); i++) {
-            if (conditions.get(i).destroy() != 0) {
-                return false;
-            }
+            int code = conditions.get(i).destroy();
+            VMError.guarantee(code == 0, "VMCondition.destroy() failed.");
         }
         for (int i = 0; i < mutexes.size(); i++) {
-            if (mutexes.get(i).destroy() != 0) {
-                return false;
-            }
+            int code = mutexes.get(i).destroy();
+            VMError.guarantee(code == 0, "VMMutex.destroy() failed.");
         }
-        return true;
     }
 
     public static class DumpVMMutexes extends DiagnosticThunk {
@@ -159,30 +154,22 @@ public abstract class VMLockSupport {
         public void printDiagnostics(Log log, ErrorContext context, int maxDiagnosticLevel, int invocationCount) {
             log.string("VM mutexes:").indent(true);
 
-            VMLockSupport support = null;
-            if (ImageSingletons.contains(VMLockSupport.class)) {
-                support = ImageSingletons.lookup(VMLockSupport.class);
-            }
-
-            if (support == null || support.mutexes == null) {
-                log.string("No mutex information is available.").newline();
-            } else {
-                for (int i = 0; i < support.mutexes.size(); i++) {
-                    VMMutex mutex = support.mutexes.get(i);
-                    IsolateThread owner = mutex.owner;
-                    log.string("mutex \"").string(mutex.getName()).string("\" ");
-                    if (owner.isNull()) {
-                        log.string("is unlocked.");
+            VMLockSupport support = VMLockSupport.singleton();
+            for (int i = 0; i < support.mutexes.size(); i++) {
+                VMMutex mutex = support.mutexes.get(i);
+                IsolateThread owner = mutex.owner;
+                log.string("mutex \"").string(mutex.getName()).string("\" ");
+                if (owner.isNull()) {
+                    log.string("is unlocked.");
+                } else {
+                    log.string("is locked by ");
+                    if (owner.equal(VMMutex.UNSPECIFIED_OWNER)) {
+                        log.string("an unspecified thread.");
                     } else {
-                        log.string("is locked by ");
-                        if (owner.equal(VMMutex.UNSPECIFIED_OWNER)) {
-                            log.string("an unspecified thread.");
-                        } else {
-                            log.string("thread ").zhex(owner);
-                        }
+                        log.string("thread ").zhex(owner);
                     }
-                    log.newline();
                 }
+                log.newline();
             }
 
             log.indent(false);

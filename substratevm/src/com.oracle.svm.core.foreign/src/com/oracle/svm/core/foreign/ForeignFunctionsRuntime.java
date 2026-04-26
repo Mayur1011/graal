@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -54,6 +54,7 @@ import org.graalvm.nativeimage.impl.InternalPlatform.NATIVE_ONLY;
 import org.graalvm.nativeimage.impl.InternalPlatform.PLATFORM_JNI;
 import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.Pointer;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.BuildPhaseProvider;
 import com.oracle.svm.core.ForeignSupport;
@@ -61,8 +62,6 @@ import com.oracle.svm.core.FunctionPointerHolder;
 import com.oracle.svm.core.MissingRegistrationUtils;
 import com.oracle.svm.core.OS;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.SubstrateUtil;
-import com.oracle.svm.guest.staging.Uninterruptible;
 import com.oracle.svm.core.c.InvokeJavaFunctionPointer;
 import com.oracle.svm.core.foreign.AbiUtils.TrampolineTemplate;
 import com.oracle.svm.core.foreign.phases.SubstrateOptimizeSharedArenaAccessPhase.OptimizeSharedArenaConfig;
@@ -72,8 +71,16 @@ import com.oracle.svm.core.headers.WindowsAPIs;
 import com.oracle.svm.core.image.DisallowedImageHeapObjects.DisallowedObjectReporter;
 import com.oracle.svm.core.snippets.SnippetRuntime;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
-import com.oracle.svm.shared.util.BasedOnJDKFile;
 import com.oracle.svm.core.util.ImageHeapMap;
+import com.oracle.svm.shared.AlwaysInline;
+import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
+import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.Duplicable;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.BasedOnJDKFile;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
@@ -84,8 +91,8 @@ import jdk.internal.foreign.abi.CapturableState;
 import jdk.internal.foreign.abi.LinkerOptions;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
-import org.graalvm.word.impl.Word;
 
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Duplicable.class, other = PartiallyLayerAware.class)
 public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedArenaConfig {
     @Fold
     public static ForeignFunctionsRuntime singleton() {
@@ -96,6 +103,7 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     private final AbiUtils.TrampolineTemplate trampolineTemplate;
 
     private final EconomicMap<NativeEntryPointInfo, FunctionPointerHolder> downcallStubs = ImageHeapMap.create("downcallStubs");
+    private final EconomicMap<MethodType, FunctionPointerHolder> downcallStubInvokers = ImageHeapMap.create("downcallStubInvokers");
     private final EconomicMap<Pair<DirectMethodHandleDesc, JavaEntryPointInfo>, FunctionPointerHolder> directUpcallStubs = ImageHeapMap.create("directUpcallStubs");
     private final EconomicMap<JavaEntryPointInfo, FunctionPointerHolder> upcallStubs = ImageHeapMap.create("upcallStubs");
     private final EconomicSet<ResolvedJavaType> neverAccessesSharedArenaTypes = EconomicSet.create();
@@ -156,6 +164,11 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
+    public boolean downcallStubInvokerExists(MethodType methodType) {
+        return downcallStubInvokers.containsKey(methodType);
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
     public int getDowncallStubsCount() {
         return downcallStubs.size();
     }
@@ -163,6 +176,11 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     @Platforms(Platform.HOSTED_ONLY.class)
     public boolean upcallStubExists(JavaEntryPointInfo jep) {
         return upcallStubs.containsKey(jep);
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public boolean addDowncallStubInvokerPointer(MethodType methodType, CFunctionPointer ptr) {
+        return downcallStubInvokers.putIfAbsent(methodType, new FunctionPointerHolder(ptr)) == null;
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
@@ -206,10 +224,18 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
         neverAccessesSharedArenaMethods.add(method);
     }
 
-    CFunctionPointer getDowncallStubPointer(NativeEntryPointInfo nep) {
+    public CFunctionPointer getDowncallStubPointer(NativeEntryPointInfo nep) {
         FunctionPointerHolder holder = downcallStubs.get(nep);
         if (holder == null) {
             throw reportMissingDowncall(nep);
+        }
+        return holder.functionPointer;
+    }
+
+    CFunctionPointer getDowncallStubInvokerPointer(MethodType methodType) {
+        FunctionPointerHolder holder = downcallStubInvokers.get(methodType);
+        if (holder == null) {
+            throw reportMissingDowncall(methodType);
         }
         return holder.functionPointer;
     }
@@ -301,6 +327,9 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     private MissingForeignRegistrationError reportMissingDowncall(NativeEntryPointInfo nep) {
         LinkRequest currentLinkRequest = null;
         for (LinkRequest linkRequest : currentLinkRequests) {
+            if (!Thread.currentThread().equals(linkRequest.requester)) {
+                continue;
+            }
             NativeEntryPointInfo nativeEntryPointInfo = abiUtils.makeNativeEntrypoint(linkRequest.functionDescriptor, linkRequest.linkerOptions);
             if (nep.equals(nativeEntryPointInfo)) {
                 currentLinkRequest = linkRequest;
@@ -308,6 +337,21 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
             }
         }
         throw MissingForeignRegistrationUtils.report(false, currentLinkRequest, nep.methodType());
+    }
+
+    /**
+     * Similar to {@link #reportMissingDowncall(NativeEntryPointInfo)} but only matches the
+     * requested {@link MethodType}.
+     */
+    private MissingForeignRegistrationError reportMissingDowncall(MethodType methodType) {
+        LinkRequest currentLinkRequest = null;
+        for (LinkRequest linkRequest : currentLinkRequests) {
+            if (methodType.equals(linkRequest.functionDescriptor.toMethodType())) {
+                currentLinkRequest = linkRequest;
+                break;
+            }
+        }
+        throw MissingForeignRegistrationUtils.report(false, currentLinkRequest, methodType);
     }
 
     /**
@@ -346,10 +390,10 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
                                         "upcallStub"));
     }
 
-    record LinkRequest(boolean upcall, FunctionDescriptor functionDescriptor, LinkerOptions linkerOptions) implements AutoCloseable, JsonPrintable {
+    record LinkRequest(boolean upcall, FunctionDescriptor functionDescriptor, LinkerOptions linkerOptions, Thread requester) implements AutoCloseable, JsonPrintable {
 
         static LinkRequest create(boolean upcall, FunctionDescriptor functionDescriptor, LinkerOptions linkerOptions) {
-            LinkRequest linkRequest = new LinkRequest(upcall, functionDescriptor, linkerOptions);
+            LinkRequest linkRequest = new LinkRequest(upcall, functionDescriptor, linkerOptions, Thread.currentThread());
             ForeignFunctionsRuntime.singleton().currentLinkRequests.push(linkRequest);
             return linkRequest;
         }
@@ -393,9 +437,10 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     @Override
     public Object linkToNative(Object... args) throws Throwable {
         Target_jdk_internal_foreign_abi_NativeEntryPoint nep = (Target_jdk_internal_foreign_abi_NativeEntryPoint) args[args.length - 1];
-        StubPointer pointer = Word.pointer(nep.downcallStubAddress);
-        /* The nep argument will be dropped in the invoked function */
-        return pointer.invoke(args);
+        StubInvokerPointer invoker = (StubInvokerPointer) nep.downcallInvokerPointer;
+        CFunctionPointer stub = nep.downcallStubPointer;
+        /* The nep argument will be dropped in the invoked downcall stub */
+        return invoker.invoke(stub, args);
     }
 
     @Override
@@ -429,6 +474,12 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
                             "However, C memory from the image generator is no longer available at image runtime.", memorySessionImpl,
                             "Try avoiding to initialize the class that called 'Arena.ofConfined/ofShared'.");
         }
+    }
+
+    @AlwaysInline("method handle interpreter performance")
+    @Override
+    public MethodType getMethodTypeFromNativeEntryPoint(Object nativeEntryPoint) {
+        return ((Target_jdk_internal_foreign_abi_NativeEntryPoint) nativeEntryPoint).type();
     }
 
     /**
@@ -496,7 +547,8 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     }
 }
 
-interface StubPointer extends CFunctionPointer {
+/** Invoke interface for {@code com.oracle.svm.hosted.foreign.DowncallStubInvoker}. */
+interface StubInvokerPointer extends CFunctionPointer {
     @InvokeJavaFunctionPointer
-    Object invoke(Object... args);
+    Object invoke(CFunctionPointer downcallStub, Object... args);
 }

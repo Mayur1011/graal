@@ -25,6 +25,7 @@
  */
 package jdk.graal.compiler.asm.aarch64;
 
+import static jdk.graal.compiler.asm.aarch64.AArch64Assembler.Asserts.checkRegZ;
 import static jdk.graal.compiler.asm.aarch64.AArch64Assembler.Asserts.verifyRegistersF;
 import static jdk.graal.compiler.asm.aarch64.AArch64Assembler.Asserts.verifyRegistersFF;
 import static jdk.graal.compiler.asm.aarch64.AArch64Assembler.Asserts.verifyRegistersR;
@@ -2450,7 +2451,8 @@ public abstract class AArch64Assembler extends Assembler<CPUFeature> {
      * @param s must be in the range 0 to size - 1
      */
     public void bfm(int size, Register dst, Register src, int r, int s) {
-        assert verifySizeAndRegistersRR(size, dst, src);
+        assert verifySizeAndRegistersR(size, dst);
+        assert checkRegZ(src);
 
         bitfieldInstruction(BFM, dst, src, r, s, generalFromSize(size));
     }

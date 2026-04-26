@@ -96,7 +96,8 @@ public class OptionClassFilterBuilder {
         } else {
             for (String entry : OptionUtils.resolveOptionValuesRedirection(baseOption, value, origin)) {
                 if (validOptionValue.matcher(entry).matches()) {
-                    if (!origin.commandLineLike() && !imageClassLoader.classes(container).contains(entry) && !imageClassLoader.packages(container).contains(entry)) {
+                    GuestTypes guestTypes = imageClassLoader.guestTypes;
+                    if (!origin.commandLineLike() && !guestTypes.getDiscoveredClassNames(container).contains(entry) && !guestTypes.getDiscoveredPackageNames(container).contains(entry)) {
                         throw UserError.abort("Option '%s' provided by %s contains '%s'. No such package or class name found in '%s'.",
                                         SubstrateOptionsParser.commandArgument(baseOption, value), origin, entry, container);
                     }
@@ -120,8 +121,9 @@ public class OptionClassFilterBuilder {
         }
         for (String pathStr : StringUtil.split(value, File.pathSeparator)) {
             Path path = Path.of(pathStr);
-            EconomicSet<String> packages = imageClassLoader.packages(path.toAbsolutePath().normalize().toUri());
-            if (imageClassLoader.noEntryForURI(packages)) {
+            GuestTypes guestTypes = imageClassLoader.guestTypes;
+            EconomicSet<String> packages = guestTypes.getDiscoveredPackageNames(path.toAbsolutePath().normalize().toUri());
+            if (guestTypes.noEntryForURI(packages)) {
                 throw UserError.abort("Option '%s' provided by %s contains entry '%s'. No such entry exists on class or module-path.",
                                 SubstrateOptionsParser.commandArgument(pathsOption, value), origin, pathStr);
             }

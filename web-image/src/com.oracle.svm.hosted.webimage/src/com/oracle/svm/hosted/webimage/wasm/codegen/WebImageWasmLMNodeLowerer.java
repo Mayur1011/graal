@@ -45,9 +45,9 @@ import static com.oracle.svm.webimage.wasm.types.WasmPrimitiveType.i64;
 
 import java.util.Set;
 
+import com.oracle.svm.core.graal.code.CGlobalDataDirectReference;
 import org.graalvm.nativeimage.ImageSingletons;
 
-import com.oracle.svm.core.graal.code.CGlobalDataReference;
 import com.oracle.svm.core.graal.nodes.CGlobalDataLoadAddressNode;
 import com.oracle.svm.core.graal.nodes.FloatingWordCastNode;
 import com.oracle.svm.core.graal.nodes.LoweredDeadEndNode;
@@ -463,7 +463,7 @@ public class WebImageWasmLMNodeLowerer extends WebImageWasmNodeLowerer {
     }
 
     private Instruction lowerGlobalData(CGlobalDataLoadAddressNode n) {
-        return masm().getRelocation(new CGlobalDataReference(n.getDataInfo()));
+        return masm().getRelocation(new CGlobalDataDirectReference(n.getDataInfo()));
     }
 
     private Instruction lowerFixedAccess(FixedAccessNode n) {

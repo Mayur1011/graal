@@ -26,6 +26,14 @@ package com.oracle.svm.core.reflect.target;
 
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
+import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.RuntimeClassLoading;
+import com.oracle.svm.core.hub.RuntimeClassLoading.WithRuntimeClassLoading;
+import com.oracle.svm.core.hub.crema.CremaSupport;
+
+import jdk.vm.ci.meta.ConstantPool;
+import jdk.vm.ci.meta.JavaConstant;
 
 /**
  * All usages of ConstantPool are substituted to go through
@@ -46,11 +54,54 @@ public final class Target_jdk_internal_reflect_ConstantPool {
      */
     private final int layerId;
 
-    public Target_jdk_internal_reflect_ConstantPool(int layerId) {
+    /**
+     * Used only when run-time class loading is enabled and non-null only for run-time-loaded
+     * classes.
+     */
+    ConstantPool constantPool;
+
+    public Target_jdk_internal_reflect_ConstantPool(int layerId, DynamicHub hub) {
         this.layerId = layerId;
+        if (RuntimeClassLoading.isSupported() && hub != null && hub.isRuntimeLoaded()) {
+            this.constantPool = CremaSupport.singleton().getConstantPool(hub);
+        }
     }
 
     public int getLayerId() {
         return layerId;
+    }
+
+    boolean isRuntimeLoaded() {
+        return constantPool != null;
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = WithRuntimeClassLoading.class)
+    public String getUTF8At(int index) {
+        return constantPool.lookupUtf8(index);
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = WithRuntimeClassLoading.class)
+    public double getDoubleAt(int index) {
+        return ((JavaConstant) constantPool.lookupConstant(index)).asDouble();
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = WithRuntimeClassLoading.class)
+    public float getFloatAt(int index) {
+        return ((JavaConstant) constantPool.lookupConstant(index)).asFloat();
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = WithRuntimeClassLoading.class)
+    public long getLongAt(int index) {
+        return ((JavaConstant) constantPool.lookupConstant(index)).asLong();
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = WithRuntimeClassLoading.class)
+    public int getIntAt(int index) {
+        return ((JavaConstant) constantPool.lookupConstant(index)).asInt();
     }
 }

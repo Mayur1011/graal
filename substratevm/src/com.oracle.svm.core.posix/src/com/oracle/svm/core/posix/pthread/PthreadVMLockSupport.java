@@ -30,8 +30,9 @@ import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.LogHandler;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.guest.staging.Uninterruptible;
+import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.c.CIsolateData;
 import com.oracle.svm.core.c.CIsolateDataFactory;
 import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
@@ -47,8 +48,8 @@ import com.oracle.svm.core.posix.headers.Pthread;
 import com.oracle.svm.core.posix.headers.Time;
 import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
-import org.graalvm.word.impl.Word;
 
 public abstract class PthreadVMLockSupport extends VMLockSupport {
 
@@ -67,7 +68,7 @@ public abstract class PthreadVMLockSupport extends VMLockSupport {
         if (ImageLayerBuildingSupport.buildingExtensionLayer()) {
             throw VMError.shouldNotReachHere("A VM condition is added in an extension layer, which is unsupported", source);
         }
-        return new PthreadVMCondition((PthreadVMMutex) mutexReplacer.apply(source.getMutex()), source.getConditionName());
+        return new PthreadVMCondition((PthreadVMMutex) mutexReplacer.apply(source.getMutex()), source.getName());
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
@@ -77,7 +78,8 @@ public abstract class PthreadVMLockSupport extends VMLockSupport {
         }
     }
 
-    @Uninterruptible(reason = "Error handling is interruptible.", calleeMustBe = false)
+    @NeverInline("Fatal error handling is always a slowpath.")
+    @Uninterruptible(reason = "Parts of the error handling are interruptible.", calleeMustBe = false)
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "Must not allocate in fatal error handling.")
     private static void fatalError(int result, String functionName) {
         /*
@@ -99,7 +101,7 @@ final class PthreadVMMutex extends VMMutex {
     @Platforms(Platform.HOSTED_ONLY.class)
     PthreadVMMutex(String name) {
         super(name);
-        structPointer = CIsolateDataFactory.createStruct("pthreadMutex_" + name, Pthread.pthread_mutex_t.class);
+        structPointer = CIsolateDataFactory.createStruct("mutex_" + name, Pthread.pthread_mutex_t.class);
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
@@ -163,7 +165,7 @@ final class PthreadVMCondition extends VMCondition {
 
     PthreadVMCondition(PthreadVMMutex mutex, String name) {
         super(mutex, name);
-        structPointer = CIsolateDataFactory.createStruct("pthreadCondition_" + getName(), Pthread.pthread_cond_t.class);
+        structPointer = CIsolateDataFactory.createStruct("condition_" + getName(), Pthread.pthread_cond_t.class);
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)

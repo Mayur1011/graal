@@ -41,19 +41,22 @@ import java.util.Collection;
 import java.util.function.BiConsumer;
 
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.ReservedRegisters;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.aarch64.SubstrateAArch64MacroAssembler;
-import com.oracle.svm.core.config.ConfigurationValues;
+import com.oracle.svm.core.config.ObjectLayout;
 import com.oracle.svm.core.deopt.DeoptimizationRuntime;
 import com.oracle.svm.core.deopt.DeoptimizationSupport;
 import com.oracle.svm.core.deopt.Deoptimizer;
 import com.oracle.svm.core.graal.code.AssignedLocation;
 import com.oracle.svm.core.graal.code.PatchConsumerFactory;
 import com.oracle.svm.core.graal.code.SharedCompilationResult;
+import com.oracle.svm.core.graal.code.SubstrateBackend;
 import com.oracle.svm.core.graal.code.SubstrateBackendWithAssembler;
 import com.oracle.svm.core.graal.code.SubstrateCallingConvention;
 import com.oracle.svm.core.graal.code.SubstrateCallingConventionKind;
@@ -84,6 +87,7 @@ import com.oracle.svm.core.nodes.SubstrateIndirectCallTargetNode;
 import com.oracle.svm.core.pltgot.GOTAccess;
 import com.oracle.svm.core.pltgot.PLTGOTConfiguration;
 import com.oracle.svm.core.thread.VMThreads.StatusSupport;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.asm.BranchTargetOutOfBoundsException;
@@ -105,6 +109,7 @@ import jdk.graal.compiler.core.aarch64.AArch64NodeMatchRules;
 import jdk.graal.compiler.core.common.CompilationIdentifier;
 import jdk.graal.compiler.core.common.CompressEncoding;
 import jdk.graal.compiler.core.common.LIRKind;
+import jdk.graal.compiler.core.common.NumUtil;
 import jdk.graal.compiler.core.common.alloc.RegisterAllocationConfig;
 import jdk.graal.compiler.core.common.calc.Condition;
 import jdk.graal.compiler.core.common.memory.MemoryExtendKind;
@@ -166,6 +171,7 @@ import jdk.graal.compiler.nodes.spi.NodeLIRBuilderTool;
 import jdk.graal.compiler.nodes.spi.NodeValueMap;
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.phases.BasePhase;
+import jdk.graal.compiler.phases.PreLIRGraphVerifier;
 import jdk.graal.compiler.phases.common.AddressLoweringByUsePhase;
 import jdk.graal.compiler.phases.util.Providers;
 import jdk.graal.compiler.vector.lir.aarch64.AArch64SimdLIRKindTool;
@@ -379,7 +385,7 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
                          */
                         if (SubstrateUtil.HOSTED) {
                             crb.recordInlineDataInCode(object);
-                            int referenceSize = ConfigurationValues.getObjectLayout().getReferenceSize();
+                            int referenceSize = ObjectLayout.singleton().getReferenceSize();
                             if (referenceSize == 4) {
                                 masm.mov(addressScratch, 0xDEADDEAD, true);
                             } else {
@@ -722,7 +728,7 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
 
         @Override
         public int getArrayLengthOffset() {
-            return ConfigurationValues.getObjectLayout().getArrayLengthOffset();
+            return ObjectLayout.singleton().getArrayLengthOffset();
         }
 
         @Override
@@ -961,9 +967,10 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
         }
 
         @Override
+        @Platforms(Platform.HOSTED_ONLY.class)
         public void emitCGlobalDataLoadAddress(CGlobalDataLoadAddressNode node) {
             Variable result = gen.newVariable(gen.getLIRKindTool().getWordKind());
-            append(new AArch64CGlobalDataLoadAddressOp(node.getDataInfo(), result));
+            append(new AArch64CGlobalDataDirectLoadAddressOp(node.getDataInfo(), result));
             setResult(node, result);
         }
 
@@ -1028,6 +1035,16 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
         }
 
         protected void makeFrame(CompilationResultBuilder crb, AArch64MacroAssembler masm, int totalFrameSize, int frameSize) {
+            if (SubstrateBackend.shouldRandomizeRuntimeCodeOffset(method)) {
+                SubstrateBackend.randomizeRuntimeCodeOffset(crb, offset -> {
+                    int instructionSize = Integer.BYTES;
+                    int instructionCount = NumUtil.divideAndRoundUp(offset, instructionSize);
+                    for (int i = 0; i < instructionCount; i++) {
+                        masm.brk(0);
+                    }
+                });
+            }
+
             boolean preserveFramePointer = ((SubstrateAArch64RegisterConfig) crb.frameMap.getRegisterConfig()).shouldPreserveFramePointer();
             // based on HotSpot's macroAssembler_aarch64.cpp MacroAssembler::build_frame
 
@@ -1338,7 +1355,7 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
              * WARNING: must NOT have side effects. Preserve the flags register!
              */
             Register resultReg = getResultRegister();
-            int referenceSize = ConfigurationValues.getObjectLayout().getReferenceSize();
+            int referenceSize = ObjectLayout.singleton().getReferenceSize();
             Constant inputConstant = asConstantValue(getInput()).getConstant();
             if (masm.inlineObjects()) {
                 crb.recordInlineDataInCode(inputConstant);
@@ -1417,12 +1434,17 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
                 assert InterpreterSupport.isEnabled();
                 yield new AArch64InterpreterStubs.InterpreterLeaveStubContext(method);
             }
+            case InterpreterDeoptEntryPointStub -> {
+                assert InterpreterSupport.isEnabled();
+                assert SubstrateOptions.useRistretto();
+                yield new AArch64InterpreterStubs.InterpreterDeoptEntryPointStubFrameContext(method, callingConvention);
+            }
             case NoDeoptStub -> new SubstrateAArch64FrameContext(method);
         };
     }
 
     protected static boolean isVectorizationTarget() {
-        return ((AArch64) ConfigurationValues.getTarget().arch).getFeatures().contains(AArch64.CPUFeature.ASIMD);
+        return ((AArch64) SubstrateTarget.getArchitecture()).getFeatures().contains(AArch64.CPUFeature.ASIMD);
     }
 
     protected AArch64ArithmeticLIRGenerator createArithmeticLIRGen(AllocatableValue nullRegisterValue) {
@@ -1535,6 +1557,7 @@ public class SubstrateAArch64Backend extends SubstrateBackendWithAssembler<Subst
 
     @Override
     public NodeLIRBuilderTool newNodeLIRBuilder(StructuredGraph graph, LIRGeneratorTool lirGen) {
+        assert PreLIRGraphVerifier.createInstance(graph.getOptions()).verify(graph);
         AArch64NodeMatchRules nodeMatchRules = createMatchRules(lirGen);
         return new SubstrateAArch64NodeLIRBuilder(graph, lirGen, nodeMatchRules);
     }

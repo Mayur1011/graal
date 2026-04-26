@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.interpreter;
 
-import static com.oracle.svm.guest.staging.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
@@ -34,20 +34,27 @@ import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.AlwaysInline;
 import com.oracle.svm.core.BuildPhaseProvider;
 import com.oracle.svm.core.FrameAccess;
-import com.oracle.svm.guest.staging.Uninterruptible;
+import com.oracle.svm.core.SubstrateTarget;
+import com.oracle.svm.core.code.CodeInfoQueryResult;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
 import com.oracle.svm.core.code.FrameSourceInfo;
+import com.oracle.svm.core.deopt.DeoptimizedFrame;
+import com.oracle.svm.core.deopt.Deoptimizer;
+import com.oracle.svm.core.deopt.SubstrateInstalledCode;
 import com.oracle.svm.core.graal.code.PreparedSignature;
 import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.UnknownPrimitiveField;
 import com.oracle.svm.core.log.Log;
+import com.oracle.svm.shared.AlwaysInline;
+import com.oracle.svm.shared.Uninterruptible;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jdk.vm.ci.meta.ResolvedJavaType;
+import jdk.vm.ci.meta.Signature;
 
 /* Enables unoptimized execution of AOT compiled methods with an interpreter. The SVM
  * constraints apply, e.g. this itself does not enable class loading. */
@@ -90,7 +97,24 @@ public abstract class InterpreterSupport {
     @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Used for crash log")
     public abstract void logInterpreterFrame(Log log, FrameInfoQueryResult frameInfo, Pointer sp);
 
-    public abstract PreparedSignature prepareSignature(ResolvedJavaMethod method);
+    /**
+     * Constructs an interpreter-target deoptimized frame for {@code installedCode}.
+     */
+    public abstract DeoptimizedFrame createInterpreterDeoptimizedFrame(SubstrateInstalledCode installedCode, Deoptimizer deoptimizer, CodePointer pc,
+                    FrameInfoQueryResult frameInfo, CodeInfoQueryResult physicalFrame, boolean eager);
+
+    /**
+     * Continues execution from an interpreter-target deoptimized frame.
+     */
+    @Uninterruptible(reason = "Invoked from deoptimization stubs while transitioning to interpreter execution.")
+    public abstract UnsignedWord continueInterpreterDeoptimization(DeoptimizedFrame frame, Pointer originalStackPointer, UnsignedWord gpReturnValue, UnsignedWord fpReturnValue,
+                    boolean hasException);
+
+    public PreparedSignature prepareSignature(ResolvedJavaMethod method) {
+        return prepareSignature(method.getSignature(), method.hasReceiver(), method.getDeclaringClass());
+    }
+
+    public abstract PreparedSignature prepareSignature(Signature signature, boolean hasReceiver, ResolvedJavaType accessingClass);
 
     @Platforms(Platform.HOSTED_ONLY.class)
     public static void setLeaveStubPointer(CFunctionPointer leaveStubPointer, int length) {
@@ -126,7 +150,7 @@ public abstract class InterpreterSupport {
     @AlwaysInline("GC performance")
     @Uninterruptible(reason = "Called by GC walker", mayBeInlined = true)
     public static void walkInterpreterLeaveStubFrame(ObjectReferenceVisitor visitor, Pointer actualSP, Pointer sp) {
-        int wordSize = FrameAccess.wordSize();
+        int wordSize = SubstrateTarget.getWordSize();
         long gcReferenceMap = actualSP.readLong(2 * wordSize);
 
         /* Visit object references passed on the stack */

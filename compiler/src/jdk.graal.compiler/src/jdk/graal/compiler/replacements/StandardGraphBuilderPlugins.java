@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@ import static jdk.graal.compiler.nodes.NamedLocationIdentity.OFF_HEAP_LOCATION;
 import static jdk.graal.compiler.replacements.BoxingSnippets.Templates.getCacheClass;
 import static jdk.graal.compiler.replacements.nodes.AESNode.CryptMode.DECRYPT;
 import static jdk.graal.compiler.replacements.nodes.AESNode.CryptMode.ENCRYPT;
+import static jdk.vm.ci.meta.DeoptimizationAction.InvalidateRecompile;
 import static jdk.vm.ci.meta.DeoptimizationAction.InvalidateReprofile;
 import static jdk.vm.ci.meta.DeoptimizationAction.None;
 import static jdk.vm.ci.meta.DeoptimizationReason.TransferToInterpreter;
@@ -191,6 +192,8 @@ import jdk.graal.compiler.options.LibGraalSupport;
 import jdk.graal.compiler.replacements.nodes.AESNode;
 import jdk.graal.compiler.replacements.nodes.AESNode.CryptMode;
 import jdk.graal.compiler.replacements.nodes.ArrayEqualsNode;
+import jdk.graal.compiler.replacements.nodes.Base64DecodeBlockNode;
+import jdk.graal.compiler.replacements.nodes.Base64EncodeBlockNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMulAddNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMultiplyToLenNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerSquareToLenNode;
@@ -200,6 +203,7 @@ import jdk.graal.compiler.replacements.nodes.CountLeadingZerosNode;
 import jdk.graal.compiler.replacements.nodes.CountPositivesNode;
 import jdk.graal.compiler.replacements.nodes.CountTrailingZerosNode;
 import jdk.graal.compiler.replacements.nodes.CounterModeAESNode;
+import jdk.graal.compiler.replacements.nodes.ElectronicCodeBookAESNode;
 import jdk.graal.compiler.replacements.nodes.EncodeArrayNode;
 import jdk.graal.compiler.replacements.nodes.GHASHProcessBlocksNode;
 import jdk.graal.compiler.replacements.nodes.LogNode;
@@ -254,7 +258,8 @@ public class StandardGraphBuilderPlugins {
                     InvocationPlugins plugins,
                     boolean useExactMathPlugins,
                     boolean explicitUnsafeNullChecks,
-                    boolean supportsStubBasedPlugins) {
+                    boolean supportsStubBasedPlugins,
+                    boolean enableAesPlugins) {
         registerObjectPlugins(plugins);
         registerClassPlugins(plugins);
         registerMathPlugins(plugins, useExactMathPlugins);
@@ -282,9 +287,12 @@ public class StandardGraphBuilderPlugins {
 
         if (supportsStubBasedPlugins) {
             registerArraysPlugins(plugins);
-            registerAESPlugins(plugins);
+            if (enableAesPlugins) {
+                registerAESPlugins(plugins);
+            }
             registerGHASHPlugin(plugins);
             registerBigIntegerPlugins(plugins);
+            registerBase64Plugins(plugins);
             registerMessageDigestPlugins(plugins);
             registerStringCodingPlugins(plugins);
         }
@@ -1759,6 +1767,7 @@ public class StandardGraphBuilderPlugins {
 
         r.register(new DeoptimizePlugin(snippetReflection, None, TransferToInterpreter, false, "deoptimize"));
         r.register(new DeoptimizePlugin(snippetReflection, InvalidateReprofile, TransferToInterpreter, false, "deoptimizeAndInvalidate"));
+        r.register(new DeoptimizePlugin(snippetReflection, InvalidateRecompile, TransferToInterpreter, false, "deoptimizeAndRecompile"));
         r.register(new DeoptimizePlugin(snippetReflection, null, null, null,
                         "deoptimize", DeoptimizationAction.class, DeoptimizationReason.class, boolean.class));
         r.register(new DeoptimizePlugin(snippetReflection, null, null, null,
@@ -1930,14 +1939,14 @@ public class StandardGraphBuilderPlugins {
                         return true;
                     }
                 });
-                r.register(new RequiredInvocationPlugin("opaque", javaClass) {
+                r.register(new RequiredInlineOnlyInvocationPlugin("opaque", javaClass) {
                     @Override
                     public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode value) {
                         b.addPush(kind, new OpaqueValueNode(value));
                         return true;
                     }
                 });
-                r.register(new RequiredInvocationPlugin("opaqueUntilAfter", javaClass, GraphState.StageFlag.class) {
+                r.register(new RequiredInlineOnlyInvocationPlugin("opaqueUntilAfter", javaClass, GraphState.StageFlag.class) {
                     @Override
                     public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode value, ValueNode stageFlag) {
                         GraphState.StageFlag foldAfter = Objects.requireNonNull(asConstantObject(b, GraphState.StageFlag.class, stageFlag), stageFlag + " must be a non-null compile time constant");
@@ -2433,6 +2442,43 @@ public class StandardGraphBuilderPlugins {
         }
     }
 
+    public abstract static class ElectronicCodeBookCryptPlugin extends AESCryptDelegatePlugin {
+
+        public ElectronicCodeBookCryptPlugin(CryptMode mode) {
+            super(mode, mode.isEncrypt() ? "implECBEncrypt" : "implECBDecrypt",
+                            Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class);
+        }
+
+        protected abstract boolean canApply(GraphBuilderContext b);
+
+        @Override
+        public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode in, ValueNode inOffset, ValueNode len, ValueNode out, ValueNode outOffset) {
+            if (!canApply(b)) {
+                return false;
+            }
+            try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                ResolvedJavaType receiverType = targetMethod.getDeclaringClass();
+                ResolvedJavaType typeAESCrypt;
+                try {
+                    typeAESCrypt = getTypeAESCrypt(b.getMetaAccess(), receiverType);
+                } catch (ClassNotFoundException e) {
+                    return false;
+                }
+                ValueNode nonNullReceiver = receiver.get(true);
+                ValueNode inAddr = helper.arrayElementPointer(in, JavaKind.Byte, inOffset);
+                ValueNode outAddr = helper.arrayElementPointer(out, JavaKind.Byte, outOffset);
+                ValueNode kAddr = readEmbeddedAESCryptKArrayStart(b, helper, receiverType, typeAESCrypt, nonNullReceiver);
+                helper.emitFinalReturn(JavaKind.Int, new ElectronicCodeBookAESNode(inAddr, outAddr, kAddr, len, mode));
+                return true;
+            }
+        }
+
+        @Override
+        public final boolean isApplicable(Architecture arch) {
+            return ElectronicCodeBookAESNode.isSupported(arch);
+        }
+    }
+
     private static void registerAESPlugins(InvocationPlugins plugins) {
         Registration r = new Registration(plugins, "com.sun.crypto.provider.AESCrypt");
         r.register(new AESCryptPlugin(ENCRYPT));
@@ -2695,6 +2741,58 @@ public class StandardGraphBuilderPlugins {
                     b.addPush(JavaKind.Int, new EncodeArrayNode(src, dst, len, ISO_8859_1, JavaKind.Char));
                     return true;
                 }
+            }
+        });
+    }
+
+    private static void registerBase64Plugins(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "java.util.Base64$Encoder");
+        r.register(new ConditionalInvocationPlugin("encodeBlock", Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class, boolean.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode src,
+                            ValueNode sp, ValueNode sl, ValueNode dst, ValueNode dp, ValueNode isURL) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    receiver.get(true);
+                    ValueNode srcStart = helper.arrayStart(src, JavaKind.Byte);
+                    ValueNode dstStart = helper.arrayStart(dst, JavaKind.Byte);
+                    b.add(new Base64EncodeBlockNode(srcStart, sp, sl, dstStart, dp, isURL));
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return Base64EncodeBlockNode.isSupported(arch);
+            }
+
+            @Override
+            public boolean inlineOnly() {
+                return true;
+            }
+        });
+
+        r = new Registration(plugins, "java.util.Base64$Decoder");
+        r.register(new ConditionalInvocationPlugin("decodeBlock", Receiver.class, byte[].class, int.class, int.class, byte[].class, int.class, boolean.class, boolean.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode src,
+                            ValueNode sp, ValueNode sl, ValueNode dst, ValueNode dp, ValueNode isURL, ValueNode isMime) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    receiver.get(true);
+                    ValueNode srcStart = helper.arrayStart(src, JavaKind.Byte);
+                    ValueNode dstStart = helper.arrayStart(dst, JavaKind.Byte);
+                    b.addPush(JavaKind.Int, new Base64DecodeBlockNode(srcStart, sp, sl, dstStart, dp, isURL, isMime));
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return Base64DecodeBlockNode.isSupported(arch);
+            }
+
+            @Override
+            public boolean inlineOnly() {
+                return true;
             }
         });
     }

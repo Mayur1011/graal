@@ -891,9 +891,9 @@ def test():
     execute("delete breakpoints")
 
     # check if java.lang.Class and the hub field is resolved correctly
-    exec_string = execute(f"break hello.Hello::checkClassType")
+    exec_string = execute("break hello.Hello::checkClassType")
     rexp = fr"Breakpoint {digits_pattern} at {address_pattern}: file hello/Hello\.java, line {digits_pattern}\."
-    checker = Checker(fr"break hello.Hello::checkClassType", rexp)
+    checker = Checker(r"break hello.Hello::checkClassType", rexp)
     checker.check(exec_string)
 
     execute("continue")

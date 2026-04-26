@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2022, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,10 +39,13 @@ import jdk.graal.compiler.replacements.nodes.ArrayRegionEqualsWithMaskNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMulAddNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMultiplyToLenNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerSquareToLenNode;
+import jdk.graal.compiler.replacements.nodes.Base64DecodeBlockNode;
+import jdk.graal.compiler.replacements.nodes.Base64EncodeBlockNode;
 import jdk.graal.compiler.replacements.nodes.CalcStringAttributesNode;
 import jdk.graal.compiler.replacements.nodes.CipherBlockChainingAESNode;
 import jdk.graal.compiler.replacements.nodes.CountPositivesNode;
 import jdk.graal.compiler.replacements.nodes.CounterModeAESNode;
+import jdk.graal.compiler.replacements.nodes.ElectronicCodeBookAESNode;
 import jdk.graal.compiler.replacements.nodes.EncodeArrayNode;
 import jdk.graal.compiler.replacements.nodes.GHASHProcessBlocksNode;
 import jdk.graal.compiler.replacements.nodes.IndexOfZeroNode;
@@ -69,6 +72,8 @@ import jdk.graal.compiler.replacements.nodes.VectorizedMismatchNode;
                 StringCodepointIndexToByteIndexNode.class,
                 CountPositivesNode.class,
                 EncodeArrayNode.class,
+                Base64EncodeBlockNode.class,
+                Base64DecodeBlockNode.class,
                 VectorizedMismatchNode.class,
                 VectorizedHashCodeNode.class,
                 ArrayRegionEqualsWithMaskNode.class,
@@ -76,6 +81,7 @@ import jdk.graal.compiler.replacements.nodes.VectorizedMismatchNode;
                 AESNode.class,
                 CounterModeAESNode.class,
                 CipherBlockChainingAESNode.class,
+                ElectronicCodeBookAESNode.class,
                 GHASHProcessBlocksNode.class,
                 BigIntegerMultiplyToLenNode.class,
                 BigIntegerMulAddNode.class,

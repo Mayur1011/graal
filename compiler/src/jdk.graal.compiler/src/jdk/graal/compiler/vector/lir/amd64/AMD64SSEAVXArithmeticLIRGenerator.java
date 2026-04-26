@@ -190,6 +190,7 @@ import jdk.graal.compiler.lir.amd64.vector.AMD64VectorGather;
 import jdk.graal.compiler.lir.amd64.vector.AMD64VectorMove;
 import jdk.graal.compiler.lir.amd64.vector.AMD64VectorShuffle;
 import jdk.graal.compiler.lir.amd64.vector.AMD64VectorUnary;
+import jdk.graal.compiler.lir.amd64.vector.AVXByteCompress;
 import jdk.graal.compiler.lir.asm.ArrayDataPointerConstant;
 import jdk.graal.compiler.vector.nodes.simd.SimdConstant;
 import jdk.graal.compiler.vector.nodes.simd.SimdStamp;
@@ -1463,6 +1464,15 @@ public class AMD64SSEAVXArithmeticLIRGenerator extends AMD64VectorArithmeticLIRG
 
     @Override
     public Variable emitVectorCompress(LIRKind resultKind, Value source, Value mask) {
+        AMD64Kind kind = (AMD64Kind) resultKind.getPlatformKind();
+        AVXSize size = AVXKind.getRegisterSize(kind);
+        if (kind.getScalar() == AMD64Kind.BYTE && supports(CPUFeature.AVX2) && supports(CPUFeature.POPCNT) && (size == AVXSize.XMM || size == AVXSize.YMM)) {
+            Variable result = getLIRGen().newVariable(resultKind);
+            Variable scalarMask = getLIRGen().newVariable(LIRKind.value(AMD64Kind.DWORD));
+            getLIRGen().append(new AMD64VectorUnary.AVXUnaryRROp(VPMOVMSKB, size, scalarMask, asAllocatable(mask)));
+            getLIRGen().append(new AVXByteCompress.CompressBytesWithMaskOp(getLIRGen(), asAllocatable(result), asAllocatable(source), asAllocatable(scalarMask)));
+            return result;
+        }
         throw GraalError.shouldNotReachHere("AVX/AVX2 does not support compress/expand");
     }
 

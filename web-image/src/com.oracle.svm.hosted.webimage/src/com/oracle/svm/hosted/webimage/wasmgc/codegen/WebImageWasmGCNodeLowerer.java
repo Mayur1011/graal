@@ -337,8 +337,12 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
      *
      * @see #optionalDowncast(Instruction, ValueNode, ResolvedJavaType, ResolvedJavaType)
      */
-    private Instruction optionalDowncast(Instruction original, ValueNode node, ResolvedJavaType fromType) {
-        return optionalDowncast(original, node, fromType, node.stamp(NodeView.DEFAULT));
+    private Instruction optionalDowncast(Instruction original, ResolvedJavaType fromType, ValueNode toNodeStamp) {
+        return optionalDowncast(original, toNodeStamp, fromType, toNodeStamp.stamp(NodeView.DEFAULT));
+    }
+
+    private Instruction optionalDowncast(Instruction original, ValueNode fromNode, ResolvedJavaType toType) {
+        return optionalDowncast(original, fromNode, fromNode.stamp(NodeView.DEFAULT), toType);
     }
 
     private Instruction optionalDowncast(Instruction original, ValueNode node, Stamp fromStamp, ResolvedJavaType toType) {
@@ -368,7 +372,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
      * stronger types in the Wasm field or function declarations.
      *
      * @param original The instruction produced from the node
-     * @param node Node being lowered
+     * @param node Node being lowered. Only required for debugging, not actually used.
      * @param fromType The corresponding Java type produced by the instruction.
      * @param toType The type that should pre produced
      * @return The original instruction, optionally wrapped in a cast.
@@ -466,7 +470,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
         JavaConstant hubConstant = masm.getProviders().getConstantReflection().asJavaClass(newMultiArray.type());
 
         Instruction multiArray = lowerSubstrateForeignCall(WasmGCAllocationSupport.NEW_MULTI_ARRAY, lowerConstant(hubConstant), dimensionsArrayStruct);
-        return optionalDowncast(multiArray, newMultiArray, metaAccess.lookupJavaType(Object.class));
+        return optionalDowncast(multiArray, metaAccess.lookupJavaType(Object.class), newMultiArray);
     }
 
     private Instruction lowerReadIdentityHashCode(ReadIdentityHashCodeNode readIdentityHashCode) {
@@ -524,7 +528,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
             } else {
                 dispatch = new Instruction.Call(dispatchAccessTemplate.requestReadFunctionId(accessKind), base, offset);
             }
-            return optionalDowncast(dispatch, n, returnedType);
+            return optionalDowncast(dispatch, returnedType, n);
         } else {
             throw GraalError.shouldNotReachHere(n.toString());
         }
@@ -540,7 +544,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
         Instruction paramGet = super.lowerParam(param);
 
         ResolvedJavaType fromType = masm.compilationResult.getParamTypes()[param.index()];
-        return optionalDowncast(paramGet, param, fromType);
+        return optionalDowncast(paramGet, fromType, param);
     }
 
     private WebImageWasmGCIds.StaticField getStaticFieldId(ResolvedJavaField field) {
@@ -572,7 +576,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
          * Due to strengthened stamps, the LoadFieldNode's stamp may be stronger than the declared
          * field type. Thus, we sometimes require an explicit downcast after field reads.
          */
-        return optionalDowncast(getter, node, (ResolvedJavaType) field.getType());
+        return optionalDowncast(getter, (ResolvedJavaType) field.getType(), node);
     }
 
     private Instruction lowerStoreField(StoreFieldNode node) {
@@ -768,8 +772,16 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
         ResolvedJavaType boxing = metaAccess.lookupJavaType(boxedKind.toBoxedJavaClass());
         ResolvedJavaField valueField = AbstractBoxingNode.getValueField(boxing);
         WebImageWasmGCIds.JavaStruct boxedStruct = masm().idFactory.newJavaStruct(boxing);
+        ValueNode boxedValueNode = node.getValue();
+        /*
+         * The value may have a stamp that does not match the boxed type. This can happen when the
+         * analysis determines that the value is guaranteed to have the required type, but does not
+         * introduce a PiNode or otherwise adapt the stamp. Casting the result of
+         * MethodHandle.invoke to a primitive can exhibit this behavior.
+         */
+        Instruction boxedValue = optionalDowncast(lowerExpression(boxedValueNode), boxedValueNode, boxing);
 
-        return new Instruction.StructGet(boxedStruct, masm().idFactory.newJavaField(valueField), Extension.forKind(boxedKind), lowerExpression(node.getValue()));
+        return new Instruction.StructGet(boxedStruct, masm().idFactory.newJavaField(valueField), Extension.forKind(boxedKind), boxedValue);
     }
 
     protected Instruction lowerPi(PiNode n, WasmIRWalker.Requirements reqs) {
@@ -861,7 +873,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
              * The analysis may determine that this invoke returns a subtype of the declared return
              * type, making an explicit cast necessary.
              */
-            return optionalDowncast(call, node, returnType);
+            return optionalDowncast(call, returnType, node);
         }
     }
 
@@ -1013,7 +1025,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
          * The foreign call may have a stronger stamp than the return type of the method it refers
          * to, in which case, a downcast is necessary
          */
-        return optionalDowncast(super.lowerForeignCall(n), n.asNode(), returnedType);
+        return optionalDowncast(super.lowerForeignCall(n), returnedType, n.asNode());
     }
 
     /**
