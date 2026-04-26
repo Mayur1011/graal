@@ -83,23 +83,24 @@ import jdk.vm.ci.meta.SpeculationLog;
 import jdk.vm.ci.meta.TriState;
 import jdk.vm.ci.runtime.JVMCICompiler;
 
-public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JVMCICompilerShadow, GraalCompiler.RequestedCrashHandler {
+public class HotSpotGraalCompiler
+    implements GraalJVMCICompiler, Cancellable, JVMCICompilerShadow, GraalCompiler.RequestedCrashHandler {
 
   public static final class Options {
     @Option(help = "If non-zero, converts an exception triggered by the CrashAt option into a fatal error " +
-    "if a non-null pointer was passed in the _fatal option to JNI_CreateJavaVM. " +
-    "The value of this option is the number of milliseconds to sleep before calling _fatal. " +
-    "This option exists for the purpose of testing fatal error handling in libgraal.") //
-      public static final OptionKey<Integer> CrashAtIsFatal = new OptionKey<>(0);
+        "if a non-null pointer was passed in the _fatal option to JNI_CreateJavaVM. " +
+        "The value of this option is the number of milliseconds to sleep before calling _fatal. " +
+        "This option exists for the purpose of testing fatal error handling in libgraal.") //
+    public static final OptionKey<Integer> CrashAtIsFatal = new OptionKey<>(0);
     @Option(help = "The fully qualified name of a no-arg, void, static method to be invoked " +
-    "in HotSpot when a HotSpotGraalRuntime is being shutdown." +
-    "This option exists for the purpose of testing callbacks in this context.") //
-      public static final OptionKey<String> OnShutdownCallback = new OptionKey<>(null);
+        "in HotSpot when a HotSpotGraalRuntime is being shutdown." +
+        "This option exists for the purpose of testing callbacks in this context.") //
+    public static final OptionKey<String> OnShutdownCallback = new OptionKey<>(null);
     @Option(help = "Replaces first exception thrown by the CrashAt option with an OutOfMemoryError. " +
-    "Subsequently CrashAt exceptions are suppressed. " +
-    "This option exists to test HeapDumpOnOutOfMemoryError. " +
-    "See the MethodFilter option for the pattern syntax.") //
-      public static final OptionKey<Boolean> CrashAtThrowsOOME = new OptionKey<>(false);
+        "Subsequently CrashAt exceptions are suppressed. " +
+        "This option exists to test HeapDumpOnOutOfMemoryError. " +
+        "See the MethodFilter option for the pattern syntax.") //
+    public static final OptionKey<Boolean> CrashAtThrowsOOME = new OptionKey<>(false);
   }
 
   private static final Unsafe UNSAFE = Unsafe.getUnsafe();
@@ -109,18 +110,25 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
   private final BootstrapWatchDog bootstrapWatchDog;
   private List<DebugDumpHandlersFactory> factories;
 
-  HotSpotGraalCompiler(HotSpotJVMCIRuntime jvmciRuntime, HotSpotGraalRuntimeProvider graalRuntime, OptionValues options) {
+  HotSpotGraalCompiler(HotSpotJVMCIRuntime jvmciRuntime, HotSpotGraalRuntimeProvider graalRuntime,
+      OptionValues options) {
+    // Start point (most probably) for all compilation requests.
     System.out.println("HotSpotGraalCompiler created with options: " + options);
     this.jvmciRuntime = jvmciRuntime;
     this.graalRuntime = graalRuntime;
     // It is sufficient to have one compilation counter object per compiler object.
-    this.compilationCounters = CompilationCounters.Options.CompilationCountLimit.getValue(options) > 0 ? new CompilationCounters(options) : null;
-    this.bootstrapWatchDog = graalRuntime.isBootstrapping() && !DebugOptions.BootstrapInitializeOnly.getValue(options) ? BootstrapWatchDog.maybeCreate(graalRuntime) : null;
+    this.compilationCounters = CompilationCounters.Options.CompilationCountLimit.getValue(options) > 0
+        ? new CompilationCounters(options)
+        : null;
+    this.bootstrapWatchDog = graalRuntime.isBootstrapping() && !DebugOptions.BootstrapInitializeOnly.getValue(options)
+        ? BootstrapWatchDog.maybeCreate(graalRuntime)
+        : null;
   }
 
   public List<DebugDumpHandlersFactory> getDebugHandlersFactories() {
     if (factories == null) {
-      factories = Collections.singletonList(new GraalDebugHandlersFactory(graalRuntime.getHostProviders().getSnippetReflection()));
+      factories = Collections
+          .singletonList(new GraalDebugHandlersFactory(graalRuntime.getHostProviders().getSnippetReflection()));
     }
     return factories;
   }
@@ -142,7 +150,8 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
   }
 
   @SuppressWarnings("try")
-  public CompilationRequestResult compileMethod(CompilationRequest request, boolean installAsDefault, OptionValues initialOptions) {
+  public CompilationRequestResult compileMethod(CompilationRequest request, boolean installAsDefault,
+      OptionValues initialOptions) {
     try (CompilationContext scope = HotSpotGraalServices.openLocalCompilationContext(request)) {
       if (graalRuntime.isShutdown()) {
         return HotSpotCompilationRequestResult.failure("Shutdown entered", true);
@@ -152,7 +161,9 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
 
       if (graalRuntime.isBootstrapping()) {
         if (DebugOptions.BootstrapInitializeOnly.getValue(initialOptions)) {
-          return HotSpotCompilationRequestResult.failure(String.format("Skip compilation because %s is enabled", DebugOptions.BootstrapInitializeOnly.getName()), true);
+          return HotSpotCompilationRequestResult.failure(
+              String.format("Skip compilation because %s is enabled", DebugOptions.BootstrapInitializeOnly.getName()),
+              true);
         }
         if (bootstrapWatchDog != null) {
           if (bootstrapWatchDog.hitCriticalCompilationRateOrTimeout()) {
@@ -163,11 +174,13 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
       }
 
       HotSpotCompilationRequest hsRequest = (HotSpotCompilationRequest) request;
-      CompilationTask task = new CompilationTask(jvmciRuntime, this, hsRequest, true, shouldRetainLocalVariables(hsRequest.getJvmciEnv()), shouldUsePreciseUnresolvedDeopts(), installAsDefault);
+      CompilationTask task = new CompilationTask(jvmciRuntime, this, hsRequest, true,
+          shouldRetainLocalVariables(hsRequest.getJvmciEnv()), shouldUsePreciseUnresolvedDeopts(), installAsDefault);
       OptionValues options = task.filterOptions(initialOptions);
       int decompileCount = HotSpotGraalServices.getDecompileCount(task.getMethod());
       if (decompileCount != -1) {
-        if (CompilationTask.Options.MethodRecompilationLimit.getValue(options) >= 0 && decompileCount >= CompilationTask.Options.MethodRecompilationLimit.getValue(options)) {
+        if (CompilationTask.Options.MethodRecompilationLimit.getValue(options) >= 0
+            && decompileCount >= CompilationTask.Options.MethodRecompilationLimit.getValue(options)) {
           if (CompilationFailureAction.getValue(options) == CompilationWrapper.ExceptionAction.Diagnose) {
             // If Diagnose is enabled then allow the compile to proceed and throw an
             // exception afterwards to allow the retry machinery to capture a graph.
@@ -178,32 +191,38 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
             // produce more useful diagnostics. The default HotSpot limit of 400 is
             // probably too large as well.
             ProfilingInfo info = task.getProfileProvider().getProfilingInfo(null, request.getMethod());
-            return HotSpotCompilationRequestResult.failure("too many decompiles: " + decompileCount + " " + ForceDeoptSpeculationPhase.getDeoptSummary(info), false);
+            return HotSpotCompilationRequestResult.failure(
+                "too many decompiles: " + decompileCount + " " + ForceDeoptSpeculationPhase.getDeoptSummary(info),
+                false);
           }
 
         } else if (CompilationTask.Options.DetectRecompilationLimit.getValue(options) >= 0 &&
             decompileCount >= CompilationTask.Options.DetectRecompilationLimit.getValue(options)) {
           task.checkRecompileCycle = true;
-            }
+        }
       }
 
       HotSpotVMConfigAccess config = new HotSpotVMConfigAccess(graalRuntime.getVMConfig().getStore());
       LibGraalSupport libgraal = LibGraalSupport.INSTANCE;
       boolean oneIsolatePerCompilation = libgraal != null &&
-        config.getFlag("JVMCIThreadsPerNativeLibraryRuntime", Integer.class, 0) == 1 &&
-        config.getFlag("JVMCICompilerIdleDelay", Integer.class, 1000) == 0;
+          config.getFlag("JVMCIThreadsPerNativeLibraryRuntime", Integer.class, 0) == 1 &&
+          config.getFlag("JVMCICompilerIdleDelay", Integer.class, 1000) == 0;
       ThreadFactory factory = libgraal != null ? HotSpotGraalServiceThread::new : null;
-      try (CompilationWatchDog w1 = CompilationWatchDog.watch(task.getCompilationIdentifier(), options, oneIsolatePerCompilation, task, factory);
+      try (
+          CompilationWatchDog w1 = CompilationWatchDog.watch(task.getCompilationIdentifier(), options,
+              oneIsolatePerCompilation, task, factory);
           BootstrapWatchDog.Watch w2 = bootstrapWatchDog == null ? null : bootstrapWatchDog.watch(request);
           CompilationAlarm alarm = CompilationAlarm.trackCompilationPeriod(options);) {
         if (compilationCounters != null) {
           compilationCounters.countCompilation(method);
         }
-        try (DebugContext debug = graalRuntime.openDebugContext(options, task.getCompilationIdentifier(), method, getDebugHandlersFactories(), DebugContext.getDefaultLogStream());
+        try (
+            DebugContext debug = graalRuntime.openDebugContext(options, task.getCompilationIdentifier(), method,
+                getDebugHandlersFactories(), DebugContext.getDefaultLogStream());
             Activation a = debug.activate()) {
           return Objects.requireNonNull(task.runCompilation(debug));
-            }
-          }
+        }
+      }
     }
   }
 
@@ -228,14 +247,20 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
   private boolean shouldUsePreciseUnresolvedDeopts() {
     GraalHotSpotVMConfig config = graalRuntime.getVMConfig();
     /*
-     * When running with -Xcomp, use precise deopts for unresolved elements. This is necessary
-     * to avoid deopt loops: An imprecise deopt could cause us to deoptimize even if the path
-     * using the unresolved element is not executed. As -Xcomp forces compilations, this would
-     * cause us to recompile the method in the same way, so we would trigger the same imprecise
+     * When running with -Xcomp, use precise deopts for unresolved elements. This is
+     * necessary
+     * to avoid deopt loops: An imprecise deopt could cause us to deoptimize even if
+     * the path
+     * using the unresolved element is not executed. As -Xcomp forces compilations,
+     * this would
+     * cause us to recompile the method in the same way, so we would trigger the
+     * same imprecise
      * deopt again.
      *
-     * Without -Xcomp we rely on normal warmup in the interpreter to resolve unresolved items
-     * and prune never executed paths, and we use speculations for additional protection against
+     * Without -Xcomp we rely on normal warmup in the interpreter to resolve
+     * unresolved items
+     * and prune never executed paths, and we use speculations for additional
+     * protection against
      * deopt loops.
      */
     return config.xcompMode;
@@ -246,17 +271,22 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
     return graalRuntime.isShutdown();
   }
 
-  public StructuredGraph createGraph(ResolvedJavaMethod method, int entryBCI, ProfileProvider profileProvider, CompilationIdentifier compilationId, OptionValues options, DebugContext debug) {
+  public StructuredGraph createGraph(ResolvedJavaMethod method, int entryBCI, ProfileProvider profileProvider,
+      CompilationIdentifier compilationId, OptionValues options, DebugContext debug) {
     AllowAssumptions allowAssumptions = AllowAssumptions.ifTrue(OptAssumptions.getValue(options));
     SpeculationLog speculationLog = method.getSpeculationLog();
     if (speculationLog != null) {
       speculationLog.collectFailedSpeculations();
     }
     /*
-     * For methods that have plugins it would be possible to produces graphs from those plugins
-     * instead of the bytecodees but it's somewhat complicated to cover all the possible cases
-     * and doesn't seem worth the complexity as plugins are already processed at call sites. In
-     * HotSpot plugins are just optimized implementations of the method so compiling them as
+     * For methods that have plugins it would be possible to produces graphs from
+     * those plugins
+     * instead of the bytecodees but it's somewhat complicated to cover all the
+     * possible cases
+     * and doesn't seem worth the complexity as plugins are already processed at
+     * call sites. In
+     * HotSpot plugins are just optimized implementations of the method so compiling
+     * them as
      * root methods isn't required for correctness.
      */
 
@@ -273,7 +303,8 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
   }
 
   @SuppressWarnings("try")
-  public CompilationResult compileHelper(CompilationResultBuilderFactory crbf, CompilationResult result, StructuredGraph graph, boolean shouldRetainLocalVariables,
+  public CompilationResult compileHelper(CompilationResultBuilderFactory crbf, CompilationResult result,
+      StructuredGraph graph, boolean shouldRetainLocalVariables,
       boolean shouldUsePreciseUnresolvedDeopts, boolean eagerResolving, Suites suites, OptionValues options) {
     int entryBCI = graph.getEntryBCI();
     ResolvedJavaMethod method = graph.method();
@@ -283,12 +314,14 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
     final boolean isOSR = entryBCI != JVMCICompiler.INVOCATION_ENTRY_BCI;
 
     LIRSuites lirSuites = getLIRSuites(providers, options);
-    ProfilingInfo profilingInfo = graph.getProfileProvider() != null ? graph.getProfileProvider().getProfilingInfo(null, method, !isOSR, isOSR)
-      : DefaultProfilingInfo.get(TriState.FALSE);
+    ProfilingInfo profilingInfo = graph.getProfileProvider() != null
+        ? graph.getProfileProvider().getProfilingInfo(null, method, !isOSR, isOSR)
+        : DefaultProfilingInfo.get(TriState.FALSE);
     OptimisticOptimizations optimisticOpts = getOptimisticOpts(profilingInfo, options);
 
     /*
-     * Cut off never executed code profiles if there is code, e.g. after the osr loop, that is
+     * Cut off never executed code profiles if there is code, e.g. after the osr
+     * loop, that is
      * never executed.
      */
     if (isOSR && !OnStackReplacementPhase.Options.DeoptAfterOSR.getValue(options)) {
@@ -297,23 +330,24 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
 
     result.setEntryBCI(entryBCI);
     boolean shouldDebugNonSafepoints = providers.getCodeCache().shouldDebugNonSafepoints();
-    PhaseSuite<HighTierContext> graphBuilderSuite = configGraphBuilderSuite(providers.getSuites().getDefaultGraphBuilderSuite(), shouldDebugNonSafepoints, shouldRetainLocalVariables,
+    PhaseSuite<HighTierContext> graphBuilderSuite = configGraphBuilderSuite(
+        providers.getSuites().getDefaultGraphBuilderSuite(), shouldDebugNonSafepoints, shouldRetainLocalVariables,
         shouldUsePreciseUnresolvedDeopts, eagerResolving, isOSR);
 
     GraalCompiler.compile(new GraalCompiler.Request<>(graph,
-          method,
-          providers,
-          backend,
-          graphBuilderSuite,
-          optimisticOpts,
-          profilingInfo,
-          suites,
-          lirSuites,
-          result,
-          crbf,
-          null,
-          this,
-          true));
+        method,
+        providers,
+        backend,
+        graphBuilderSuite,
+        optimisticOpts,
+        profilingInfo,
+        suites,
+        lirSuites,
+        result,
+        crbf,
+        null,
+        this,
+        true));
     graph.getOptimizationLog().emit();
     if (!isOSR) {
       profilingInfo.setCompilerIRSize(StructuredGraph.class, graph.getNodeCount());
@@ -330,7 +364,8 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
       DebugContext debug,
       Suites suites) {
     CompilationResult result = new CompilationResult(compilationId);
-    return compileHelper(CompilationResultBuilderFactory.Default, result, graph, shouldRetainLocalVariables, shouldUsePreciseUnresolvedDeopts, eagerResolving, suites, debug.getOptions());
+    return compileHelper(CompilationResultBuilderFactory.Default, result, graph, shouldRetainLocalVariables,
+        shouldUsePreciseUnresolvedDeopts, eagerResolving, suites, debug.getOptions());
   }
 
   protected OptimisticOptimizations getOptimisticOpts(ProfilingInfo profilingInfo, OptionValues options) {
@@ -346,21 +381,30 @@ public class HotSpotGraalCompiler implements GraalJVMCICompiler, Cancellable, JV
   }
 
   /**
-   * Reconfigures a given graph builder suite (GBS) if one of the given GBS parameter values is
+   * Reconfigures a given graph builder suite (GBS) if one of the given GBS
+   * parameter values is
    * not the default.
    *
-   * @param suite the graph builder suite
-   * @param shouldDebugNonSafepoints specifies if extra debug info should be generated (default is
-   *            false)
-   * @param shouldRetainLocalVariables specifies if local variables should be retained for
-   *            debugging purposes (default is false)
-   * @param shouldUsePreciseUnresolvedDeopts specifies if Unresolved deoptimizations should use
-   *            precise frame states (default is false, except in Xcomp mode)
-   * @param isOSR specifies if extra OSR-specific post-processing is required (default is false)
-   * @return a new suite derived from {@code suite} if any of the GBS parameters did not have a
+   * @param suite                            the graph builder suite
+   * @param shouldDebugNonSafepoints         specifies if extra debug info should
+   *                                         be generated (default is
+   *                                         false)
+   * @param shouldRetainLocalVariables       specifies if local variables should
+   *                                         be retained for
+   *                                         debugging purposes (default is false)
+   * @param shouldUsePreciseUnresolvedDeopts specifies if Unresolved
+   *                                         deoptimizations should use
+   *                                         precise frame states (default is
+   *                                         false, except in Xcomp mode)
+   * @param isOSR                            specifies if extra OSR-specific
+   *                                         post-processing is required (default
+   *                                         is false)
+   * @return a new suite derived from {@code suite} if any of the GBS parameters
+   *         did not have a
    *         default value otherwise {@code suite}
    */
-  protected PhaseSuite<HighTierContext> configGraphBuilderSuite(PhaseSuite<HighTierContext> suite, boolean shouldDebugNonSafepoints, boolean shouldRetainLocalVariables,
+  protected PhaseSuite<HighTierContext> configGraphBuilderSuite(PhaseSuite<HighTierContext> suite,
+      boolean shouldDebugNonSafepoints, boolean shouldRetainLocalVariables,
       boolean shouldUsePreciseUnresolvedDeopts, boolean eagerResolving, boolean isOSR) {
     PhaseSuite<HighTierContext> newGbs = suite.copy();
     GraphBuilderPhase graphBuilderPhase = (GraphBuilderPhase) newGbs.findPhase(GraphBuilderPhase.class).previous();
