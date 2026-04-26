@@ -27,6 +27,7 @@ package jdk.graal.compiler.virtual.phases.ea;
 import static jdk.graal.compiler.core.common.GraalOptions.EscapeAnalysisIterations;
 import static jdk.graal.compiler.core.common.GraalOptions.EscapeAnalyzeOnly;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -54,31 +55,49 @@ import jdk.graal.compiler.phases.graph.ReentrantBlockIterator;
 import jdk.graal.compiler.phases.schedule.SchedulePhase;
 
 /**
- * Performs <a href="https://en.wikipedia.org/wiki/Escape_analysis">Partial Escape analysis</a> on a
- * {@link StructuredGraph}. Partial Escape Analysis on individual branches allows Graal to determine
- * whether an object is accessible (="escapes") outside the allocating method or thread. This
- * information is used to perform scalar replacement of an object allocation. This allows the
- * compiler to replace an allocation with its scalar field values which can then reside in
+ * Performs <a href="https://en.wikipedia.org/wiki/Escape_analysis">Partial
+ * Escape analysis</a> on a
+ * {@link StructuredGraph}. Partial Escape Analysis on individual branches
+ * allows Graal to determine
+ * whether an object is accessible (="escapes") outside the allocating method or
+ * thread. This
+ * information is used to perform scalar replacement of an object allocation.
+ * This allows the
+ * compiler to replace an allocation with its scalar field values which can then
+ * reside in
  * registers. Enabling the removal of memory allocation, field accesses etc.
  *
- * PEA traverses a {@link StructuredGraph} in reverse post order ({@link ReentrantBlockIterator}),
- * i.e., every basic block is visited as soon as all its predecessor blocks have been visited.
+ * PEA traverses a {@link StructuredGraph} in reverse post order
+ * ({@link ReentrantBlockIterator}),
+ * i.e., every basic block is visited as soon as all its predecessor blocks have
+ * been visited.
  *
- * PEA is built upon the machinery of {@link EffectsPhase} and {@link EffectsClosure}: during
- * traversal it collects a list of {@link EffectList.Effect} that is applied in reverse post order
- * on the graph after analysis. This is necessary, as virtualized allocations can be materialized at
- * a later point in time of the traversal algorithm, which may causes a materialization at an early
+ * PEA is built upon the machinery of {@link EffectsPhase} and
+ * {@link EffectsClosure}: during
+ * traversal it collects a list of {@link EffectList.Effect} that is applied in
+ * reverse post order
+ * on the graph after analysis. This is necessary, as virtualized allocations
+ * can be materialized at
+ * a later point in time of the traversal algorithm, which may causes a
+ * materialization at an early
  * point in the IR.
  *
- * If PEA traversal encounters a {@link VirtualizableAllocation} it tries to virtualize it, i.e.,
- * enqueue an effect that replaces the allocation with a {@link VirtualInstanceNode}. If the
- * allocation stays virtual until the end of the traversal it can be completely scalar replaced, if
- * it materializes at a later point in the CFG, the phase materializes the allocation as late as
- * possible in the final program. This can often shift allocations inside less frequently executed
+ * If PEA traversal encounters a {@link VirtualizableAllocation} it tries to
+ * virtualize it, i.e.,
+ * enqueue an effect that replaces the allocation with a
+ * {@link VirtualInstanceNode}. If the
+ * allocation stays virtual until the end of the traversal it can be completely
+ * scalar replaced, if
+ * it materializes at a later point in the CFG, the phase materializes the
+ * allocation as late as
+ * possible in the final program. This can often shift allocations inside less
+ * frequently executed
  * branches.
  *
  * Details for the algorithm can be found in
- * <a href="http://ssw.jku.at/Teaching/PhDTheses/Stadler/Thesis_Stadler_14.pdf">this thesis</a>.
+ * <a href=
+ * "http://ssw.jku.at/Teaching/PhDTheses/Stadler/Thesis_Stadler_14.pdf">this
+ * thesis</a>.
  */
 public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
 
@@ -96,24 +115,28 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         this(iterative, Options.OptEarlyReadElimination.getValue(options), canonicalizer, null, options);
     }
 
-    public PartialEscapePhase(boolean iterative, CanonicalizerPhase canonicalizer, BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
+    public PartialEscapePhase(boolean iterative, CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
         this(iterative, Options.OptEarlyReadElimination.getValue(options), canonicalizer, cleanupPhase, options);
     }
 
-    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer, BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
+    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
         super(iterative ? EscapeAnalysisIterations.getValue(options) : 1, canonicalizer);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
     }
 
-    public PartialEscapePhase(int iterations, boolean readElimination, CanonicalizerPhase canonicalizer, BasePhase<CoreProviders> cleanupPhase) {
+    public PartialEscapePhase(int iterations, boolean readElimination, CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase) {
         super(iterations, canonicalizer);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
     }
 
-    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer, BasePhase<CoreProviders> cleanupPhase, OptionValues options,
-                    SchedulePhase.SchedulingStrategy strategy) {
+    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase, OptionValues options,
+            SchedulePhase.SchedulingStrategy strategy) {
         super(iterative ? EscapeAnalysisIterations.getValue(options) : 1, canonicalizer, false, strategy);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
@@ -130,18 +153,31 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     @Override
     public Optional<NotApplicable> notApplicableTo(GraphState graphState) {
         return NotApplicable.ifAny(
-                        super.notApplicableTo(graphState),
-                        NotApplicable.unlessRunBefore(this, StageFlag.HIGH_TIER_LOWERING, graphState),
-                        cleanupPhase != null ? cleanupPhase.notApplicableTo(graphState) : ALWAYS_APPLICABLE);
+                super.notApplicableTo(graphState),
+                NotApplicable.unlessRunBefore(this, StageFlag.HIGH_TIER_LOWERING, graphState),
+                cleanupPhase != null ? cleanupPhase.notApplicableTo(graphState) : ALWAYS_APPLICABLE);
     }
 
     @Override
     public void updateGraphState(GraphState graphState) {
         super.updateGraphState(graphState);
-        // This may be set more than once but the goal is to record whether PartialEscapePhase has
+        // This may be set more than once but the goal is to record whether
+        // PartialEscapePhase has
         // even been run.
         if (!graphState.isAfterStage(StageFlag.PARTIAL_ESCAPE)) {
             graphState.setAfterStage(StageFlag.PARTIAL_ESCAPE);
+        }
+    }
+
+    // Function to print only the user defined method
+    public void checkUserMethod(StructuredGraph graph) {
+        List<String> classNames = List.of("Test", "A");
+        var method = graph.method();
+        if (method != null) {
+            String className = method.getDeclaringClass().toJavaName();
+            if (classNames.contains(className)) {
+                System.err.println("[PartialEscapePhase.java] Running on: " + method.format("%H.%n(%p)"));
+            }
         }
     }
 
@@ -149,6 +185,7 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     @SuppressWarnings("try")
     protected void run(StructuredGraph graph, CoreProviders context) {
         if (matchGraph(graph)) {
+            checkUserMethod(graph);
             if (readElimination || graph.hasVirtualizableAllocation()) {
                 try (DebugCloseable ignored = graph.getOptimizationLog().enterPartialEscapeAnalysis()) {
                     runAnalysis(graph, context);
@@ -162,7 +199,8 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     }
 
     @Override
-    protected Closure<?> createEffectsClosure(CoreProviders context, ScheduleResult schedule, ControlFlowGraph cfg, OptionValues options) {
+    protected Closure<?> createEffectsClosure(CoreProviders context, ScheduleResult schedule, ControlFlowGraph cfg,
+            OptionValues options) {
         for (VirtualObjectNode virtual : cfg.graph.getNodes(VirtualObjectNode.TYPE)) {
             virtual.resetObjectId();
         }
@@ -181,7 +219,8 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
 
     /**
      * Returns a function that takes a {@link VirtualObjectNode} and provides a
-     * {@link FixedWithNextNode} which anchors the virtual object. Returns {@code null} if no
+     * {@link FixedWithNextNode} which anchors the virtual object. Returns
+     * {@code null} if no
      * anchoring is needed.
      */
     protected Function<VirtualObjectNode, FixedWithNextNode> virtualAnchorSupplier() {

@@ -70,7 +70,8 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
         this(maxIterations, canonicalizer, false, SchedulingStrategy.EARLIEST);
     }
 
-    protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer, boolean unscheduled, SchedulingStrategy strategy) {
+    protected EffectsPhase(int maxIterations, CanonicalizerPhase canonicalizer, boolean unscheduled,
+            SchedulingStrategy strategy) {
         this.strategy = strategy;
         this.maxIterations = maxIterations;
         this.canonicalizer = canonicalizer;
@@ -93,6 +94,17 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
 
     @SuppressWarnings("try")
     public boolean runAnalysis(StructuredGraph graph, CoreProvidersT context) {
+
+        // I want to see the effects of PEA on the user defined methods only, so I am
+        // printing the method name here. This is just for debugging purpose.
+        // var method = graph.method();
+        // if (method != null) {
+        // String className = method.getDeclaringClass().toJavaName();
+        // if (className.startsWith("Test") || className.startsWith("A")) {
+        // System.out.println("[PartialEscapePhase] classNames: " + className);
+        // }
+        // }
+
         LoopUtility.removeObsoleteProxies(graph, context, canonicalizer);
         assert unscheduled || strategy != null;
         boolean changed = false;
@@ -104,7 +116,8 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
                 ControlFlowGraph cfg;
                 if (unscheduled) {
                     schedule = null;
-                    cfg = ControlFlowGraph.newBuilder(graph).connectBlocks(true).computeLoops(true).computeFrequency(true).build();
+                    cfg = ControlFlowGraph.newBuilder(graph).connectBlocks(true).computeLoops(true)
+                            .computeFrequency(true).build();
                 } else {
                     new SchedulePhase(strategy).apply(graph, context, false);
                     schedule = graph.getLastSchedule();
@@ -146,11 +159,13 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
         return changed;
     }
 
-    protected void postIteration(final StructuredGraph graph, final CoreProvidersT context, EconomicSet<Node> changedNodes) {
+    protected void postIteration(final StructuredGraph graph, final CoreProvidersT context,
+            EconomicSet<Node> changedNodes) {
         if (canonicalizer != null) {
             canonicalizer.applyIncremental(graph, context, changedNodes);
         }
     }
 
-    protected abstract Closure<?> createEffectsClosure(CoreProvidersT context, ScheduleResult schedule, ControlFlowGraph cfg, OptionValues options);
+    protected abstract Closure<?> createEffectsClosure(CoreProvidersT context, ScheduleResult schedule,
+            ControlFlowGraph cfg, OptionValues options);
 }

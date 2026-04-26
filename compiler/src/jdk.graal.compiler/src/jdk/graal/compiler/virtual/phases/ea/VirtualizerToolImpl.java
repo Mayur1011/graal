@@ -57,7 +57,8 @@ import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 
 /**
- * Forwards calls from {@link VirtualizerTool} to the actual {@link PartialEscapeBlockState}.
+ * Forwards calls from {@link VirtualizerTool} to the actual
+ * {@link PartialEscapeBlockState}.
  */
 class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTool, CanonicalizerTool {
 
@@ -71,12 +72,14 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
      */
     private final Function<VirtualObjectNode, FixedWithNextNode> anchorSupplier;
 
-    VirtualizerToolImpl(CoreProviders providers, PartialEscapeClosure<?> closure, Assumptions assumptions, OptionValues options, DebugContext debug) {
+    VirtualizerToolImpl(CoreProviders providers, PartialEscapeClosure<?> closure, Assumptions assumptions,
+            OptionValues options, DebugContext debug) {
         this(providers, closure, assumptions, options, debug, null);
     }
 
-    VirtualizerToolImpl(CoreProviders providers, PartialEscapeClosure<?> closure, Assumptions assumptions, OptionValues options, DebugContext debug,
-                    Function<VirtualObjectNode, FixedWithNextNode> anchorSupplier) {
+    VirtualizerToolImpl(CoreProviders providers, PartialEscapeClosure<?> closure, Assumptions assumptions,
+            OptionValues options, DebugContext debug,
+            Function<VirtualObjectNode, FixedWithNextNode> anchorSupplier) {
         super(providers);
         this.closure = closure;
         this.assumptions = assumptions;
@@ -101,7 +104,8 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
         return debug;
     }
 
-    public void reset(PartialEscapeBlockState<?> newState, ValueNode newCurrent, FixedNode newPosition, GraphEffectList newEffects) {
+    public void reset(PartialEscapeBlockState<?> newState, ValueNode newCurrent, FixedNode newPosition,
+            GraphEffectList newEffects) {
         deleted = false;
         state = newState;
         current = newCurrent;
@@ -124,73 +128,93 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
     }
 
     @Override
-    public boolean setVirtualEntry(VirtualObjectNode virtual, int index, ValueNode value, JavaKind theAccessKind, long offset) {
+    public boolean setVirtualEntry(VirtualObjectNode virtual, int index, ValueNode value, JavaKind theAccessKind,
+            long offset) {
         ObjectState obj = state.getObjectState(virtual);
         assert obj.isVirtual() : "not virtual: " + obj;
         JavaKind entryKind = virtual.entryKind(this.getMetaAccessExtensionProvider(), index);
         JavaKind accessKind = theAccessKind != null ? theAccessKind : entryKind;
         ValueNode newValue = closure.getAliasAndResolve(state, value);
-        getDebug().log(DebugContext.DETAILED_LEVEL, "Setting entry %d in virtual object %s %s results in %s", index, virtual.getObjectId(), virtual, state.getObjectState(virtual.getObjectId()));
+        getDebug().log(DebugContext.DETAILED_LEVEL, "Setting entry %d in virtual object %s %s results in %s", index,
+                virtual.getObjectId(), virtual, state.getObjectState(virtual.getObjectId()));
         ValueNode oldValue = getEntry(virtual, index);
         boolean oldIsIllegal = oldValue.isIllegalConstant();
-        boolean canVirtualize = entryKind == accessKind || (entryKind == accessKind.getStackKind() && virtual instanceof VirtualInstanceNode);
+        boolean canVirtualize = entryKind == accessKind
+                || (entryKind == accessKind.getStackKind() && virtual instanceof VirtualInstanceNode);
         if (canVirtualize && virtual.isVirtualByteArrayAccess(getMetaAccessExtensionProvider(), accessKind)) {
-            GraalError.guarantee(entryKind == JavaKind.Byte && accessKind == JavaKind.Byte, "expected byte kinds by canVirtualize condition");
+            GraalError.guarantee(entryKind == JavaKind.Byte && accessKind == JavaKind.Byte,
+                    "expected byte kinds by canVirtualize condition");
             /*
-             * Special case: An explicit byte write into a virtual byte array. We cannot virtualize
-             * this if it would overwrite part of a larger value. That is the case if the old value
-             * is either larger than a byte (indicating the first byte of the value) or illegal
+             * Special case: An explicit byte write into a virtual byte array. We cannot
+             * virtualize
+             * this if it would overwrite part of a larger value. That is the case if the
+             * old value
+             * is either larger than a byte (indicating the first byte of the value) or
+             * illegal
              * (indicating one of the following bytes of a preceding value).
              */
-            if (theAccessKind == JavaKind.Byte &&  // explicitly specified by the caller
-                            (oldIsIllegal || ((VirtualArrayNode) virtual).byteArrayEntryByteCount(index, this) > 1)) {
+            if (theAccessKind == JavaKind.Byte && // explicitly specified by the caller
+                    (oldIsIllegal || ((VirtualArrayNode) virtual).byteArrayEntryByteCount(index, this) > 1)) {
                 canVirtualize = false;
             }
         }
         if (!canVirtualize) {
             assert entryKind != JavaKind.Long || newValue != null;
-            if (entryKind == JavaKind.Long && oldValue.getStackKind() == newValue.getStackKind() && oldValue.getStackKind().isPrimitive()) {
+            if (entryKind == JavaKind.Long && oldValue.getStackKind() == newValue.getStackKind()
+                    && oldValue.getStackKind().isPrimitive()) {
                 /*
-                 * Special case: If the entryKind is long, allow arbitrary kinds as long as a value
+                 * Special case: If the entryKind is long, allow arbitrary kinds as long as a
+                 * value
                  * of the same kind is already there. This can only happen if some other node
-                 * initialized the entry with a value of a different kind. One example where this
+                 * initialized the entry with a value of a different kind. One example where
+                 * this
                  * happens is the Truffle NewFrameNode.
                  */
-                getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s with primitive of kind %s in long entry ", current, oldValue.getStackKind());
+                getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s with primitive of kind %s in long entry ",
+                        current, oldValue.getStackKind());
                 canVirtualize = true;
-            } else if (entryKind == JavaKind.Int && (accessKind == JavaKind.Long || accessKind == JavaKind.Double) && offset % 8 == 0) {
+            } else if (entryKind == JavaKind.Int && (accessKind == JavaKind.Long || accessKind == JavaKind.Double)
+                    && offset % 8 == 0) {
                 /*
-                 * Special case: Allow storing a single long or double value into two consecutive
+                 * Special case: Allow storing a single long or double value into two
+                 * consecutive
                  * int slots.
                  */
                 int nextIndex = virtual.entryIndexForOffset(getMetaAccess(), offset + 4, JavaKind.Int);
                 if (nextIndex != -1) {
                     canVirtualize = true;
                     assert nextIndex == index + 1 : "expected to be sequential";
-                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for double word stored in two ints", current);
+                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for double word stored in two ints",
+                            current);
                 }
             } else if (canVirtualizeLargeByteArrayUnsafeWrite(virtual, accessKind, offset)) {
                 /*
-                 * Special case: Allow storing any primitive inside a byte array, as long as there
+                 * Special case: Allow storing any primitive inside a byte array, as long as
+                 * there
                  * is enough room left, and all accesses and subsequent writes are on the exact
                  * position of the first write, and of the same kind.
                  *
                  * Any other access results in materialization.
                  */
-                int accessLastIndex = virtual.entryIndexForOffset(getMetaAccess(), offset + accessKind.getByteCount() - 1, JavaKind.Byte);
-                if (accessLastIndex != -1 && !oldIsIllegal && canStoreOverOldValue((VirtualArrayNode) virtual, oldValue, accessKind, index)) {
+                int accessLastIndex = virtual.entryIndexForOffset(getMetaAccess(),
+                        offset + accessKind.getByteCount() - 1, JavaKind.Byte);
+                if (accessLastIndex != -1 && !oldIsIllegal
+                        && canStoreOverOldValue((VirtualArrayNode) virtual, oldValue, accessKind, index)) {
                     canVirtualize = true;
-                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for %s word stored in byte array", current, accessKind);
+                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for %s word stored in byte array",
+                            current, accessKind);
                 }
             }
         }
 
         if (canVirtualize) {
-            getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for entryKind %s and access kind %s", current, entryKind, accessKind);
+            getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s for entryKind %s and access kind %s", current,
+                    entryKind, accessKind);
             if (theAccessKind != null && entryKind != theAccessKind &&
-                            (theAccessKind != JavaKind.Int && theAccessKind.getStackKind() == JavaKind.Int)) {
+                    (theAccessKind != JavaKind.Int && theAccessKind.getStackKind() == JavaKind.Int)) {
                 ValueNode entry = getEntry(virtual, index);
-                // We can't just set the given value as the new entry but need to simulate a store
+                // We can't just set the given value as the new entry but need to simulate a
+                // store
                 // operation
                 newValue = DefaultJavaLoweringProvider.simulatePrimitiveStore(accessKind, entry, newValue);
                 ensureAdded(newValue);
@@ -199,11 +223,13 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             if (entryKind == JavaKind.Int) {
                 if (accessKind.needsTwoSlots()) {
                     // Storing double word value two int slots
-                    assert virtual.entryKind(getMetaAccessExtensionProvider(), index + 1) == JavaKind.Int : Assertions.errorMessage(virtual, index, value, theAccessKind, offset);
+                    assert virtual.entryKind(getMetaAccessExtensionProvider(), index + 1) == JavaKind.Int
+                            : Assertions.errorMessage(virtual, index, value, theAccessKind, offset);
                     state.setEntry(virtual.getObjectId(), index + 1, getIllegalConstant());
                 } else if (oldValue.getStackKind() == JavaKind.Double || oldValue.getStackKind() == JavaKind.Long) {
                     // Splitting double word constant by storing over it with an int
-                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s producing second half of double word value %s", current, oldValue);
+                    getDebug().log(DebugContext.DETAILED_LEVEL,
+                            "virtualizing %s producing second half of double word value %s", current, oldValue);
                     ValueNode secondHalf = UnpackEndianHalfNode.create(oldValue, false, NodeView.DEFAULT);
                     addNode(secondHalf);
                     state.setEntry(virtual.getObjectId(), index + 1, secondHalf);
@@ -217,7 +243,8 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
                 if (entryKind == JavaKind.Int) {
                     // Storing into second half of double, so replace previous value
                     ValueNode previous = getEntry(virtual, index - 1);
-                    getDebug().log(DebugContext.DETAILED_LEVEL, "virtualizing %s producing first half of double word value %s", current, previous);
+                    getDebug().log(DebugContext.DETAILED_LEVEL,
+                            "virtualizing %s producing first half of double word value %s", current, previous);
                     ValueNode firstHalf = UnpackEndianHalfNode.create(previous, true, NodeView.DEFAULT);
                     addNode(firstHalf);
                     state.setEntry(virtual.getObjectId(), index - 1, firstHalf);
@@ -226,10 +253,12 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             return true;
         }
         /*
-         * Should only occur if there are mismatches between the entry and access kind, or we are
+         * Should only occur if there are mismatches between the entry and access kind,
+         * or we are
          * clobbering a byte in a larger value.
          */
-        assert entryKind != accessKind || entryKind == JavaKind.Byte : "setVirtualEntry failed on entry kind " + entryKind + ", access kind " + accessKind;
+        assert entryKind != accessKind || entryKind == JavaKind.Byte
+                : "setVirtualEntry failed on entry kind " + entryKind + ", access kind " + accessKind;
         return false;
     }
 
@@ -243,15 +272,17 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
         return accessKind.getByteCount() == virtual.byteArrayEntryByteCount(index, this);
     }
 
-    private boolean canVirtualizeLargeByteArrayUnsafeWrite(VirtualObjectNode virtual, JavaKind accessKind, long offset) {
-        return canVirtualizeLargeByteArrayUnsafeAccess() && virtual.isVirtualByteArrayAccess(this.getMetaAccessExtensionProvider(), accessKind) &&
-                        /*
-                         * Require aligned writes. Some architectures do not support recovering
-                         * writes to unaligned offsets. Since most use cases for this optimization
-                         * will write to reasonable offsets, disabling the optimization for
-                         * unreasonable ones is not that big an issue.
-                         */
-                        ((offset % accessKind.getByteCount()) == 0);
+    private boolean canVirtualizeLargeByteArrayUnsafeWrite(VirtualObjectNode virtual, JavaKind accessKind,
+            long offset) {
+        return canVirtualizeLargeByteArrayUnsafeAccess()
+                && virtual.isVirtualByteArrayAccess(this.getMetaAccessExtensionProvider(), accessKind) &&
+                /*
+                 * Require aligned writes. Some architectures do not support recovering
+                 * writes to unaligned offsets. Since most use cases for this optimization
+                 * will write to reasonable offsets, disabling the optimization for
+                 * unreasonable ones is not that big an issue.
+                 */
+                ((offset % accessKind.getByteCount()) == 0);
     }
 
     int getVirtualByteCount(ValueNode[] entries, int startIndex) {
@@ -341,8 +372,13 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
         }
     }
 
+    // TODO: Important function related to creation of virtual object and adding it
+    // to the state.
     @Override
-    public void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks, NodeSourcePosition sourcePosition, boolean ensureVirtualized) {
+    public void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks,
+            NodeSourcePosition sourcePosition, boolean ensureVirtualized) {
+
+        // -------------------------------------------
         VirtualUtil.trace(options, debug, "{{%s}} ", current);
         if (!virtualObject.isAlive()) {
             effects.addFloatingNode(virtualObject, "newVirtualObject");
@@ -357,13 +393,35 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             closure.virtualObjects.add(virtualObject);
             virtualObject.setObjectId(id);
         }
+        // for my debugging purpose.
+        var className = current.getNodeSourcePosition() != null
+                ? current.getNodeSourcePosition().getMethod().getDeclaringClass().toJavaName()
+                : null;
+
+        if (className != null && (className.startsWith("A"))) {
+            int bci = -1;
+            String sourceDesc = "<unknown>";
+            if (current != null && current.getNodeSourcePosition() != null) {
+                bci = current.getNodeSourcePosition().getBCI();
+                sourceDesc = current.getNodeSourcePosition().toString();
+            }
+            System.out.println("-------------------------------------------------");
+            System.out.println(
+                    "[VirtualizerToolImpl.java] Creating virtual object with id: " + id + " in class: " + className);
+            System.out.println("[VirtualizerToolImpl.java] BCI of current node: " + bci);
+            System.out.println("[VirtualizerToolImpl.java] Current node: " + current);
+            System.out.println("[VirtualizerToolImpl.java] Source position of current node: " + sourceDesc);
+            System.out.println("-------------------------------------------------");
+        }
         state.addObject(id, new ObjectState(entryState, locks, ensureVirtualized));
         closure.addVirtualAlias(virtualObject, virtualObject);
         PartialEscapeClosure.COUNTER_ALLOCATION_REMOVED.increment(debug);
         effects.addVirtualizationDelta(1);
-        effects.addLog(closure.cfg.graph.getOptimizationLog(), optimizationLog -> optimizationLog.getPartialEscapeLog().allocationRemoved(virtualObject));
+        effects.addLog(closure.cfg.graph.getOptimizationLog(),
+                optimizationLog -> optimizationLog.getPartialEscapeLog().allocationRemoved(virtualObject));
         if (sourcePosition != null) {
-            assert virtualObject.getNodeSourcePosition() == null || virtualObject.getNodeSourcePosition() == sourcePosition : "unexpected source pos!";
+            assert virtualObject.getNodeSourcePosition() == null
+                    || virtualObject.getNodeSourcePosition() == sourcePosition : "unexpected source pos!";
             virtualObject.setNodeSourcePosition(sourcePosition);
         }
     }
@@ -384,7 +442,8 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
 
     @Override
     public boolean ensureMaterialized(VirtualObjectNode virtualObject) {
-        return closure.ensureMaterialized(state, virtualObject.getObjectId(), position, effects, PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED);
+        return closure.ensureMaterialized(state, virtualObject.getObjectId(), position, effects,
+                PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED);
     }
 
     @Override

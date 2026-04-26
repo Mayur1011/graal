@@ -56,7 +56,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
 
     /**
      * This array contains the state of all virtual objects, indexed by
-     * {@link VirtualObjectNode#getObjectId()}. Entries in this array may be null if the
+     * {@link VirtualObjectNode#getObjectId()}. Entries in this array may be null if
+     * the
      * corresponding virtual object is not alive or reachable currently.
      */
     private ObjectState[] objectStates;
@@ -87,7 +88,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
     private final DebugContext debug;
 
     /**
-     * Final subclass of PartialEscapeBlockState, for performance and to make everything behave
+     * Final subclass of PartialEscapeBlockState, for performance and to make
+     * everything behave
      * nicely with generics.
      */
     public static final class Final extends PartialEscapeBlockState<Final> {
@@ -131,7 +133,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
     }
 
     /**
-     * Asserts that the given virtual object is available/reachable in the current state.
+     * Asserts that the given virtual object is available/reachable in the current
+     * state.
      */
     public ObjectState getObjectState(VirtualObjectNode object) {
         ObjectState state = objectStates[object.getObjectId()];
@@ -201,22 +204,28 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
     }
 
     /**
-     * Materializes the given virtual object and produces the necessary effects in the effects list.
-     * This transitively also materializes all other virtual objects that are reachable from the
+     * Materializes the given virtual object and produces the necessary effects in
+     * the effects list.
+     * This transitively also materializes all other virtual objects that are
+     * reachable from the
      * entries.
      */
     @SuppressWarnings("try")
-    public void materializeBefore(FixedNode fixed, VirtualObjectNode virtual, boolean requiresStrictLockOrder, ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
+    public void materializeBefore(FixedNode fixed, VirtualObjectNode virtual, boolean requiresStrictLockOrder,
+            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
         PartialEscapeClosure.COUNTER_MATERIALIZATIONS.increment(fixed.getDebug());
         List<AllocatedObjectNode> objects = new ArrayList<>(2);
         List<ValueNode> values = new ArrayList<>(8);
         List<List<MonitorIdNode>> locks = new ArrayList<>();
         List<ValueNode> otherAllocations = new ArrayList<>(2);
         List<Boolean> ensureVirtual = new ArrayList<>(2);
-        materializeWithCommit(fixed, virtual, objects, locks, values, ensureVirtual, otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects);
+        materializeWithCommit(fixed, virtual, objects, locks, values, ensureVirtual, otherAllocations,
+                requiresStrictLockOrder, virtualObjects, materializeEffects);
         /*
-         * because all currently virtualized allocations will be materialized in 1 commit alloc node
-         * with barriers, we ignore other allocations as we only process new instance and commit
+         * because all currently virtualized allocations will be materialized in 1
+         * commit alloc node
+         * with barriers, we ignore other allocations as we only process new instance
+         * and commit
          * allocation nodes
          */
         materializeEffects.addAllocationDelta(objects.size() > 0 ? -1 : 0);
@@ -229,7 +238,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     if (otherAllocation instanceof FixedWithNextNode) {
                         graph.addBeforeFixed(fixed, (FixedWithNextNode) otherAllocation);
                     } else {
-                        assert otherAllocation instanceof FloatingNode : Assertions.errorMessage(otherAllocation, fixed, virtual, materializeEffects);
+                        assert otherAllocation instanceof FloatingNode
+                                : Assertions.errorMessage(otherAllocation, fixed, virtual, materializeEffects);
                     }
                 }
                 if (!objects.isEmpty()) {
@@ -237,12 +247,14 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     if (fixed.predecessor() instanceof CommitAllocationNode) {
                         commit = (CommitAllocationNode) fixed.predecessor();
                     } else {
-                        try (DebugCloseable context = graph.withNodeSourcePosition(NodeSourcePosition.placeholder(graph.method()))) {
+                        try (DebugCloseable context = graph
+                                .withNodeSourcePosition(NodeSourcePosition.placeholder(graph.method()))) {
                             commit = graph.add(new CommitAllocationNode());
                             if (fixed.predecessor() != null && fixed.predecessor() instanceof FixedWithNextNode) {
                                 graph.addBeforeFixed(fixed, commit);
                             } else {
-                                if (fixed instanceof AbstractBeginNode abs && abs.predecessor() instanceof ControlSplitNode) {
+                                if (fixed instanceof AbstractBeginNode abs
+                                        && abs.predecessor() instanceof ControlSplitNode) {
                                     /*
                                      * We have an abstract begin node (for example a loop exit)
                                      * directly as a split successor. We cannot just insert the node
@@ -253,7 +265,9 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                                     b.setNext(fixed);
                                     graph.addBeforeFixed(fixed, commit);
                                 } else {
-                                    throw GraalError.shouldNotReachHere("Complex control flow pattern - cannot easily insert materialization before " + fixed);
+                                    throw GraalError.shouldNotReachHere(
+                                            "Complex control flow pattern - cannot easily insert materialization before "
+                                                    + fixed);
                                 }
                             }
                         }
@@ -271,11 +285,14 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     }
                     commit.getEnsureVirtual().addAll(ensureVirtual);
 
-                    assert commit.usages().filter(AllocatedObjectNode.class).count() == commit.getUsageCount() : Assertions.errorMessage(commit, commit.usages(), commit.getUsageCount());
-                    List<AllocatedObjectNode> materializedValues = commit.usages().filter(AllocatedObjectNode.class).snapshot();
+                    assert commit.usages().filter(AllocatedObjectNode.class).count() == commit.getUsageCount()
+                            : Assertions.errorMessage(commit, commit.usages(), commit.getUsageCount());
+                    List<AllocatedObjectNode> materializedValues = commit.usages().filter(AllocatedObjectNode.class)
+                            .snapshot();
                     for (int i = 0; i < commit.getValues().size(); i++) {
                         if (materializedValues.contains(commit.getValues().get(i))) {
-                            commit.getValues().set(i, ((AllocatedObjectNode) commit.getValues().get(i)).getVirtualObject());
+                            commit.getValues().set(i,
+                                    ((AllocatedObjectNode) commit.getValues().get(i)).getVirtualObject());
                         }
                     }
                 }
@@ -283,18 +300,22 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
 
             @Override
             void format(StringBuilder str) {
-                format(str, new String[]{"otherAllocations", "fixed", "objects", "values", "locks", "ensureVirtual"},
-                                new Object[]{otherAllocations, fixed, objects, values, locks, ensureVirtual});
+                format(str, new String[] { "otherAllocations", "fixed", "objects", "values", "locks", "ensureVirtual" },
+                        new Object[] { otherAllocations, fixed, objects, values, locks, ensureVirtual });
             }
         });
     }
 
-    private void materializeWithCommit(FixedNode fixed, VirtualObjectNode virtual, List<AllocatedObjectNode> objects, List<List<MonitorIdNode>> locks, List<ValueNode> values,
-                    List<Boolean> ensureVirtual, List<ValueNode> otherAllocations, boolean requiresStrictLockOrder, ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
+    private void materializeWithCommit(FixedNode fixed, VirtualObjectNode virtual, List<AllocatedObjectNode> objects,
+            List<List<MonitorIdNode>> locks, List<ValueNode> values,
+            List<Boolean> ensureVirtual, List<ValueNode> otherAllocations, boolean requiresStrictLockOrder,
+            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
         ObjectState obj = getObjectState(virtual);
 
         ValueNode[] entries = obj.getEntries();
         ValueNode representation = virtual.getMaterializedRepresentation(fixed, entries, obj.getLocks());
+        // System.out.println("Escaping object " + virtual + " with materialized value "
+        // + representation);
         escape(virtual.getObjectId(), representation);
         obj = getObjectState(virtual);
         PartialEscapeClosure.updateStatesForMaterialized(this, virtual, obj.getMaterializedValue());
@@ -311,7 +332,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     VirtualObjectNode entryVirtual = (VirtualObjectNode) entries[i];
                     ObjectState entryObj = getObjectState(entryVirtual);
                     if (entryObj.isVirtual()) {
-                        materializeWithCommit(fixed, entryVirtual, objects, locks, values, ensureVirtual, otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects);
+                        materializeWithCommit(fixed, entryVirtual, objects, locks, values, ensureVirtual,
+                                otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects);
                         entryObj = getObjectState(entryVirtual);
                     }
                     values.set(pos + i, entryObj.getMaterializedValue());
@@ -325,24 +347,28 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                 for (VirtualObjectNode other : virtualObjects) {
                     if (other != virtual && hasObjectState(other.getObjectId())) {
                         ObjectState otherState = getObjectState(other);
-                        if (otherState.isVirtual() && otherState.hasLocks() && otherState.getMinimumLockDepth() < lockDepth) {
-                            materializeWithCommit(fixed, other, objects, locks, values, ensureVirtual, otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects);
+                        if (otherState.isVirtual() && otherState.hasLocks()
+                                && otherState.getMinimumLockDepth() < lockDepth) {
+                            materializeWithCommit(fixed, other, objects, locks, values, ensureVirtual, otherAllocations,
+                                    requiresStrictLockOrder, virtualObjects, materializeEffects);
                         }
                     }
                 }
             }
 
-            objectMaterialized(virtual, (AllocatedObjectNode) representation, values.subList(pos, pos + entries.length));
+            objectMaterialized(virtual, (AllocatedObjectNode) representation,
+                    values.subList(pos, pos + entries.length));
         } else {
             VirtualUtil.trace(options, debug, "materialized %s as %s", virtual, representation);
             otherAllocations.add(representation);
             assert obj.getLocks() == null;
         }
         materializeEffects.addLog(fixed.graph().getOptimizationLog(),
-                        optimizationLog -> optimizationLog.getPartialEscapeLog().objectMaterialized(virtual));
+                optimizationLog -> optimizationLog.getPartialEscapeLog().objectMaterialized(virtual));
     }
 
-    protected void objectMaterialized(VirtualObjectNode virtual, AllocatedObjectNode representation, List<ValueNode> values) {
+    protected void objectMaterialized(VirtualObjectNode virtual, AllocatedObjectNode representation,
+            List<ValueNode> values) {
         VirtualUtil.trace(options, debug, "materialized %s as %s with values %s", virtual, representation, values);
     }
 
