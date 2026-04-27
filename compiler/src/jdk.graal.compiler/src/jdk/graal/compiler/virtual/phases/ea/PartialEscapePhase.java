@@ -30,9 +30,6 @@ import static jdk.graal.compiler.core.common.GraalOptions.EscapeAnalyzeOnly;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
-
-import org.graalvm.collections.EconomicSet;
-
 import jdk.graal.compiler.debug.DebugCloseable;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.nodes.FixedWithNextNode;
@@ -53,6 +50,7 @@ import jdk.graal.compiler.phases.BasePhase;
 import jdk.graal.compiler.phases.common.CanonicalizerPhase;
 import jdk.graal.compiler.phases.graph.ReentrantBlockIterator;
 import jdk.graal.compiler.phases.schedule.SchedulePhase;
+import org.graalvm.collections.EconomicSet;
 
 /**
  * Performs <a href="https://en.wikipedia.org/wiki/Escape_analysis">Partial
@@ -102,6 +100,7 @@ import jdk.graal.compiler.phases.schedule.SchedulePhase;
 public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
 
     static class Options {
+
         //@formatter:off
         @Option(help = "", type = OptionType.Debug)
         public static final OptionKey<Boolean> OptEarlyReadElimination = new OptionKey<>(true);
@@ -111,39 +110,75 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     private final boolean readElimination;
     private final BasePhase<CoreProviders> cleanupPhase;
 
-    public PartialEscapePhase(boolean iterative, CanonicalizerPhase canonicalizer, OptionValues options) {
-        this(iterative, Options.OptEarlyReadElimination.getValue(options), canonicalizer, null, options);
+    public PartialEscapePhase(
+            boolean iterative,
+            CanonicalizerPhase canonicalizer,
+            OptionValues options) {
+        this(
+                iterative,
+                Options.OptEarlyReadElimination.getValue(options),
+                canonicalizer,
+                null,
+                options);
     }
 
-    public PartialEscapePhase(boolean iterative, CanonicalizerPhase canonicalizer,
-            BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
-        this(iterative, Options.OptEarlyReadElimination.getValue(options), canonicalizer, cleanupPhase, options);
+    public PartialEscapePhase(
+            boolean iterative,
+            CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase,
+            OptionValues options) {
+        this(
+                iterative,
+                Options.OptEarlyReadElimination.getValue(options),
+                canonicalizer,
+                cleanupPhase,
+                options);
     }
 
-    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer,
-            BasePhase<CoreProviders> cleanupPhase, OptionValues options) {
-        super(iterative ? EscapeAnalysisIterations.getValue(options) : 1, canonicalizer);
+    public PartialEscapePhase(
+            boolean iterative,
+            boolean readElimination,
+            CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase,
+            OptionValues options) {
+        super(
+                iterative ? EscapeAnalysisIterations.getValue(options) : 1,
+                canonicalizer);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
     }
 
-    public PartialEscapePhase(int iterations, boolean readElimination, CanonicalizerPhase canonicalizer,
+    public PartialEscapePhase(
+            int iterations,
+            boolean readElimination,
+            CanonicalizerPhase canonicalizer,
             BasePhase<CoreProviders> cleanupPhase) {
         super(iterations, canonicalizer);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
     }
 
-    public PartialEscapePhase(boolean iterative, boolean readElimination, CanonicalizerPhase canonicalizer,
-            BasePhase<CoreProviders> cleanupPhase, OptionValues options,
+    public PartialEscapePhase(
+            boolean iterative,
+            boolean readElimination,
+            CanonicalizerPhase canonicalizer,
+            BasePhase<CoreProviders> cleanupPhase,
+            OptionValues options,
             SchedulePhase.SchedulingStrategy strategy) {
-        super(iterative ? EscapeAnalysisIterations.getValue(options) : 1, canonicalizer, false, strategy);
+        super(
+                iterative ? EscapeAnalysisIterations.getValue(options) : 1,
+                canonicalizer,
+                false,
+                strategy);
         this.readElimination = readElimination;
         this.cleanupPhase = cleanupPhase;
     }
 
     @Override
-    protected void postIteration(StructuredGraph graph, CoreProviders context, EconomicSet<Node> changedNodes) {
+    protected void postIteration(
+            StructuredGraph graph,
+            CoreProviders context,
+            EconomicSet<Node> changedNodes) {
         super.postIteration(graph, context, changedNodes);
         if (cleanupPhase != null) {
             cleanupPhase.apply(graph, context);
@@ -154,8 +189,13 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     public Optional<NotApplicable> notApplicableTo(GraphState graphState) {
         return NotApplicable.ifAny(
                 super.notApplicableTo(graphState),
-                NotApplicable.unlessRunBefore(this, StageFlag.HIGH_TIER_LOWERING, graphState),
-                cleanupPhase != null ? cleanupPhase.notApplicableTo(graphState) : ALWAYS_APPLICABLE);
+                NotApplicable.unlessRunBefore(
+                        this,
+                        StageFlag.HIGH_TIER_LOWERING,
+                        graphState),
+                cleanupPhase != null
+                        ? cleanupPhase.notApplicableTo(graphState)
+                        : ALWAYS_APPLICABLE);
     }
 
     @Override
@@ -169,14 +209,18 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         }
     }
 
-    // Function to print only the user defined method
+    // TODO: Function to print only the user defined method
     public void checkUserMethod(StructuredGraph graph) {
-        List<String> classNames = List.of("Test", "A");
         var method = graph.method();
         if (method != null) {
-            String className = method.getDeclaringClass().toJavaName();
-            if (classNames.contains(className)) {
-                System.err.println("[PartialEscapePhase.java] Running on: " + method.format("%H.%n(%p)"));
+            if ("Test.java".equals(
+                    method.getDeclaringClass().getSourceFileName())) {
+                System.err.println("[PartialEscapePhase.java]: Running PartialEscapePhase on method: "
+                        + method.format("%H.%n(%p)"));
+                System.out.println("==========================================================");
+                System.out.println(
+                        "[PartialEscapePhase.java] Running on: " +
+                                method.format("%H.%n(%p)"));
             }
         }
     }
@@ -187,7 +231,10 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         if (matchGraph(graph)) {
             checkUserMethod(graph);
             if (readElimination || graph.hasVirtualizableAllocation()) {
-                try (DebugCloseable ignored = graph.getOptimizationLog().enterPartialEscapeAnalysis()) {
+                try (
+                        DebugCloseable ignored = graph
+                                .getOptimizationLog()
+                                .enterPartialEscapeAnalysis()) {
                     runAnalysis(graph, context);
                 }
             }
@@ -195,20 +242,32 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
     }
 
     protected boolean matchGraph(StructuredGraph graph) {
-        return VirtualUtil.matches(graph, EscapeAnalyzeOnly.getValue(graph.getOptions()));
+        return VirtualUtil.matches(
+                graph,
+                EscapeAnalyzeOnly.getValue(graph.getOptions()));
     }
 
     @Override
-    protected Closure<?> createEffectsClosure(CoreProviders context, ScheduleResult schedule, ControlFlowGraph cfg,
+    protected Closure<?> createEffectsClosure(
+            CoreProviders context,
+            ScheduleResult schedule,
+            ControlFlowGraph cfg,
             OptionValues options) {
-        for (VirtualObjectNode virtual : cfg.graph.getNodes(VirtualObjectNode.TYPE)) {
+        for (VirtualObjectNode virtual : cfg.graph.getNodes(
+                VirtualObjectNode.TYPE)) {
             virtual.resetObjectId();
         }
         assert schedule != null;
         if (readElimination) {
-            return new PEReadEliminationClosure(schedule, context, virtualAnchorSupplier());
+            return new PEReadEliminationClosure(
+                    schedule,
+                    context,
+                    virtualAnchorSupplier());
         } else {
-            return new PartialEscapeClosure.Final(schedule, context, virtualAnchorSupplier());
+            return new PartialEscapeClosure.Final(
+                    schedule,
+                    context,
+                    virtualAnchorSupplier());
         }
     }
 

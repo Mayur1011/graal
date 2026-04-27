@@ -210,6 +210,7 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
      * reachable from the
      * entries.
      */
+    // TODO: this is entry materialization function
     @SuppressWarnings("try")
     public void materializeBefore(FixedNode fixed, VirtualObjectNode virtual, boolean requiresStrictLockOrder,
             ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {

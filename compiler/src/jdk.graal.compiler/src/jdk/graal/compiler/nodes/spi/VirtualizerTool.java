@@ -38,7 +38,8 @@ import jdk.graal.compiler.options.OptionValues;
 import jdk.vm.ci.meta.JavaKind;
 
 /**
- * This tool can be used to query the current state (normal/virtualized/re-materialized) of values
+ * This tool can be used to query the current state
+ * (normal/virtualized/re-materialized) of values
  * and to describe the actions that would be taken for this state.
  *
  * See also {@link Virtualizable}.
@@ -46,7 +47,8 @@ import jdk.vm.ci.meta.JavaKind;
 public interface VirtualizerTool extends CoreProviders {
 
     /**
-     * This method should be used to query the maximum size of virtualized objects before attempting
+     * This method should be used to query the maximum size of virtualized objects
+     * before attempting
      * virtualization.
      *
      * @return the maximum number of entries for virtualized objects.
@@ -58,35 +60,44 @@ public interface VirtualizerTool extends CoreProviders {
     /**
      * Introduces a new virtual object to the current state.
      *
-     * @param virtualObject the new virtual object.
-     * @param entryState the initial state of the virtual object's fields.
-     * @param locks the initial locking depths.
-     * @param sourcePosition a source position for the new node or null if none is available
+     * @param virtualObject     the new virtual object.
+     * @param entryState        the initial state of the virtual object's fields.
+     * @param locks             the initial locking depths.
+     * @param sourcePosition    a source position for the new node or null if none
+     *                          is available
      * @param ensureVirtualized true if this object needs to stay virtual
      */
-    void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks, NodeSourcePosition sourcePosition, boolean ensureVirtualized);
+    void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks,
+            NodeSourcePosition sourcePosition, boolean ensureVirtualized);
 
     /**
-     * Returns a VirtualObjectNode if the given value is aliased with a virtual object that is still
-     * virtual, the materialized value of the given value is aliased with a virtual object that was
-     * materialized, the replacement if the give value was replaced, otherwise the given value.
+     * Returns a VirtualObjectNode if the given value is aliased with a virtual
+     * object that is still
+     * virtual, the materialized value of the given value is aliased with a virtual
+     * object that was
+     * materialized, the replacement if the give value was replaced, otherwise the
+     * given value.
      *
-     * Replacements via {@link #replaceWithValue(ValueNode)} are not immediately committed. This
-     * method can be used to determine if a value was replaced by another one (e.g., a load field by
+     * Replacements via {@link #replaceWithValue(ValueNode)} are not immediately
+     * committed. This
+     * method can be used to determine if a value was replaced by another one (e.g.,
+     * a load field by
      * the loaded value).
      */
     ValueNode getAlias(ValueNode value);
 
     /**
-     * Sets the entry (field or array element) with the given index in the virtualized object.
+     * Sets the entry (field or array element) with the given index in the
+     * virtualized object.
      *
-     * @param index the index to be set.
-     * @param value the new value for the given index.
+     * @param index      the index to be set.
+     * @param value      the new value for the given index.
      * @param accessKind the kind of the store which might be different than
-     *            {@link VirtualObjectNode#entryKind}.
+     *                   {@link VirtualObjectNode#entryKind}.
      * @return true if the operation was permitted
      */
-    boolean setVirtualEntry(VirtualObjectNode virtualObject, int index, ValueNode value, JavaKind accessKind, long offset);
+    boolean setVirtualEntry(VirtualObjectNode virtualObject, int index, ValueNode value, JavaKind accessKind,
+            long offset);
 
     default void setVirtualEntry(VirtualObjectNode virtualObject, int index, ValueNode value) {
         if (!setVirtualEntry(virtualObject, index, value, null, 0)) {
@@ -107,10 +118,12 @@ public interface VirtualizerTool extends CoreProviders {
     // operations on the current node
 
     /**
-     * Deletes the current node and replaces it with the given virtualized object. If the current
+     * Deletes the current node and replaces it with the given virtualized object.
+     * If the current
      * node is a {@link WithExceptionNode}, kills the exception edge.
      *
-     * @param virtualObject the virtualized object that should replace the current node.
+     * @param virtualObject the virtualized object that should replace the current
+     *                      node.
      */
     void replaceWithVirtual(VirtualObjectNode virtualObject);
 
@@ -122,7 +135,8 @@ public interface VirtualizerTool extends CoreProviders {
     void replaceWithValue(ValueNode replacement);
 
     /**
-     * Deletes the current node. If the current node is a {@link WithExceptionNode}, kills the
+     * Deletes the current node. If the current node is a {@link WithExceptionNode},
+     * kills the
      * exception edge.
      */
     void delete();
@@ -130,14 +144,16 @@ public interface VirtualizerTool extends CoreProviders {
     /**
      * Replaces an input of the current node.
      *
-     * @param oldInput the old input value.
+     * @param oldInput    the old input value.
      * @param replacement the new input value.
      */
     void replaceFirstInput(Node oldInput, Node replacement);
 
     /**
-     * Adds the given node to the graph. This action will only be performed when, and if, the
-     * changes are committed. This should be used for nodes which have been explicitly created by
+     * Adds the given node to the graph. This action will only be performed when,
+     * and if, the
+     * changes are committed. This should be used for nodes which have been
+     * explicitly created by
      * the caller. If it's unclear who might have created a node, use
      * {@link #ensureAdded(ValueNode)}.
      *
@@ -146,8 +162,10 @@ public interface VirtualizerTool extends CoreProviders {
     void addNode(ValueNode node);
 
     /**
-     * Adds the given node to the graph. This action will only be performed when, and if, the
-     * changes are committed. This will only add the node if it hasn't already been added when the
+     * Adds the given node to the graph. This action will only be performed when,
+     * and if, the
+     * changes are committed. This will only add the node if it hasn't already been
+     * added when the
      * changed are committed.
      *
      * @param node the node to add.
@@ -172,7 +190,8 @@ public interface VirtualizerTool extends CoreProviders {
 
     /**
      *
-     * Returns whether deoptimization can recover from virtualizing large unsafe accesses to a byte
+     * Returns whether deoptimization can recover from virtualizing large unsafe
+     * accesses to a byte
      * array.
      *
      * @return true if deoptimization can recover, false if not.
@@ -185,7 +204,8 @@ public interface VirtualizerTool extends CoreProviders {
 
     /**
      *
-     * Creates a deep-copy of the VirtualizerTool, snapshotting the current virtual ObjectStates.
+     * Creates a deep-copy of the VirtualizerTool, snapshotting the current virtual
+     * ObjectStates.
      *
      * @return new VirtualizerTool, deep-copied from this.
      */

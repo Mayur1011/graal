@@ -394,11 +394,11 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             virtualObject.setObjectId(id);
         }
         // for my debugging purpose.
-        var className = current.getNodeSourcePosition() != null
-                ? current.getNodeSourcePosition().getMethod().getDeclaringClass().toJavaName()
+        var methodName = current.getNodeSourcePosition() != null
+                ? current.getNodeSourcePosition().getMethod()
                 : null;
 
-        if (className != null && (className.startsWith("A"))) {
+        if (methodName != null && "Test.java".equals(methodName.getDeclaringClass().getSourceFileName())) {
             int bci = -1;
             String sourceDesc = "<unknown>";
             if (current != null && current.getNodeSourcePosition() != null) {
@@ -407,8 +407,9 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             }
             System.out.println("-------------------------------------------------");
             System.out.println(
-                    "[VirtualizerToolImpl.java] Creating virtual object with id: " + id + " in class: " + className);
-            System.out.println("[VirtualizerToolImpl.java] BCI of current node: " + bci);
+                    "[VirtualizerToolImpl.java] Creating virtual object with id: " + id + " in class: "
+                            + methodName.getDeclaringClass().toJavaName());
+            // System.out.println("[VirtualizerToolImpl.java] BCI of current node: " + bci);
             System.out.println("[VirtualizerToolImpl.java] Current node: " + current);
             System.out.println("[VirtualizerToolImpl.java] Source position of current node: " + sourceDesc);
             System.out.println("-------------------------------------------------");
