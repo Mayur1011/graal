@@ -281,6 +281,7 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     for (ValueNode value : values) {
                         commit.getValues().add(graph.addOrUniqueWithInputs(value));
                     }
+                    // TODO: adding locks back as we are materializing the virtual node
                     for (List<MonitorIdNode> monitorIds : locks) {
                         commit.addLocks(monitorIds);
                     }
@@ -314,9 +315,14 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
         ObjectState obj = getObjectState(virtual);
 
         ValueNode[] entries = obj.getEntries();
+
+        // compiler here creates a allocatedobjectnode to show that this virtual object
+        // should be allocated on heap.
         ValueNode representation = virtual.getMaterializedRepresentation(fixed, entries, obj.getLocks());
         // System.out.println("Escaping object " + virtual + " with materialized value "
         // + representation);
+
+        // updating the state of this virtual object.
         escape(virtual.getObjectId(), representation);
         obj = getObjectState(virtual);
         PartialEscapeClosure.updateStatesForMaterialized(this, virtual, obj.getMaterializedValue());

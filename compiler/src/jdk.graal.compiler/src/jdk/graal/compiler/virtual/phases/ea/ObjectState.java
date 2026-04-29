@@ -42,24 +42,44 @@ import jdk.graal.compiler.nodes.virtual.VirtualObjectState;
 import jdk.vm.ci.meta.JavaConstant;
 
 /**
- * This class describes the state of a virtual object while iterating over the graph. It describes
- * the fields or array elements (called "entries") and the lock count if the object is still
- * virtual. If the object was materialized, it contains the current materialized value.
+ * This class describes the state of a virtual object while iterating over the
+ * graph. It describes
+ * the fields or array elements (called "entries") and the lock count if the
+ * object is still
+ * virtual. If the object was materialized, it contains the current materialized
+ * value.
  */
 public class ObjectState {
 
     public static final CounterKey CREATE_ESCAPED_OBJECT_STATE = DebugContext.counter("CreateEscapeObjectState");
     public static final CounterKey GET_ESCAPED_OBJECT_STATE = DebugContext.counter("GetEscapeObjectState");
 
+    /*
+     * When object is completely virtual this array holds the current values of its
+     * individual fields. This is needed for Scalar Replacement.
+     */
     private ValueNode[] entries;
-    private ValueNode materializedValue;
+
+    private ValueNode materializedValue; // points to the graph node representing that real, allocated object reference.
+
+    /*
+     * tracks the locks that are currently held on this object, if it is virtual.
+     * This is needed for lock elision and to ensure that we don't virtualize
+     * objects that are locked.
+     */
     private LockState locks;
+
+    /*
+     * if true, this object must be virtualized. This is needed to ensure that we
+     * don't accidentally materialize objects that are required to be virtual.
+     */
     private boolean ensureVirtualized;
 
     private EscapeObjectState cachedState;
 
     /**
-     * ObjectStates are duplicated lazily, if this field is true then the state needs to be copied
+     * ObjectStates are duplicated lazily, if this field is true then the state
+     * needs to be copied
      * before it is modified.
      */
     boolean copyOnWrite;
@@ -98,7 +118,8 @@ public class ObjectState {
     }
 
     /**
-     * Ensure that if an {@link JavaConstant#forIllegal() illegal value} is seen that the previous
+     * Ensure that if an {@link JavaConstant#forIllegal() illegal value} is seen
+     * that the previous
      * value is a double word value, or a primitive in a byte array.
      */
     public static boolean checkIllegalValues(ValueNode[] values) {
@@ -124,11 +145,13 @@ public class ObjectState {
         while (i > 0 && values[i].isIllegalConstant()) {
             i = valuePos - ++bytes;
         }
-        assert i >= 0 && values[i].getStackKind().isPrimitive() : Assertions.errorMessage(i, values[i], values, valuePos);
+        assert i >= 0 && values[i].getStackKind().isPrimitive()
+                : Assertions.errorMessage(i, values[i], values, valuePos);
         int j = valuePos + 1;
         ValueNode value = values[i];
         int totalBytes = value.getStackKind().getByteCount();
-        // Stamps erase the actual kind of a value. totalBytes is therefore not reliable.
+        // Stamps erase the actual kind of a value. totalBytes is therefore not
+        // reliable.
         while (j < values.length && values[i].isIllegalConstant()) {
             j++;
         }
@@ -136,21 +159,26 @@ public class ObjectState {
         return j - valuePos;
     }
 
-    public EscapeObjectState createEscapeObjectState(DebugContext debug, MetaAccessExtensionProvider metaAccessExtensionProvider, VirtualObjectNode virtual) {
+    public EscapeObjectState createEscapeObjectState(DebugContext debug,
+            MetaAccessExtensionProvider metaAccessExtensionProvider, VirtualObjectNode virtual) {
         GET_ESCAPED_OBJECT_STATE.increment(debug);
         if (cachedState == null) {
             CREATE_ESCAPED_OBJECT_STATE.increment(debug);
+
+            // Object's state can be virtual or materialized.
             if (isVirtual()) {
                 /*
                  * Clear out entries that are default values anyway.
                  *
-                 * TODO: this should be propagated into ObjectState.entries, but that will take some
+                 * TODO: this should be propagated into ObjectState.entries, but that will take
+                 * some
                  * more refactoring.
                  */
                 ValueNode[] newEntries = entries.clone();
                 for (int i = 0; i < newEntries.length; i++) {
                     JavaConstant newEntryConstant = newEntries[i].asJavaConstant();
-                    if (newEntryConstant != null && newEntryConstant.equals(JavaConstant.defaultForKind(virtual.entryKind(metaAccessExtensionProvider, i).getStackKind()))) {
+                    if (newEntryConstant != null && newEntryConstant.equals(JavaConstant
+                            .defaultForKind(virtual.entryKind(metaAccessExtensionProvider, i).getStackKind()))) {
                         newEntries[i] = null;
                     }
                 }
@@ -164,12 +192,14 @@ public class ObjectState {
     }
 
     public boolean isVirtual() {
-        assert materializedValue == null ^ entries == null : Assertions.errorMessageContext("materializedValues", materializedValue, "entries", entries);
+        assert materializedValue == null ^ entries == null
+                : Assertions.errorMessageContext("materializedValues", materializedValue, "entries", entries);
         return materializedValue == null;
     }
 
     /**
-     * Users of this method are not allowed to change the entries of the returned array.
+     * Users of this method are not allowed to change the entries of the returned
+     * array.
      */
     public ValueNode[] getEntries() {
         assert isVirtual();
@@ -210,7 +240,7 @@ public class ObjectState {
 
     public void addLock(MonitorIdNode monitorId) {
         GraalError.guarantee(locks == null || locks.monitorId.getLockDepth() < monitorId.getLockDepth(),
-                        "Adding lock %d to locks %s", monitorId.getLockDepth(), locks);
+                "Adding lock %d to locks %s", monitorId.getLockDepth(), locks);
         locks = new LockState(monitorId, locks);
     }
 
@@ -231,18 +261,20 @@ public class ObjectState {
     }
 
     public int getMaximumLockDepth() {
-        // Assume locks are ordered by their nesting depth in descending order (highest first).
+        // Assume locks are ordered by their nesting depth in descending order (highest
+        // first).
         return locks.monitorId.getLockDepth();
     }
 
     public int getMinimumLockDepth() {
-        // Assume locks are ordered by their nesting depth in descending order (highest first).
+        // Assume locks are ordered by their nesting depth in descending order (highest
+        // first).
         LockState current = locks;
         int currentLockDepth = current.monitorId.getLockDepth();
         while (current.next != null) {
             int nextLockDepth = current.next.monitorId.getLockDepth();
             GraalError.guarantee(currentLockDepth > nextLockDepth,
-                            "Current: %s; Next: %s", current, current.next);
+                    "Current: %s; Next: %s", current, current.next);
             current = current.next;
             currentLockDepth = nextLockDepth;
         }
