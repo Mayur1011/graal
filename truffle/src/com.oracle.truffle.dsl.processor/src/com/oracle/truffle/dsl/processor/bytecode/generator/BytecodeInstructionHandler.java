@@ -544,7 +544,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 case NEXT:
                 case BRANCH_FALSE:
                 case BRANCH:
-                    boolean bciReturn = ElementUtils.typeEquals(type(int.class), this.getReturnType());
+                    boolean bciReturn = !ElementUtils.typeEquals(type(void.class), this.getReturnType());
                     if (bciReturn) {
                         b.startAssign("bci");
                         emitCallHandler(b);
@@ -1862,6 +1862,9 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 b.startStatement();
                 emitCallSlowPath(b, name -> name, null);
                 b.end(); // statement
+                if (handlerLayout.isTailCall()) {
+                    parent.emitStackEffect(b, instruction.getStackEffect());
+                }
                 b.statement("return bci + ", String.valueOf(instruction.getInstructionLength()));
 
                 b.end(); // catch

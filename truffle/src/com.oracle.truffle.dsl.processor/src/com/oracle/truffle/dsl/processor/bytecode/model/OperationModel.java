@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2022, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -189,7 +189,6 @@ public class OperationModel implements PrettyPrintable {
 
     public OperationArgument[] operationBeginArguments = EMPTY_ARGUMENTS;
     public OperationArgument[] operationEndArguments = EMPTY_ARGUMENTS;
-    public boolean operationBeginArgumentVarArgs = false;
 
     public OperationModel(BytecodeDSLModel parent, int id, OperationKind kind, String name, String builderName, String javadoc) {
         this.parent = parent;
@@ -265,11 +264,6 @@ public class OperationModel implements PrettyPrintable {
         return this;
     }
 
-    public OperationModel setOperationBeginArgumentVarArgs(boolean varArgs) {
-        this.operationBeginArgumentVarArgs = varArgs;
-        return this;
-    }
-
     public OperationModel setOperationBeginArguments(OperationArgument... operationBeginArguments) {
         if (this.operationBeginArguments != EMPTY_ARGUMENTS && this.operationBeginArguments.length != operationBeginArguments.length) {
             throw new AssertionError("Number of begin arguments for %s should not change (was %d, attempted to set to %d).".formatted(name, this.operationBeginArguments.length,
@@ -318,6 +312,13 @@ public class OperationModel implements PrettyPrintable {
 
     public boolean isCustom() {
         return kind == OperationKind.CUSTOM || kind == OperationKind.CUSTOM_YIELD || kind == OperationKind.CUSTOM_SHORT_CIRCUIT || kind == OperationKind.CUSTOM_INSTRUMENTATION;
+    }
+
+    public boolean isCustomVariadic() {
+        return switch (kind) {
+            case CUSTOM, CUSTOM_YIELD, CUSTOM_INSTRUMENTATION -> isVariadic && !isTransparent;
+            default -> false;
+        };
     }
 
     public boolean requiresRootOperation() {

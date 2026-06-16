@@ -28,15 +28,29 @@ package com.oracle.svm.interpreter;
 import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 
 /**
- * Wraps exceptions thrown by the interpreted code or by compiled code. This is a way to
- * differentiate between exceptions caused by interpreter itself vs. the code it executes.
+ * Wraps exceptions thrown by the interpreter or by compiled code. This is a way to
+ * differentiate between exceptions caused by the interpreter itself vs. the code
+ * being interpreted.
+ * <p>
+ * This exception must only be used within the interpreter loop ({@code Interpreter.Root#executeBodyFromBCI})
+ * and its helper methods. Exceptions escaping the interpreter loop (e.g., during exception unwinding)
+ * should be unwrapped. Conversely, exceptions raised by the runtime support routines called from the
+ * interpreter loop should be wrapped.
+ * <p>
+ * GR-74439 will replace this class with a new mechanism for better separating exceptions
+ * caused by the interpreter itself vs. the code being interpreted.
  */
 @InternalVMMethod
 public final class SemanticJavaException extends RuntimeException {
     @java.io.Serial static final long serialVersionUID = 8271499373291031203L;
 
     private SemanticJavaException(Throwable cause) {
-        super(cause);
+        /*
+         * RuntimeException(Throwable) derives the wrapper message from cause.toString(), which can
+         * itself throw for guest exceptions with lazy or hostile message formatting. Preserve only
+         * the cause so semantic guest exceptions cannot turn into host-side wrapper failures.
+         */
+        super(null, cause);
     }
 
     @Override

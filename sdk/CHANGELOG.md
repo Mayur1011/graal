@@ -23,6 +23,12 @@ This changelog summarizes major changes between GraalVM SDK versions. The main f
 * GR-73792: Isolated `Engine` and `Context` are now available in GraalVM Community Edition; enable with `engine.SpawnIsolate=true`. For community language libraries, use `-isolate-community` artifacts (for example, `js-isolate-community`). See the [Polyglot Isolates documentation](https://www.graalvm.org/latest/reference-manual/embed-languages/#polyglot-isolates) for details.
 * GR-73872: Added constant-option support with `ConstantOptionKey<T>`, `OptionDescriptor#isConstant()`, and `OptionDescriptor.Builder#constant(boolean)`. Constant values are resolved from `-Dpolyglot.<option-name>=<value>` (or the declared default) before polyglot runtime initialization and cannot be changed at runtime. On native-image, they are captured during image build.
 * GR-73872: Added support for native-image preset options. Polyglot options provided during native-image build are captured and validated as preset defaults, then applied at runtime (including default engine creation) with normal builder-option precedence.
+* GR-70924: Polyglot isolate hosts now use the fallback Truffle runtime by default, enabling isolate hosting to work on JDKs that do not support the optimized Truffle runtime.
+* GR-52759: Added `AbstractLanguageLauncher#decodeArgument(byte[])`, allowing language launchers to customize decoding of native launcher command-line arguments.
+* GR-75876: Added `FileSystem#allowInternalResources(FileSystem)`, allowing embedders to expose internal resources and language homes through a read-only view of the default file system when using a custom file system. Deprecated `FileSystem#allowInternalResourceAccess(FileSystem)`.
+* GR-75361: Added `Context.Builder#spawnIsolate(boolean)` and `Engine.Builder#spawnIsolate(boolean)` to configure [polyglot isolates](https://www.graalvm.org/latest/reference-manual/embed-languages/#polyglot-isolates) directly.
+* GR-75361: When an `Engine` or `Context` is created with a permitted language that is unavailable on the class path or module path, but a polyglot isolate for that language is present, the isolated language is selected automatically.
+* GR-75361: Added `Engine.supportsCompilation()` to check whether the current host runtime supports optimized guest language execution.
 
 ## Version 25.0.0
 * GR-60636 Truffle now stops compiling when the code cache fills up on HotSpot. A warning is printed when that happens.

@@ -30,7 +30,6 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.LocationIdentity;
 
-import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.graal.meta.KnownOffsets;
@@ -90,11 +89,11 @@ public final class PLTGOTNonSnippetLowerings {
             SharedMethod caller = (SharedMethod) graph.method();
             if (methodAddressResolutionSupport.shouldCallViaPLTGOT(caller, callee)) {
                 ValueNode heapBaseNode = graph.addOrUnique(ReadReservedRegister.createReadHeapBaseNode(graph));
-                int targetGotEntry = gotEntryAllocator.getMethodGotEntry(callee);
-                ValueNode offsetNode = ConstantNode.forIntegerKind(SubstrateTarget.getWordKind(), GOTAccess.getGotEntryOffsetFromHeapRegister(targetGotEntry), graph);
+                int targetGOTEntry = gotEntryAllocator.getMethodGOTEntry(callee);
+                ValueNode offsetNode = ConstantNode.forIntegerKind(SubstrateTarget.getWordKind(), GOTAccess.getGOTEntryOffsetFromHeapRegister(targetGOTEntry), graph);
                 OffsetAddressNode offsetAddressNode = graph.unique(new OffsetAddressNode(heapBaseNode, offsetNode));
                 ReadNode methodAddress = graph
-                                .add(new ReadNode(offsetAddressNode, LocationIdentity.ANY_LOCATION, FrameAccess.getWordStamp(), BarrierType.NONE, MemoryOrderMode.PLAIN));
+                                .add(new ReadNode(offsetAddressNode, LocationIdentity.ANY_LOCATION, SubstrateTarget.getWordStamp(), BarrierType.NONE, MemoryOrderMode.PLAIN));
                 SubstrateGOTCallTargetNode loweredCallTarget = graph.add(
                                 new SubstrateGOTCallTargetNode(methodAddress, parameters.toArray(ValueNode.EMPTY_ARRAY), callTarget.returnStamp(), signature, callee, callType, invokeKind));
 
@@ -120,7 +119,7 @@ public final class PLTGOTNonSnippetLowerings {
              */
             if (methodAddressResolutionSupport.shouldCallViaPLTGOT(caller, callee)) {
                 for (SharedMethod implementation : callee.getImplementations()) {
-                    gotEntryAllocator.reserveMethodGotEntry(implementation);
+                    gotEntryAllocator.reserveMethodGOTEntry(implementation);
                 }
             }
             return super.createIndirectCall(graph, callTarget, parameters, callee, signature, callType, invokeKind, entry);

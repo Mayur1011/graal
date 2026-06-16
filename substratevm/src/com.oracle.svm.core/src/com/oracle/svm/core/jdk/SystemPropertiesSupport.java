@@ -26,7 +26,6 @@ package com.oracle.svm.core.jdk;
 
 import static jdk.graal.compiler.options.LibGraalSupport.LIBGRAAL_SETTING_PROPERTY_PREFIX;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -40,12 +39,14 @@ import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.ProcessProperties;
 import org.graalvm.nativeimage.hosted.RuntimeSystemProperties;
 import org.graalvm.nativeimage.impl.ProcessPropertiesSupport;
 import org.graalvm.nativeimage.impl.RuntimeSystemPropertiesSupport;
 
 import com.oracle.svm.core.FutureDefaultsOptions;
 import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.OS;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.VM;
@@ -154,6 +155,11 @@ public abstract class SystemPropertiesSupport implements RuntimeSystemProperties
         lazyProperties.add(new LazySystemProperty("java.home", this::javaHomeValue));
         lazyProperties.add(new LazySystemProperty("java.io.tmpdir", this::javaIoTmpdirValue));
         lazyProperties.add(new LazySystemProperty("java.library.path", this::javaLibraryPathValue));
+        /*
+         * Match HotSpot's dll_dir system property: this is the platform-specific directory used by
+         * boot-loader native library lookup.
+         */
+        lazyProperties.add(new LazySystemProperty("sun.boot.library.path", this::sunBootLibraryPathValue));
         lazyProperties.add(new LazySystemProperty("os.version", this::osVersionValue));
         lazyProperties.add(new LazySystemProperty(UserSystemProperty.LANGUAGE, () -> LocaleSupport.singleton().getLocale().language()));
         lazyProperties.add(new LazySystemProperty(UserSystemProperty.LANGUAGE_DISPLAY, () -> LocaleSupport.singleton().getLocale().displayLanguage()));
@@ -386,28 +392,78 @@ public abstract class SystemPropertiesSupport implements RuntimeSystemProperties
         if (objectFileStr == null) {
             throw VMError.shouldNotReachHere("Unable to get path to " + jvmLibName() + " image.");
         }
-        var pathToSharedLib = Path.of(objectFileStr);
-        if (!pathToSharedLib.endsWith(jvmLibName())) {
+        if (!pathEndsWithName(objectFileStr, jvmLibName())) {
             throw VMError.shouldNotReachHere("Invalid name for a " + jvmLibName() + " image: " + objectFileStr);
         }
-        // At this point we know that this is a libjvm shared library image
-        try {
-            return pathToSharedLib // <java.home>/{lib|bin}/svm/<jvmLibName()>
-                            .getParent() // <java.home>/{lib|bin}/svm
-                            .getParent() // <java.home>/{lib|bin}
-                            .getParent().toString();
-        } catch (NullPointerException e) {
+        /*
+         * Avoid java.io.File / java.nio.file.Path here. Initializing those classes needs system
+         * properties that can recursively query java.home. The path comes from the loaded libjvm
+         * object file on the current platform, so the platform separator is enough.
+         */
+        String svmDirectory = parentPath(objectFileStr); // <java.home>/{lib|bin}/svm
+        String libDirectory = parentPath(svmDirectory); // <java.home>/{lib|bin}
+        String javaHome = parentPath(libDirectory); // <java.home>
+        if (javaHome == null) {
             throw VMError.shouldNotReachHere("Unable to determine java.home for " + objectFileStr);
         }
+        return javaHome;
     }
 
     protected String jvmLibName() {
         throw VMError.shouldNotReachHere("System property java.home is not supported in this configuration");
     }
 
+    protected static boolean pathEndsWithName(String path, String name) {
+        if (path == null) {
+            return false;
+        }
+        int nameStart = path.lastIndexOf(pathSeparator()) + 1;
+        return path.regionMatches(nameStart, name, 0, name.length()) && nameStart + name.length() == path.length();
+    }
+
+    protected static String parentPath(String path) {
+        if (path == null) {
+            return null;
+        }
+        int separatorIndex = path.lastIndexOf(pathSeparator());
+        return separatorIndex < 0 ? null : path.substring(0, separatorIndex);
+    }
+
+    protected static String executableDirectory() {
+        return parentPath(ProcessProperties.getExecutableName());
+    }
+
+    protected static String childPath(String parent, String child) {
+        return parent + pathSeparator() + child;
+    }
+
+    protected String findEnclosingJavaHome(String directory, String bootLibraryDirectoryName, String bootLibraryFileName) {
+        String candidate = directory;
+        while (candidate != null) {
+            String bootLibrary = childPath(childPath(candidate, bootLibraryDirectoryName), bootLibraryFileName);
+            if (pathExists(bootLibrary) && (pathExists(childPath(candidate, "release")) || pathExists(childPath(childPath(candidate, "lib"), "modules")))) {
+                return candidate;
+            }
+            candidate = parentPath(candidate);
+        }
+        return null;
+    }
+
+    protected boolean pathExists(@SuppressWarnings("unused") String path) {
+        return false;
+    }
+
+    private static char pathSeparator() {
+        return OS.getCurrent() == OS.WINDOWS ? '\\' : '/';
+    }
+
     protected abstract String javaIoTmpdirValue();
 
     protected abstract String javaLibraryPathValue();
+
+    protected String sunBootLibraryPathValue() {
+        return "";
+    }
 
     private static class LazySystemProperty {
         private final String key;

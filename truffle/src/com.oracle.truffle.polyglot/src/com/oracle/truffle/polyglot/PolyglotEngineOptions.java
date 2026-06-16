@@ -268,8 +268,8 @@ final class PolyglotEngineOptions {
     @Option(category = OptionCategory.INTERNAL, stability = OptionStability.EXPERIMENTAL, help = "Path to the external isolate launcher.", usageSyntax = "<path>", sandbox = SandboxPolicy.UNTRUSTED)//
     static final OptionKey<String> IsolateLauncher = new OptionKey<>(null, OptionType.defaultType(String.class));
 
-    @Option(category = OptionCategory.EXPERT, stability = OptionStability.STABLE, help = "Stack space headroom for calls to the host.", usageSyntax = "[1, inf)<B>|<KB>|<MB>|<GB>", sandbox = SandboxPolicy.UNTRUSTED)//
-    static final OptionKey<Long> HostCallStackHeadRoom = new OptionKey<>(128L * 1024, createSizeInBytesType("engine.HostCallStackHeadRoom", 1));
+    @Option(category = OptionCategory.EXPERT, stability = OptionStability.STABLE, help = "Stack space headroom for calls to the host. A value of 0 disables this check.", usageSyntax = "[0, inf)<B>|<KB>|<MB>|<GB>", sandbox = SandboxPolicy.UNTRUSTED)//
+    static final OptionKey<Long> HostCallStackHeadRoom = new OptionKey<>(0L, createSizeInBytesType("engine.HostCallStackHeadRoom", 0L));
 
     @Option(category = OptionCategory.EXPERT, stability = OptionStability.STABLE, help = "Stack space headroom for any interpreter call. Supported only in the AOT mode.", //
                     usageSyntax = "[0, inf)<B>|<KB>|<MB>|<GB>", sandbox = SandboxPolicy.UNTRUSTED)//

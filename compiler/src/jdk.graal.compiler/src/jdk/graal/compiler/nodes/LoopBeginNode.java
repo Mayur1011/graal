@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -45,10 +45,13 @@ import jdk.graal.compiler.nodeinfo.InputType;
 import jdk.graal.compiler.nodeinfo.NodeInfo;
 import jdk.graal.compiler.nodes.calc.AddNode;
 import jdk.graal.compiler.nodes.extended.GuardingNode;
+import jdk.graal.compiler.nodes.loop.Loop;
+import jdk.graal.compiler.nodes.loop.LoopsData;
 import jdk.graal.compiler.nodes.spi.LIRLowerable;
 import jdk.graal.compiler.nodes.spi.NodeLIRBuilderTool;
 import jdk.graal.compiler.nodes.spi.SimplifierTool;
 import jdk.graal.compiler.nodes.util.GraphUtil;
+import jdk.graal.compiler.phases.common.util.LoopUtility;
 import jdk.graal.compiler.serviceprovider.SpeculationReasonGroup;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.SpeculationLog;
@@ -66,6 +69,7 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
     protected boolean compilerInverted;
     protected LoopType loopType;
     protected int unrollFactor;
+    protected int countedDescendantCloneFactor;
     protected boolean osrLoop;
     protected boolean mayEmitThreadedCode = false;
     protected boolean nonCountedStripMinedOuter;
@@ -179,6 +183,16 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
     SafepointState guestLoopEndsSafepointState;
 
     /**
+     * State of guest safepoint insertion at the loop head. The default is
+     * {@link SafepointState#OPTIMIZER_DISABLED}. It is enabled when guest safepoint insertion should
+     * emit one safepoint at the loop head instead of emitting safepoints at this loop's back-edges.
+     * Guest safepoints at the loop head and loop ends are mutually exclusive; setters on
+     * {@link LoopBeginNode} and {@link LoopEndNode} enforce that both locations cannot safepoint for
+     * the same loop.
+     */
+    SafepointState guestLoopBeginSafepointState;
+
+    /**
      * A guard that proves that this loop's counter never overflows and wraps around (either in the
      * positive or negative direction).
      */
@@ -214,8 +228,10 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
         loopEndsSafepointState = SafepointState.ENABLED;
         loopExitsSafepointState = SafepointState.ENABLED;
         guestLoopEndsSafepointState = SafepointState.ENABLED;
+        guestLoopBeginSafepointState = SafepointState.OPTIMIZER_DISABLED;
         loopType = LoopType.SIMPLE_LOOP;
         unrollFactor = 1;
+        countedDescendantCloneFactor = 1;
     }
 
     @SuppressWarnings("deprecation")
@@ -265,6 +281,27 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
 
     public boolean canEndsGuestSafepoint() {
         return guestLoopEndsSafepointState.canSafepoint();
+    }
+
+    public SafepointState getGuestLoopBeginSafepointState() {
+        return guestLoopBeginSafepointState;
+    }
+
+    public void setGuestLoopBeginSafepoint(SafepointState newState) {
+        if (guestLoopBeginSafepointState == SafepointState.MUST_NEVER_SAFEPOINT) {
+            GraalError.guarantee(!newState.canSafepoint(), "Safepoints have been disabled for this loop, cannot re-enable them old=%s, new=%s", guestLoopBeginSafepointState, newState);
+        }
+        if (newState.canSafepoint()) {
+            GraalError.guarantee(!guestLoopEndsSafepointState.canSafepoint(),
+                            "Cannot enable a guest safepoint at the loop begin while guest safepoints at loop ends are enabled, loopBeginState=%s, loopEndsState=%s",
+                            newState, guestLoopEndsSafepointState);
+            for (LoopEndNode loopEnd : loopEnds()) {
+                GraalError.guarantee(!loopEnd.getGuestSafepointState().canSafepoint(),
+                                "Cannot enable a guest safepoint at the loop begin while a guest safepoint at a loop end is enabled, loopBeginState=%s, loopEndState=%s",
+                                newState, loopEnd.getGuestSafepointState());
+            }
+        }
+        this.guestLoopBeginSafepointState = newState;
     }
 
     public boolean canExitsSafepoint() {
@@ -379,6 +416,26 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
         unrollFactor = currentUnrollFactor;
     }
 
+    /**
+     * Returns the number of copies of this counted loop that were already created by full or
+     * partial unrolling of ancestor loops.
+     *
+     * @see LoopUtility#updateDescendantLoopCloneFactors(LoopsData, Loop, int)
+     */
+    public int getCountedDescendantCloneFactor() {
+        return countedDescendantCloneFactor;
+    }
+
+    /**
+     * Records the ancestor-created copy count used by full-unroll policy when estimating the cost
+     * of unrolling this counted loop again.
+     *
+     * @see #getCountedDescendantCloneFactor()
+     */
+    public void setCountedDescendantCloneFactor(int countedDescendantCloneFactor) {
+        this.countedDescendantCloneFactor = countedDescendantCloneFactor;
+    }
+
     public void setLoopEndSafepoint(SafepointState newState) {
         GraalError.guarantee(loopEndsSafepointState.canSafepoint() || !newState.canSafepoint(), "New state must not allow safepoints if old did not, old=%s, new=%s", loopEndsSafepointState, newState);
         if (loopEndsSafepointState == SafepointState.MUST_NEVER_SAFEPOINT) {
@@ -408,8 +465,14 @@ public final class LoopBeginNode extends AbstractMergeNode implements IterableNo
     public void setGuestSafepoint(SafepointState newState) {
         GraalError.guarantee(guestLoopEndsSafepointState.canSafepoint() || !newState.canSafepoint(), "New state must not allow safepoints if old did not, old=%s, new=%s", guestLoopEndsSafepointState,
                         newState);
+        GraalError.guarantee(!newState.canSafepoint() || !guestLoopBeginSafepointState.canSafepoint(),
+                        "Cannot enable guest safepoints at loop ends while a guest safepoint at the loop begin is enabled, loopEndsState=%s, loopBeginState=%s", newState,
+                        guestLoopBeginSafepointState);
         /* Store flag locally in case new loop ends are created later on. */
         this.guestLoopEndsSafepointState = newState;
+        if (newState == SafepointState.MUST_NEVER_SAFEPOINT) {
+            setGuestLoopBeginSafepoint(newState);
+        }
         /* Propagate flag to all existing loop ends. */
         for (LoopEndNode loopEnd : loopEnds()) {
             loopEnd.setGuestSafepointState(newState);

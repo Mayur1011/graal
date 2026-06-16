@@ -3,6 +3,14 @@
 This changelog summarizes major changes to GraalVM Native Image.
 
 ## GraalVM 25.1 (Internal Version 25.1.0)
+* (GR-76005) Improve Native Image support for constant `String.format` and `String::formatted` calls by intrinsifying simple format strings in CE. This reduces the reachability of JDK formatting and localization code for applications such as Hello World.
+* (GR-74889) Added Windows support for Native Image JFR recordings and heap dumps.
+* (GR-67169) Added POSIX support for Native Image JFR emergency dumps. When an out-of-memory error occurs while a JFR recording is active, Native Image can preserve in-memory recording data in an emergency JFR file.
+* (GR-75640) Added experimental support for Native Image layered images on Darwin.
+* (GR-53498) Added experimental support for Native Image layered images on AArch64.
+* (GR-76207) `-H:Preserve` now preserves reached lambda proxy classes whose capturing classes are preserved.
+* (GR-73717) Added support for collecting conditional reachability metadata from a native image at run time using `-XX:TraceMetadataConditionPackages`.
+* (GR-75222) Deprecated `native-image-utils generate-filters`. The native-image agent applies built-in filters by default; pass custom filter JSON directly with `caller-filter-file=<path>` or `access-filter-file=<path>` when additional filtering is needed.
 * (GR-73875) Added `--print-options` flag to `native-image` for printing available build options in table, markdown, or JSON format. Automated generation of option documentation from `@Option` annotations, eliminating manual maintenance of option tables.
 * (GR-70601) (GR-70592) (GR-70593) (GR-70598) (GR-71096): Add experimental support for just-in-time compilation of Java bytecodes loaded at run-time.
 * (GR-73556) Remove the deprecated `@AutomaticFeature` annotation and its handling. Features should be registered via the --features argument.
@@ -13,7 +21,8 @@ This changelog summarizes major changes to GraalVM Native Image.
 * (GR-2092) Add jitdump support for recording run-time compilation metadata for perf (see PerfProfiling.md). Can be enabled with `-g -H:+RuntimeDebugInfo -H:RuntimeDebugInfoFormat=jitdump`.
 * (GR-69116) Rename `native-image-configure` tool to `native-image-utils`.
 * (GR-69572) Deprecates the `native-image-inspect` tool. To extract embedded SBOMs, use `native-image-utils extract-sbom --image-path=<path_to_binary>`.
-* (GR-70136) Add a new tool `--tool:llvm` for the LLVM backend of Native Image.
+* (GR-76386) Move `native-image-utils extract-sbom` to GraalVM Community Edition.
+* (GR-70136) Add a new tool `--tool:llvm-backend` for the LLVM backend of Native Image.
 * (GR-68984) Ship the `reachability-metadata-schema.json` together with GraalVM at `<graalvm-home>/lib/svm/schemas/reachability-metadata-schema.json`.
 * (GR-68984) Improve the schema to capture detailed constraints about each element in the `reachability-metadata-schema.json`.
 * (GR-57214) `-H:...` can now be used at build-time to set new defaults for both build-time and run-time options (for example, run-time option `-R:MaxHeapSize` can now also be set via `-H:MaxHeapSize`).
@@ -26,13 +35,17 @@ This changelog summarizes major changes to GraalVM Native Image.
 * (GR-71698) Introduced `--future-defaults=class-for-name-respects-class-loader` that changes 'Class.forName' and 'ClassLoader#loadClass' to respect the class loader arguments. 
 * (GR-72689) The context class loader seen during build-time context initialization is now part of the native image module layer. This means that by default, service loaders will now see some extra service providers definition coming from the native image module path.
 * (GR-74050) JFR now uses the safepoint-based execution sampler by default on all platforms. To use the signal-handler-based execution sampler instead, enable `-H:+SignalHandlerBasedExecutionSampler`.
+* (GR-75242) JFR stack trace support is no longer disabled entirely if runtime compilation is enabled. Instead, individual stack traces are skipped when they contain JIT-compiled code.
 * (GR-63737) Deprecated API function `Threading.registerRecurringCallback(...)` without replacement. This method should not be used as it is inherently unsafe.
 * (GR-63737) Removed deprecated API function `ProcessPropertiesSupport.setLocale(...)`.
 * (GR-52538) (GR-69523) (GR-73129) Introduce new SerialGC policy `Adaptive2` and default to mark-compact collection in the old generation. On average, this reduces memory usage and often improves throughput and latency. Restore the old behavior with: `-H:-CompactingOldGen -H:InitialCollectionPolicy=Adaptive`.
+* (GR-75348) Allow selecting the Serial GC collection policy at run time with `-XX:InitialCollectionPolicy`.
 * (GR-71974) Introduced `-H:+CompatibilityMode` that disables all Native Image features that allow users to diverge from original program semantics: build-time initialization for classpath classes, native-image-specific system properties, substitutions on the classpath, and user features, while enabling all future defaults. This mode does not modify key Native Image restrictions related to dynamic access (reachability metadata) and run-time class loading as those are accepted limitations of native image.
 * (GR-74008) On macOS, the build process now uses `memory_pressure` for a more accurate detection of free memory.
 * (GR-73792) Added randomized runtime code entry points. Enable with `-H:+MaxRuntimeCodeOffset`.
 * (GR-73792) Added AMD64 memory masking and fencing mitigation for untrusted code. Enable with `-H:+MemoryMaskingAndFencing`.
+* (GR-74988) Build position-independent executables (PIE) on Linux by default, increasing security by participating in address space layout randomization (ASLR). To disable PIE (even if the system toolchain would otherwise produce PIE), use `-H:NativeLinkerOption=-no-pie`. Note that on many Linux distributions, macOS, and Windows, the system toolchains used by Native Image have already been producing PIE.
+* (GR-74988) Turn on relative code pointers by default to reduce startup time, memory usage, and size for PIE and shared library images. Instead of dynamic linker relocations, they use a dedicated code base register to compute code addresses. To disable, use `-H:-RelativeCodePointers`.
 
 ## GraalVM 25
 * (GR-52276) (GR-61959) Add support for Arena.ofShared().

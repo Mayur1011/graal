@@ -6,8 +6,8 @@ description: Build GraalVM native images using the native-maven-plugin (org.graa
 # Maven Native Image Build
 
 ## Prerequisites
-- Set `JAVA_HOME` to a JDK 17+ installation.
-- Set `GRAALVM_HOME` to a GraalVM distribution. If not set, ask the user for the path.
+- Set `JAVA_HOME` to a GraalVM JDK installation so the plugin can find `native-image`.
+- Do not require `GRAALVM_HOME` in the normal case. Only mention it if the user already relies on it or their environment needs an explicit override.
 - Use Maven 3.6+.
 
 ## Plugin Setup

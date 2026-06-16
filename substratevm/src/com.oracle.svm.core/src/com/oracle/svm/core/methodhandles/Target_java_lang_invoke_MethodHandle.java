@@ -38,7 +38,6 @@ import java.lang.reflect.Modifier;
 import java.util.Arrays;
 
 import com.oracle.svm.core.ForeignSupport;
-import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
@@ -59,6 +58,7 @@ import com.oracle.svm.core.reflect.target.Target_java_lang_reflect_Field;
 import com.oracle.svm.core.reflect.target.Target_java_lang_reflect_Method;
 import com.oracle.svm.core.reflect.target.Target_jdk_internal_reflect_ConstructorAccessor;
 import com.oracle.svm.core.reflect.target.Target_jdk_internal_reflect_MethodAccessor;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.internal.reflect.FieldAccessor;
@@ -229,6 +229,7 @@ final class Util_java_lang_invoke_MethodHandle {
                 return field.get(null);
             } else if (refKind == Target_java_lang_invoke_MethodHandleNatives_Constants.REF_putField) {
                 checkArgs(args, 2, "putField");
+                convertArgs(args, methodType);
                 Object receiver = args[0];
                 Object value = args[1];
                 FieldAccessor field = asField(memberName, false);
@@ -236,6 +237,7 @@ final class Util_java_lang_invoke_MethodHandle {
                 return null;
             } else if (refKind == Target_java_lang_invoke_MethodHandleNatives_Constants.REF_putStatic) {
                 checkArgs(args, 1, "putStatic");
+                convertArgs(args, methodType);
                 Object value = args[0];
                 FieldAccessor field = asField(memberName, true);
                 field.set(null, value);
@@ -246,11 +248,11 @@ final class Util_java_lang_invoke_MethodHandle {
                 Object receiver = args[0];
                 Object[] invokeArgs = Arrays.copyOfRange(args, 1, args.length);
                 SubstrateMethodAccessor method = asMethod(memberName, false);
-                return method.invoke(receiver, invokeArgs);
+                return method.methodHandleInvoke(receiver, invokeArgs);
             } else if (refKind == Target_java_lang_invoke_MethodHandleNatives_Constants.REF_invokeStatic) {
                 convertArgs(args, methodType);
                 SubstrateMethodAccessor method = asMethod(memberName, true);
-                return method.invoke(null, args);
+                return method.methodHandleInvoke(null, args);
             } else if (refKind == Target_java_lang_invoke_MethodHandleNatives_Constants.REF_invokeSpecial) {
                 convertArgs(args, methodType);
                 Object receiver = args[0];
@@ -261,12 +263,12 @@ final class Util_java_lang_invoke_MethodHandle {
                  * constructor).
                  */
                 SubstrateAccessor accessor = getAccessor(memberName);
-                Object returnValue = accessor.invokeSpecial(receiver, invokeArgs);
+                Object returnValue = accessor.methodHandleInvokeSpecial(receiver, invokeArgs);
                 return methodType.returnType() == void.class ? null : returnValue;
             } else if (refKind == Target_java_lang_invoke_MethodHandleNatives_Constants.REF_newInvokeSpecial) {
                 convertArgs(args, methodType);
                 SubstrateConstructorAccessor constructor = asConstructor(memberName);
-                return constructor.newInstance(args);
+                return constructor.methodHandleNewInstance(args);
             } else {
                 throw VMError.shouldNotReachHere("Unknown method handle reference kind: " + refKind);
             }

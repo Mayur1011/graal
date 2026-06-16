@@ -49,9 +49,6 @@ import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.jdk.JRTSupport.JRTDisabled;
 import com.oracle.svm.core.jdk.JRTSupport.JRTEnabled;
 import com.oracle.svm.shared.option.HostedOptionKey;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
 
@@ -89,7 +86,6 @@ public final class JRTSupport {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 class JRTFeature implements InternalFeature {
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess access) {
@@ -121,6 +117,13 @@ final class Target_jdk_internal_module_SystemModuleFinders_SystemImage_JRTEnable
 
     @Substitute
     static Target_jdk_internal_jimage_ImageReader_JRTEnabled reader() {
+        /*
+         * ImageReaderFactory's class initializer dereferences java.home. JDK module readers
+         * already treat a null system image reader as "resource not found".
+         */
+        if (System.getProperty("java.home") == null) {
+            return null;
+        }
         Target_jdk_internal_jimage_ImageReader_JRTEnabled localRef = READER;
         if (localRef == null) {
             synchronized (Target_jdk_internal_module_SystemModuleFinders_SystemImage_JRTEnabled.class) {

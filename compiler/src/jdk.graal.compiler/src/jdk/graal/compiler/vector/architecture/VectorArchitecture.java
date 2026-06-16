@@ -441,6 +441,21 @@ public abstract class VectorArchitecture {
     }
 
     /**
+     * Returns true if the code generator can insert a SIMD value with stamp {@code valueStamp} into
+     * a SIMD value with stamp {@code vectorStamp} at {@code offset}.
+     *
+     * Scalar inserts are assumed to be supported and are not covered by this query.
+     *
+     * @param vectorStamp the destination SIMD value stamp
+     * @param valueStamp the inserted SIMD value stamp
+     * @param offset the insertion offset, in lanes of {@code vectorStamp}
+     * @return {@code true} iff the vector insert is supported
+     */
+    public boolean supportsVectorInsert(SimdStamp vectorStamp, SimdStamp valueStamp, int offset) {
+        return false;
+    }
+
+    /**
      * Returns true if the architecture supports AES vector instructions.
      *
      * @return {@code true} if AES instructions are supported.

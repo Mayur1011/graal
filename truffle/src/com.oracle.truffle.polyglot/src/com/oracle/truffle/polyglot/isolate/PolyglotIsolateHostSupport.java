@@ -41,7 +41,9 @@
 package com.oracle.truffle.polyglot.isolate;
 
 import com.oracle.truffle.api.InternalResource;
+import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.impl.Accessor;
+import com.oracle.truffle.api.impl.DefaultTruffleRuntime;
 import com.oracle.truffle.api.impl.PolyglotIsolateLanguages;
 import org.graalvm.collections.Pair;
 import org.graalvm.home.HomeFinder;
@@ -73,6 +75,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -89,11 +92,42 @@ final class PolyglotIsolateHostSupport {
     private static final Map<Set<String>, LibraryConfig> libraryCache = new ConcurrentHashMap<>();
     private static volatile Lazy lazy;
 
+    static boolean hasIsolateLibraryForLanguages(Set<String> languageIds) {
+        if (languageIds.isEmpty()) {
+            return false;
+        }
+        for (PolyglotIsolateResource resource : computeAvailablePolyglotIsolateResources()) {
+            if (resource.includedLanguages.containsAll(languageIds)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static Collection<Set<String>> getAvailableIsolatedLanguages() {
+        return resolveAvailablePolyglotIsolates(HomeFinder.getInstance()).stream().map(PolyglotIsolateResource::includedLanguages).toList();
+    }
+
     static Engine buildIsolatedEngine(AbstractPolyglotImpl polyglot, Engine localEngine, String[] isolateLanguages, String[] permittedLanguages, SandboxPolicy sandboxPolicy, OutputStream out,
                     OutputStream err, InputStream in, Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
                     boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, boolean registerInActiveEngines, boolean externalProcess, long stackHeadroom,
                     String isolateLibrary, String isolateLauncher) {
         assert isolateLanguages != null;
+
+        if (!ImageInfo.inImageCode() && Truffle.getRuntime() instanceof DefaultTruffleRuntime && PolyglotIsolateAccessor.ENGINE.getModulesAccessor() == null) {
+            /*
+             * On HotSpot, polyglot isolates running with the fallback Truffle runtime require
+             * libtruffleattach to provide stack-limit support and terminating thread locals.
+             * Loading libtruffleattach can fail for several reasons, such as a missing library,
+             * incorrect packaging, loading from multiple class loaders, or missing native-access
+             * permissions. In that case isolate hosting cannot continue, so we abort and include
+             * the original libtruffleattach initialization error in the failure message.
+             */
+            String moduleAccessorInitError = PolyglotIsolateAccessor.ENGINE.getModuleAccessorInitializationError();
+            throw new IllegalStateException("Polyglot isolates require libtruffleattach when running on HotSpot with the fallback Truffle runtime. " +
+                            "The libtruffleattach library could not be loaded: " + moduleAccessorInitError + " " +
+                            "Resolve the libtruffleattach loading issue, or switch to the optimized Truffle runtime.");
+        }
         APIAccess apiAccess = polyglot.getAPIAccess();
         LibraryConfig libraryConfig = resolveIsolatePaths(apiAccess.getEngineReceiver(localEngine), isolateLibrary, isolateLauncher, permittedLanguages, isolateLanguages);
         return spawnIsolatedEngine(polyglot, localEngine, permittedLanguages, sandboxPolicy, out, err, in, options, systemPropertiesOptions, useSystemProperties, allowExperimentalOptions, boundEngine,
@@ -385,7 +419,20 @@ final class PolyglotIsolateHostSupport {
             foreignEngine.close();
             // Parfait_ALLOW toctou-race-condition-warning (prevented by NativeIsolate#create)
             l.unregisterEngine(foreignEngine.getKey());
-            foreignEngine.getPolyglotIsolateServices().onIsolateTearDown();
+            IsolateThread isolateThread = isolate.tryEnter();
+            /*
+             * ForeignEngineDispatch#onEngineCollected can call Isolate#shutdown for an already
+             * terminated external isolate. In that case the shutdown path invokes this
+             * teardown hook for host-side cleanup, but the isolate cannot be entered anymore.
+             * Run guest-side teardown when the isolate is still enterable.
+             */
+            if (isolateThread != null) {
+                try {
+                    foreignEngine.getPolyglotIsolateServices().onIsolateTearDown();
+                } finally {
+                    isolateThread.leave();
+                }
+            }
         }
     }
 

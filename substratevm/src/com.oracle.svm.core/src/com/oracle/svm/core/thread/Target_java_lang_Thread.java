@@ -145,7 +145,6 @@ public final class Target_java_lang_Thread {
         tid = Target_java_lang_Thread_ThreadIdentifiers.next();
         interruptLock = new Object();
         name = (withName != null) ? withName : ("System-" + JavaThreads.nextThreadNum());
-        contextClassLoader = ClassLoader.getSystemClassLoader();
     }
 
     @Substitute
@@ -275,7 +274,7 @@ public final class Target_java_lang_Thread {
     @Platforms(InternalPlatform.NATIVE_ONLY.class)
     private void start0() {
         parentThreadId = JavaThreads.getThreadId(Thread.currentThread());
-        long stackSize = PlatformThreads.getRequestedStackSize(JavaThreads.fromTarget(this));
+        long stackSize = PlatformThreads.getRequestedStackSize(JavaThreads.fromTarget(this), true);
         try {
             PlatformThreads.singleton().startThread(JavaThreads.fromTarget(this), stackSize);
         } catch (Throwable t) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -346,11 +346,11 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
     }
 
     private Instruction optionalDowncast(Instruction original, ValueNode node, Stamp fromStamp, ResolvedJavaType toType) {
-        return optionalDowncast(original, node, fromStamp.javaType(masm.getProviders().getMetaAccess()), toType);
+        return optionalDowncast(original, node, util.javaTypeForStamp(fromStamp), toType);
     }
 
     private Instruction optionalDowncast(Instruction original, ValueNode node, ResolvedJavaType fromType, Stamp toStamp) {
-        return optionalDowncast(original, node, fromType, toStamp.javaType(masm.getProviders().getMetaAccess()));
+        return optionalDowncast(original, node, fromType, util.javaTypeForStamp(toStamp));
     }
 
     /**
@@ -620,13 +620,11 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
             Instruction getter = builder.getArrayElement(arrayStruct, index, componentKind);
 
             if (loadIndexed.stamp(NodeView.DEFAULT) instanceof AbstractObjectStamp objectStamp) {
-                ResolvedJavaType componentType = objectStamp.javaType(masm.getProviders().getMetaAccess());
-
                 /*
                  * The read value needs to have this type, but the Wasm arrays just store
                  * j.l.Object. If it isn't the j.l.Object type, a downcast is needed.
                  */
-                WasmRefType componentWasmType = (WasmRefType) util.typeForJavaType(componentType);
+                WasmRefType componentWasmType = (WasmRefType) util.typeForStamp(objectStamp);
                 if (!gcUtil.isJavaLangObject(componentWasmType)) {
                     getter = new Instruction.RefCast(getter, componentWasmType);
                 }
@@ -808,8 +806,8 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
              * as subtypes, but in WasmGC, both are represented as java.lang.Object and no downcast
              * is necessary.
              */
-            ResolvedJavaType oldType = util.canonicalizeJavaType(oldStamp.javaType(masm.wasmProviders.getMetaAccess()));
-            ResolvedJavaType newType = util.canonicalizeJavaType(newStamp.javaType(masm.wasmProviders.getMetaAccess()));
+            ResolvedJavaType oldType = util.javaTypeForStamp(oldStamp);
+            ResolvedJavaType newType = util.javaTypeForStamp(newStamp);
 
             // Whether the pi node changes the stamp to a strict subtype
             boolean changedToSubtype = !newType.equals(oldType) && oldType.isAssignableFrom(newType);
@@ -845,8 +843,7 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
             IndirectCallTargetNode indirectCallTarget = (IndirectCallTargetNode) callTarget;
 
             assert !indirectCallTarget.invokeKind().hasReceiver() : "Calls to an address cannot have receivers: " + indirectCallTarget;
-            MetaAccessProvider metaAccess = masm().getProviders().getMetaAccess();
-            ResolvedJavaType returnType = indirectCallTarget.returnStamp().getTrustedStamp().javaType(metaAccess);
+            ResolvedJavaType returnType = util.javaTypeForStamp(indirectCallTarget.returnStamp().getTrustedStamp());
             /*
              * Since there is no target method, the TypeUse has to be reconstructed from the call
              * target node signature.
@@ -1133,10 +1130,15 @@ public class WebImageWasmGCNodeLowerer extends WebImageWasmNodeLowerer {
     }
 
     @Override
-    protected Instruction lowerWordCast(WordCastNode n) {
+    protected Instruction lowerWordCast(ValueNode castNode, ValueNode input) {
+        if (util.typeForNode(castNode).isPrimitive() && util.typeForNode(input).isPrimitive()) {
+            // "word" casts between primitive values are fine
+            return super.lowerWordCast(castNode, input);
+        }
+
         // TODO GR-60168 Eliminate WordCastNodes completely. They are fundamentally not supportable
         // under WasmGC
         logError("This method should never be reached and cannot be supported.");
-        return super.getStub(n);
+        return super.getStub(castNode);
     }
 }

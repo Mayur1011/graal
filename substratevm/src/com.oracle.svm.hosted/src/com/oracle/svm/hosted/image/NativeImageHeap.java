@@ -70,8 +70,8 @@ import com.oracle.svm.core.hub.DynamicHubCompanion;
 import com.oracle.svm.core.hub.DynamicHubSupport;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.image.ImageHeap;
-import com.oracle.svm.core.image.ImageHeapLayoutInfo;
 import com.oracle.svm.core.image.ImageHeapLayouter;
+import com.oracle.svm.core.image.ImageHeapLayoutInfo;
 import com.oracle.svm.core.image.ImageHeapObject;
 import com.oracle.svm.core.image.ImageHeapPartition;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
@@ -650,7 +650,7 @@ public final class NativeImageHeap implements ImageHeap {
                 for (HostedField field : clazz.getInstanceFields(true)) {
                     boolean fieldPatchable = false;
                     if (layeredFieldValueTransformerSupport != null) {
-                        fieldPatchable = layeredFieldValueTransformerSupport.finalizeFieldValue(field, constant);
+                        fieldPatchable = layeredFieldValueTransformerSupport.isFieldValueUpdatable(field, constant);
                     }
                     boolean fieldRelocatable = false;
                     /*

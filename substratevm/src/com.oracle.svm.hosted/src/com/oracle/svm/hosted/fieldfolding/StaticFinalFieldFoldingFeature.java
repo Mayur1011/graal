@@ -56,6 +56,7 @@ import com.oracle.svm.hosted.imagelayer.SVMImageLayerLoader;
 import com.oracle.svm.hosted.imagelayer.SVMImageLayerLoader.JavaConstantSupplier;
 import com.oracle.svm.hosted.imagelayer.SVMImageLayerSingletonLoader;
 import com.oracle.svm.hosted.imagelayer.SVMImageLayerWriter;
+import com.oracle.svm.hosted.imagelayer.SVMImageSingletonWriter;
 import com.oracle.svm.hosted.meta.HostedField;
 import com.oracle.svm.shared.option.SubstrateOptionsParser;
 import com.oracle.svm.shared.singletons.ImageSingletonLoader;
@@ -150,6 +151,11 @@ public final class StaticFinalFieldFoldingFeature implements InternalFeature {
     @Override
     public boolean isInConfiguration(IsInConfigurationAccess access) {
         return Options.OptStaticFinalFieldFolding.getValue();
+    }
+
+    @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(StaticFinalFieldFoldingFeature.class, this);
     }
 
     @Override
@@ -494,7 +500,7 @@ class StaticFinalFieldFoldingSingleton {
             return new LayeredCallbacksSingletonTrait(new SingletonLayeredCallbacks<StaticFinalFieldFoldingSingleton>() {
                 @Override
                 public LayeredPersistFlags doPersist(ImageSingletonWriter writer, StaticFinalFieldFoldingSingleton singleton) {
-                    var snapshotWriter = ((SVMImageLayerWriter.ImageSingletonWriterImpl) writer).getSnapshotBuilder();
+                    var snapshotWriter = ((SVMImageSingletonWriter) writer).getSnapshotWriter();
                     SVMImageLayerWriter imageLayerWriter = HostedImageLayerBuildingSupport.singleton().getWriter();
 
                     List<Integer> fields = new ArrayList<>();
@@ -538,9 +544,9 @@ class StaticFinalFieldFoldingSingleton {
         static class SingletonInstantiator implements SingletonLayeredCallbacks.LayeredSingletonInstantiator<StaticFinalFieldFoldingSingleton> {
             @Override
             public StaticFinalFieldFoldingSingleton createFromLoader(ImageSingletonLoader loader) {
-                var snapshotReader = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotReader();
+                var snapshotLoader = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotLoader();
 
-                var staticFinalFieldFoldingSingleton = snapshotReader.getStaticFinalFieldFoldingSingleton();
+                var staticFinalFieldFoldingSingleton = snapshotLoader.getStaticFinalFieldFoldingSingleton();
                 var fields = staticFinalFieldFoldingSingleton.getFields();
                 var fieldCheckIndexes = staticFinalFieldFoldingSingleton.getFieldCheckIndexes();
                 var fieldInitializationStatusList = staticFinalFieldFoldingSingleton.getFieldInitializationStatusList();

@@ -28,11 +28,12 @@ import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.image.DefaultImageHeapObjectSorter;
 import com.oracle.svm.core.image.ImageHeapObjectSorter;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import org.graalvm.nativeimage.ImageSingletons;
 
-@SingletonTraits(access = BuiltinTraits.BuildtimeAccessOnly.class, layeredCallbacks = BuiltinTraits.NoLayeredCallbacks.class)
+/**
+ * Feature for selecting the order in which objects in the image heap are sorted during image
+ * generation.
+ */
 @AutomaticallyRegisteredFeature
 public class ImageHeapObjectSortFeature implements InternalFeature {
 

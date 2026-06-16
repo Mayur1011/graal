@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -54,6 +54,10 @@ import org.graalvm.wasm.api.WebAssembly;
 import org.graalvm.wasm.debugging.representation.DebugPrimitiveValue;
 import org.graalvm.wasm.exception.WasmJsApiException;
 import org.graalvm.wasm.predefined.BuiltinModule;
+import org.graalvm.wasm.struct.WasmStructAccess;
+import org.graalvm.wasm.types.DefinedType;
+import org.graalvm.wasm.types.FunctionType;
+import org.graalvm.wasm.types.StructType;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerAsserts;
@@ -70,8 +74,6 @@ import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.api.source.SourceSection;
-import org.graalvm.wasm.types.DefinedType;
-import org.graalvm.wasm.types.FunctionType;
 
 @Registration(id = WasmLanguage.ID, //
                 name = WasmLanguage.NAME, //
@@ -92,12 +94,14 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
     private static final LanguageReference<WasmLanguage> REFERENCE = LanguageReference.create(WasmLanguage.class);
 
     @CompilationFinal private volatile boolean isMultiContext;
+    @CompilationFinal private volatile WasmContextOptions contextOptions;
 
     private final ContextThreadLocal<MultiValueStack> multiValueStackThreadLocal = locals.createContextThreadLocal(((context, thread) -> new MultiValueStack()));
 
     private final Map<BuiltinModule, WasmModule> builtinModules = new ConcurrentHashMap<>();
 
     private final Map<DefinedType, Integer> equivalenceClasses = new ConcurrentHashMap<>();
+    private final Map<Integer, WasmStructAccess> structAccessesByEquivalenceClass = new ConcurrentHashMap<>();
     private int nextEquivalenceClass = SymbolTable.FIRST_EQUIVALENCE_CLASS;
     private final Map<FunctionType, CallTarget> interopCallAdapters = new ConcurrentHashMap<>();
 
@@ -125,6 +129,22 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
     }
 
     /**
+     * Gets or registers a canonical struct access object for a type equivalence class.
+     *
+     * Struct accesses are shared across modules to ensure type-equivalent structs use the same
+     * static shape and field properties.
+     */
+    public WasmStructAccess canonicalStructAccessFor(int equivalenceClass, StructType structType, WasmStructAccess superTypeAccess) {
+        CompilerAsserts.neverPartOfCompilation();
+        WasmStructAccess structAccess = structAccessesByEquivalenceClass.get(equivalenceClass);
+        if (structAccess == null) {
+            structAccess = structAccessesByEquivalenceClass.computeIfAbsent(equivalenceClass,
+                            k -> WasmStructAccess.create(structType, superTypeAccess, this));
+        }
+        return structAccess;
+    }
+
+    /**
      * Gets or creates the interop call adapter for a function type. Always returns the same call
      * target for any particular type.
      */
@@ -140,7 +160,7 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
 
     @Override
     protected WasmContext createContext(Env env) {
-        WasmContext context = new WasmContext(env, this);
+        WasmContext context = new WasmContext(env, this, setContextOptions(env));
         if (env.isPolyglotBindingsAccessAllowed()) {
             env.exportSymbol("WebAssembly", new WebAssembly(context));
         }
@@ -290,6 +310,20 @@ public final class WasmLanguage extends TruffleLanguage<WasmContext> {
 
     public WasmModule getOrCreateBuiltinModule(BuiltinModule builtinModule, Function<? super BuiltinModule, ? extends WasmModule> factory) {
         return builtinModules.computeIfAbsent(builtinModule, factory);
+    }
+
+    public WasmContextOptions contextOptions() {
+        return contextOptions;
+    }
+
+    private WasmContextOptions setContextOptions(Env env) {
+        final WasmContextOptions previousOptions = this.contextOptions;
+        if (previousOptions == null) {
+            return this.contextOptions = WasmContextOptions.fromOptionValues(env.getOptions());
+        } else {
+            assert previousOptions.equals(WasmContextOptions.fromOptionValues(env.getOptions())) : env.getOptions();
+            return previousOptions;
+        }
     }
 
     @Override

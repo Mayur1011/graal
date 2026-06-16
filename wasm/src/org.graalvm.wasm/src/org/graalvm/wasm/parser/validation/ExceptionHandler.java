@@ -42,16 +42,37 @@
 package org.graalvm.wasm.parser.validation;
 
 import org.graalvm.wasm.constants.ExceptionHandlerType;
+import org.graalvm.wasm.parser.bytecode.BytecodeFixup;
 
 /**
  * Representation of an exception handler during parsing.
+ *
+ * <pre>
+ * Encoded exception-table layout:
+ *
+ *   from (4 bytes) | to (4 bytes) | type (1 byte) | tag (4 bytes) | target (4 bytes)
+ *
+ * Field meanings by handler kind:
+ *   CATCH, CATCH_REF, CATCH_ALL, CATCH_ALL_REF, LEGACY_CATCH, LEGACY_CATCH_ALL:
+ *     target = transfer destination bytecode offset
+ *
+ *   LEGACY_DELEGATE:
+ *     target = exception-table search continuation offset
+ * </pre>
  */
-public final class ExceptionHandler {
+public final class ExceptionHandler implements BytecodeFixup {
+    public static final int FROM_OFFSET = 0;
+    public static final int TO_OFFSET = 4;
+    public static final int TYPE_OFFSET = 8;
+    public static final int TAG_OFFSET = 9;
+    public static final int TARGET_OFFSET = 13;
+    public static final int SIZE = 17;
+
     /** {@link ExceptionHandlerType}. */
     private final int type;
-    /** Tag index. */
+    /** Tag index expected by typed catches, or {@code -1} when no tag match is required. */
     private final int tag;
-    /** Target label bytecode offset. */
+    /** Encoded handler target. Its meaning depends on the handler kind. */
     private int target = -1;
 
     public ExceptionHandler(int type, int tag) {
@@ -59,20 +80,39 @@ public final class ExceptionHandler {
         this.tag = tag;
     }
 
+    public ExceptionHandler(int type, int tag, int target) {
+        this(type, tag);
+        this.target = target;
+    }
+
+    /**
+     * Returns the encoded handler kind.
+     */
     public int type() {
         return type;
     }
 
+    /**
+     * Returns the tag index matched by typed catches, or {@code -1} for untyped handlers.
+     */
     public int tag() {
         return tag;
     }
 
+    /**
+     * Returns the encoded handler target. For catch handlers, this is a bytecode transfer target.
+     * For legacy delegate handlers, this is an exception-table search continuation.
+     */
     public int target() {
         return target;
     }
 
-    public void setTarget(int target) {
-        this.target = target;
+    /**
+     * Patches the encoded handler target.
+     */
+    @Override
+    public void patch(int targetOffset) {
+        this.target = targetOffset;
     }
 
     @Override

@@ -68,10 +68,8 @@ public final class AMD64ArrayCompareToOp extends AMD64ComplexVectorOp {
     @Def({OperandFlag.REG}) protected Value resultValue;
     @Alive({OperandFlag.REG}) protected Value arrayAValue;
     @Alive({OperandFlag.REG}) protected Value arrayBValue;
-    @Use({OperandFlag.REG}) protected Value lengthAValue;
-    @Use({OperandFlag.REG}) protected Value lengthBValue;
-    @Temp({OperandFlag.REG}) protected Value lengthAValueTemp;
-    @Temp({OperandFlag.REG}) protected Value lengthBValueTemp;
+    @UseKill({OperandFlag.REG}) protected Value lengthAValue;
+    @UseKill({OperandFlag.REG}) protected Value lengthBValue;
     @Temp({OperandFlag.REG}) protected Value temp1;
     @Temp({OperandFlag.REG}) protected Value temp2;
     @Temp({OperandFlag.REG}) protected Value lengthDiffTemp;
@@ -94,12 +92,8 @@ public final class AMD64ArrayCompareToOp extends AMD64ComplexVectorOp {
         this.resultValue = result;
         this.arrayAValue = arrayA;
         this.arrayBValue = arrayB;
-        /*
-         * The length values are inputs but are also killed like temporaries so need both Use and
-         * Temp annotations, which will only work with fixed registers.
-         */
-        this.lengthAValue = lengthAValueTemp = lengthA;
-        this.lengthBValue = lengthBValueTemp = lengthB;
+        this.lengthAValue = lengthA;
+        this.lengthBValue = lengthB;
 
         // Allocate some temporaries.
         this.temp1 = tool.newVariable(LIRKind.unknownReference(tool.target().arch.getWordKind()));

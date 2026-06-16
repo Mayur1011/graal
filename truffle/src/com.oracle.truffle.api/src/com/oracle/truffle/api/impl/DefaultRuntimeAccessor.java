@@ -254,6 +254,11 @@ final class DefaultRuntimeAccessor extends Accessor {
         }
 
         @Override
+        public void onEnginePatchSuccess(Object runtimeData) {
+
+        }
+
+        @Override
         public boolean onEngineClosing(Object runtimeData) {
             return false;
         }
@@ -309,12 +314,7 @@ final class DefaultRuntimeAccessor extends Accessor {
 
         @Override
         public <T> ThreadLocal<T> createTerminatingThreadLocal(Supplier<T> initialValue, Consumer<T> onThreadTermination) {
-            return ThreadLocal.withInitial(initialValue);
-        }
-
-        @Override
-        public void setInitializedTimestamp(CallTarget target, long timestamp) {
-
+            return DefaultTruffleRuntime.createTerminatingThreadLocal(initialValue, onThreadTermination);
         }
 
         @Override
@@ -329,8 +329,9 @@ final class DefaultRuntimeAccessor extends Accessor {
 
         @Override
         public long getStackOverflowLimit() {
-            throw new UnsupportedOperationException();
+            return DefaultTruffleRuntime.getStackOverflowLimit();
         }
+
     }
 
 }

@@ -38,6 +38,7 @@ import com.oracle.svm.shared.util.LogUtils;
 class DefaultOptionHandler extends NativeImage.OptionHandler<NativeImage> {
     static final String addModulesOption = "--add-modules";
     static final String limitModulesOption = "--limit-modules";
+    static final String sunMiscUnsafeMemoryAccessOption = "--sun-misc-unsafe-memory-access=";
     private static final String moduleSetModifierOptionErrorMessage = " requires modules to be specified";
 
     static final String ADD_ENV_VAR_OPTION = "-E";
@@ -191,6 +192,10 @@ class DefaultOptionHandler extends NativeImage.OptionHandler<NativeImage> {
                 NativeImage.showError(headArg + moduleSetModifierOptionErrorMessage);
             }
             nativeImage.addLimitedModules(limitModulesArgs);
+            return true;
+        }
+        if (headArg.startsWith(sunMiscUnsafeMemoryAccessOption)) {
+            nativeImage.addCustomJavaArgs(args.poll());
             return true;
         }
         return false;

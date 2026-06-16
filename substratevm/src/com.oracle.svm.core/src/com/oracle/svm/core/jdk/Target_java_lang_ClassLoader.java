@@ -31,13 +31,17 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 
+import com.oracle.svm.core.RuntimeAssertionsSupport;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.Inject;
@@ -55,7 +59,6 @@ import com.oracle.svm.core.hub.registry.ClassRegistries;
 import com.oracle.svm.shared.util.BasedOnJDKFile;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.SubstrateUtil;
-import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.java.LambdaUtils;
 import jdk.graal.compiler.util.Digest;
@@ -104,10 +107,22 @@ public final class Target_java_lang_ClassLoader {
     @Alias @RecomputeFieldValue(kind = Kind.Custom, declClass = AssertionLockComputer.class, isFinal = true) // GR-62338
     private Object assertionLock;
 
+    @Alias @RecomputeFieldValue(kind = Kind.Reset)//
+    private boolean defaultAssertionStatus;
+
+    @Alias @RecomputeFieldValue(kind = Kind.Reset)//
+    private Map<String, Boolean> packageAssertionStatus;
+
+    @Alias @RecomputeFieldValue(kind = Kind.Reset)//
+    Map<String, Boolean> classAssertionStatus;
+
     @Delete private static ClassLoader scl;
 
     @Inject @RecomputeFieldValue(kind = Kind.Custom, declClass = ClassRegistries.ClassRegistryComputer.class)//
     public volatile AbstractClassRegistry classRegistry;
+
+    @Inject @RecomputeFieldValue(kind = Kind.Custom, declClass = ResourceLoaderIdComputer.class)//
+    public int resourceLoaderId;
 
     /**
      * Used to implement
@@ -153,6 +168,7 @@ public final class Target_java_lang_ClassLoader {
     }
 
     @Substitute
+    @TargetElement(onlyWith = ClassRegistries.IgnoresClassLoader.class)
     @SuppressWarnings("unused")
     static NativeLibrary loadLibrary(Class<?> fromClass, String name) {
         NativeLibrarySupport.singleton().loadLibraryRelative(name);
@@ -161,12 +177,16 @@ public final class Target_java_lang_ClassLoader {
     }
 
     @Substitute
+    @TargetElement(onlyWith = ClassRegistries.IgnoresClassLoader.class)
     @SuppressWarnings("unused")
     static NativeLibrary loadLibrary(Class<?> fromClass, File file) {
         NativeLibrarySupport.singleton().loadLibraryAbsolute(file);
         // We don't use the JDK's NativeLibraries or NativeLibrary implementations
         return null;
     }
+
+    @Alias
+    public static native long findNative(ClassLoader loader, Class<?> clazz, String entryName, String javaName);
 
     @Alias
     public native String nameAndId();
@@ -217,8 +237,8 @@ public final class Target_java_lang_ClassLoader {
     }
 
     @Substitute //
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L320-L329")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1056-L1096")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L320-L329")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1056-L1096")
     @SuppressWarnings({"unused"}) //
     private Class<?> findLoadedClass0(String name) {
         if (name == null) {
@@ -261,41 +281,17 @@ public final class Target_java_lang_ClassLoader {
     @Alias
     native Stream<Package> packages();
 
-    /*
-     * The assertion status of classes is fixed at image build time because it is baked into the AOT
-     * compiled code. All methods that modify the assertion status are substituted to throw an
-     * error.
-     *
-     * Note that the assertion status can be queried at run time, see the relevant method in
-     * DynamicHub.
-     */
-
     @Substitute
-    @SuppressWarnings({"unused"})
-    private void setDefaultAssertionStatus(boolean enabled) {
-        throw VMError.unsupportedFeature("The assertion status of classes is fixed at image build time.");
+    private static Target_java_lang_AssertionStatusDirectives retrieveDirectives() {
+        RuntimeAssertionsSupport.ClassLoaderAssertionStatusDirectives assertionSupport = RuntimeAssertionsSupport.singleton().createClassLoaderAssertionStatusDirectives();
+        Target_java_lang_AssertionStatusDirectives directives = new Target_java_lang_AssertionStatusDirectives();
+        directives.classes = assertionSupport.classes();
+        directives.classEnabled = assertionSupport.classEnabled();
+        directives.packages = assertionSupport.packages();
+        directives.packageEnabled = assertionSupport.packageEnabled();
+        directives.deflt = assertionSupport.deflt();
+        return directives;
     }
-
-    @Substitute
-    @SuppressWarnings({"unused"})
-    private void setPackageAssertionStatus(String packageName, boolean enabled) {
-        throw VMError.unsupportedFeature("The assertion status of classes is fixed at image build time.");
-    }
-
-    @Substitute
-    @SuppressWarnings({"unused"})
-    private void setClassAssertionStatus(String className, boolean enabled) {
-        throw VMError.unsupportedFeature("The assertion status of classes is fixed at image build time.");
-    }
-
-    @Substitute
-    @SuppressWarnings({"unused"})
-    private void clearAssertionStatus() {
-        throw VMError.unsupportedFeature("The assertion status of classes is fixed at image build time.");
-    }
-
-    @Delete
-    private native void initializeJavaAssertionMaps();
 
     /*
      * We are defensive and also handle private native methods by marking them as deleted. If they
@@ -331,9 +327,9 @@ public final class Target_java_lang_ClassLoader {
 
     @Substitute
     @TargetElement(onlyWith = ClassRegistries.RespectsClassLoader.class)
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L71-L151")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1051-L1054")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L857-L896")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L71-L151")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1051-L1054")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L857-L896")
     private static Class<?> defineClass1(ClassLoader loader, String name, byte[] b, int off, int len, ProtectionDomain pd, @SuppressWarnings("unused") String source) {
         // Note that if name is not null, it is a binary name in either / or .-form
         return RuntimeClassLoading.defineClass(loader, name, b, off, len, new ClassDefinitionInfo(pd));
@@ -341,9 +337,9 @@ public final class Target_java_lang_ClassLoader {
 
     @Substitute
     @TargetElement(onlyWith = ClassRegistries.RespectsClassLoader.class)
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L153-L213")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1051-L1054")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L857-L896")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L153-L213")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1051-L1054")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L857-L896")
     private static Class<?> defineClass2(ClassLoader loader, String name, java.nio.ByteBuffer b, int off, int len, ProtectionDomain pd, @SuppressWarnings("unused") String source) {
         // Note that if name is not null, it is a binary name in either / or .-form
         // only bother extracting the bytes if it has a chance to work
@@ -364,9 +360,9 @@ public final class Target_java_lang_ClassLoader {
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L215-L283")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1039-L1049")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L909-L1022")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L215-L283")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L1039-L1049")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L909-L1022")
     private static Class<?> defineClass0(ClassLoader loader, Class<?> lookup, String name, byte[] b, int off, int len, ProtectionDomain pd,
                     @SuppressWarnings("unused") boolean initialize, int flags, Object classData) {
         // Note that if name is not null, it is a binary name in either / or .-form
@@ -415,8 +411,8 @@ public final class Target_java_lang_ClassLoader {
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L288-L328")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L780-L800")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/java.base/share/native/libjava/ClassLoader.c#L288-L328")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L780-L800")
     static Class<?> findBootstrapClass(String name) {
         /*
          * HotSpot supports both dot- and slash-names here as well as array types The only caller
@@ -426,8 +422,6 @@ public final class Target_java_lang_ClassLoader {
         return ClassRegistries.findBootstrapClass(name);
     }
 
-    @Delete
-    private static native Target_java_lang_AssertionStatusDirectives retrieveDirectives();
 }
 
 final class ClassLoaderHelper {
@@ -446,6 +440,11 @@ final class ClassLoaderHelper {
 
 @TargetClass(className = "java.lang.AssertionStatusDirectives") //
 final class Target_java_lang_AssertionStatusDirectives {
+    @Alias String[] classes;
+    @Alias boolean[] classEnabled;
+    @Alias String[] packages;
+    @Alias boolean[] packageEnabled;
+    @Alias boolean deflt;
 }
 
 @TargetClass(className = "java.lang.NamedPackage") //
@@ -465,5 +464,13 @@ final class AssertionLockComputer implements FieldValueTransformer {
     public Object transform(Object receiver, Object originalValue) {
         assert receiver != null;
         return receiver;
+    }
+}
+
+@Platforms(Platform.HOSTED_ONLY.class)
+final class ResourceLoaderIdComputer implements FieldValueTransformer {
+    @Override
+    public Object transform(Object receiver, Object originalValue) {
+        return ResourceLoaderKeys.hosted().getResourceLoaderId((ClassLoader) receiver);
     }
 }

@@ -2293,6 +2293,11 @@ final class EngineAccessor extends Accessor {
         }
 
         @Override
+        public String getModuleAccessorInitializationError() {
+            return JDKSupport.getInitializationErrorMessage();
+        }
+
+        @Override
         public Node getUncachedLocation(Object polyglotContext) {
             return ((PolyglotContextImpl) polyglotContext).uncachedLocation;
         }
@@ -2478,6 +2483,11 @@ final class EngineAccessor extends Accessor {
                 values.putAll(toValidate, true, null);
                 polyglot.presetOptions = Collections.unmodifiableMap(newDefaults);
             }
+        }
+
+        @Override
+        public Source getSourceReceiver(org.graalvm.polyglot.Source source) {
+            return (Source) PolyglotImpl.findInstance().getAPIAccess().getSourceReceiver(source);
         }
     }
 

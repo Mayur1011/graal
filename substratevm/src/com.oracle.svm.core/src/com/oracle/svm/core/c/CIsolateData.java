@@ -52,6 +52,9 @@ public final class CIsolateData<T extends PointerBase> {
 
     @Platforms(Platform.HOSTED_ONLY.class)
     CIsolateData(String name, long size) {
+        assert name != null;
+        assert size >= 0;
+
         this.name = name;
         this.size = size;
         this.offset = -1;

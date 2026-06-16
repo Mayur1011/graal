@@ -24,13 +24,14 @@
  */
 package com.oracle.svm.interpreter.ristretto.meta;
 
+import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Function;
 
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.deopt.DeoptimizedFrame.DeoptTargetTier;
 import com.oracle.svm.graal.meta.SubstrateInstalledCodeImpl;
 import com.oracle.svm.graal.meta.SubstrateMethod;
@@ -41,15 +42,19 @@ import com.oracle.svm.interpreter.metadata.profile.MethodProfile;
 import com.oracle.svm.interpreter.ristretto.RistrettoConstants;
 import com.oracle.svm.interpreter.ristretto.RistrettoOptions;
 import com.oracle.svm.interpreter.ristretto.RistrettoUtils;
+import com.oracle.svm.interpreter.ristretto.compile.RistrettoSpeculationLog;
 import com.oracle.svm.interpreter.ristretto.profile.RistrettoDiagnostics;
 import com.oracle.svm.interpreter.ristretto.profile.RistrettoProfileSupport;
 import com.oracle.svm.interpreter.ristretto.profile.RistrettoProfilingInfo;
+import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.nodes.PauseNode;
 import jdk.graal.compiler.nodes.extended.MembarNode;
 import jdk.vm.ci.meta.ConstantPool;
+import jdk.vm.ci.meta.DeoptimizationReason;
 import jdk.vm.ci.meta.ExceptionHandler;
 import jdk.vm.ci.meta.JavaType;
 import jdk.vm.ci.meta.LineNumberTable;
@@ -58,6 +63,7 @@ import jdk.vm.ci.meta.ProfilingInfo;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
+import jdk.vm.ci.meta.SpeculationLog;
 
 /**
  * JVMCI representation of a {@link jdk.vm.ci.meta.ResolvedJavaMethod} used by Ristretto for
@@ -111,6 +117,15 @@ public final class RistrettoMethod extends SubstrateMethod {
 
     private static final AtomicReferenceFieldUpdater<RistrettoMethod, SubstrateInstalledCodeImpl> INSTALLED_CODE_UPDATER = AtomicReferenceFieldUpdater.newUpdater(RistrettoMethod.class,
                     SubstrateInstalledCodeImpl.class, "installedCode");
+
+    /*
+     * The speculation log belongs to the RistrettoMethod, not to one RistrettoInstalledCode object.
+     * Each compilation snapshots the current failed speculations from this log, while deoptimization
+     * appends newly failed speculations back into the same method-level log before invalidating the
+     * installed code. Reprofiling may reset interpreter profile counters, but it must not clear this
+     * log because later installed-code objects for the same method still need those failures.
+     */
+    private final RistrettoSpeculationLog speculationLog = new RistrettoSpeculationLog();
     // JIT COMPILER SUPPORT END
 
     private RistrettoMethod(InterpreterResolvedJavaMethod interpreterMethod) {
@@ -133,6 +148,12 @@ public final class RistrettoMethod extends SubstrateMethod {
     @Override
     public InterpreterResolvedJavaMethod getInterpreterMethod() {
         return interpreterMethod;
+    }
+
+    @Override
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public boolean hasInterpreterMethod() {
+        return true;
     }
 
     private static final Function<InterpreterResolvedJavaMethod, ResolvedJavaMethod> RISTRETTO_METHOD_FUNCTION = RistrettoMethod::new;
@@ -261,6 +282,19 @@ public final class RistrettoMethod extends SubstrateMethod {
         return getProfilingInfo();
     }
 
+    @Override
+    public SpeculationLog getSpeculationLog() {
+        return speculationLog;
+    }
+
+    public RistrettoSpeculationLog getSubstrateSpeculationLog() {
+        return speculationLog;
+    }
+
+    public void recordDeoptimization(DeoptimizationReason reason) {
+        getProfile().recordDeoptimization(reason);
+    }
+
     /**
      * Allocate the profile once per method. Apart from test scenarios the profile is never set to
      * null again. Thus, the heavy locking code below is normally not run in a fast path.
@@ -277,6 +311,13 @@ public final class RistrettoMethod extends SubstrateMethod {
 
     public synchronized void resetProfile() {
         profile = null;
+    }
+
+    @Override
+    public boolean shouldBeInlined() {
+        // TODO GR-74452: preserve AOT ForceInline-annotated methods.
+        // TODO GR-74415: interpreter methods do not preserve ForceInline.
+        return false;
     }
 
     @Override
@@ -322,7 +363,7 @@ public final class RistrettoMethod extends SubstrateMethod {
     @Override
     public ConstantPool getConstantPool() {
         if (ristrettoConstantPool == null) {
-            ristrettoConstantPool = RistrettoConstantPool.create(interpreterMethod.getConstantPool());
+            ristrettoConstantPool = RistrettoConstantPool.create(this);
         }
         return ristrettoConstantPool;
     }

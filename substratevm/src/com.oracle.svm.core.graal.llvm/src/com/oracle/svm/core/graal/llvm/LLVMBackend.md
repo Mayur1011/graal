@@ -11,11 +11,7 @@ mx --dynamicimports /substratevm build
 export JAVA_HOME=$(mx --dynamicimports /substratevm graalvm-home)
 ```
 
-To enable the LLVM backend, pass the `--tool:llvm` option to the `native-image` command. 
-
-## Code Generation Options
-
-* `-H:+BitcodeOptimizations`: enables aggressive optimizations at the LLVM bitcode level. This is experimental and may cause bugs.
+To enable the LLVM backend, pass the `--tool:llvm-backend` option to the `native-image` command. 
 
 ## Debugging Options
 

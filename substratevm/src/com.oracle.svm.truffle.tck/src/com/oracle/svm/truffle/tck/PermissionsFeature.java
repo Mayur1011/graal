@@ -24,59 +24,19 @@
  */
 package com.oracle.svm.truffle.tck;
 
-import static com.oracle.graal.pointsto.reports.ReportUtils.report;
-
-import java.io.IOException;
-import java.lang.invoke.MethodHandle;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-import java.math.BigInteger;
-import java.net.URI;
-import java.net.URL;
-import java.net.URLStreamHandler;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Deque;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
-import java.util.concurrent.SynchronousQueue;
-import java.util.function.BooleanSupplier;
-import java.util.function.Function;
-import java.util.function.Predicate;
-import java.util.function.ToLongBiFunction;
-import java.util.spi.LocaleServiceProvider;
-import java.util.stream.Collectors;
-
-import org.graalvm.collections.EconomicSet;
-import org.graalvm.nativebridge.BinaryMarshaller;
-import org.graalvm.nativebridge.DispatchHandler;
-import org.graalvm.nativebridge.IsolateCreateException;
-import org.graalvm.nativebridge.ProcessIsolate;
-import org.graalvm.nativebridge.ProcessIsolateConfig;
-import org.graalvm.nativebridge.ProcessIsolateThread;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.hosted.Feature;
-import org.graalvm.polyglot.io.FileSystem;
-
 import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.flow.ConstantTypeFlow;
+import com.oracle.graal.pointsto.flow.MethodTypeFlow;
+import com.oracle.graal.pointsto.flow.NewInstanceTypeFlow;
+import com.oracle.graal.pointsto.flow.TypeFlow;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.InvokeInfo;
+import com.oracle.graal.pointsto.meta.PointsToAnalysisMethod;
 import com.oracle.svm.core.UnsafeMemoryUtil;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
+import com.oracle.svm.core.jdk.LambdaFormHiddenMethod;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.SVMHost;
@@ -86,16 +46,21 @@ import com.oracle.svm.hosted.config.ConfigurationParserUtils;
 import com.oracle.svm.shared.option.AccumulatingLocatableMultiOptionValue;
 import com.oracle.svm.shared.option.BundleMember;
 import com.oracle.svm.shared.option.HostedOptionKey;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ClassUtil;
 import com.oracle.svm.shared.util.LogUtils;
+import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.runtime.OptimizedCallTarget;
-
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.graph.NodeInputList;
 import jdk.graal.compiler.graph.NodeSourcePosition;
+import jdk.graal.compiler.java.LambdaUtils;
 import jdk.graal.compiler.nodes.ConstantNode;
 import jdk.graal.compiler.nodes.Invoke;
 import jdk.graal.compiler.nodes.PiNode;
@@ -110,6 +75,56 @@ import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.ModifiersProvider;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
+import org.graalvm.collections.EconomicSet;
+import org.graalvm.nativebridge.BinaryMarshaller;
+import org.graalvm.nativebridge.DispatchHandler;
+import org.graalvm.nativebridge.IsolateCreateException;
+import org.graalvm.nativebridge.ProcessIsolate;
+import org.graalvm.nativebridge.ProcessIsolateConfig;
+import org.graalvm.nativebridge.ProcessIsolateThread;
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.hosted.Feature;
+import org.graalvm.polyglot.io.FileSystem;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.lang.invoke.MethodHandle;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.math.BigInteger;
+import java.net.URI;
+import java.net.URL;
+import java.net.URLStreamHandler;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.SynchronousQueue;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.ToLongBiFunction;
+import java.util.spi.LocaleServiceProvider;
+import java.util.stream.Collectors;
+
+import static com.oracle.graal.pointsto.reports.ReportUtils.report;
 
 /**
  * A Truffle TCK {@code Feature} detecting privileged calls done by Truffle language. The
@@ -122,9 +137,19 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * report file using {@code -H:TruffleTCKPermissionsReportFile} option and specify the language
  * packages by {@code -H:TruffleTCKPermissionsLanguagePackages} option.
  */
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 public class PermissionsFeature implements Feature {
+    @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(PermissionsFeature.class, this);
+    }
 
     private static final String CONFIG = "truffle-language-permissions-config.json";
+    private static final String INIT = "<init>";
+    private static final String CLINIT = "<clinit>";
+    private static final Comparator<BaseMethodNode> CALLERS_COMPARATOR = Comparator.comparing(PermissionsFeature::isSystemOrSafeClass).//
+                    thenComparing(new BaseMethodNodeComparator());
+    private static final Comparator<AnalysisMethod> INVOKE_COMPARATOR = new AnalysisMethodComparator();
 
     public enum ActionKind {
         Ignore,
@@ -182,6 +207,9 @@ public class PermissionsFeature implements Feature {
                           - All: Reports all call paths for all violations.
                         """, type = OptionType.Expert)//
         public static final HostedOptionKey<CollectMode> TruffleTCKCollectMode = new HostedOptionKey<>(CollectMode.SinglePrivilegedMethodUsage);
+
+        @Option(help = "Path to a file where the Truffle TCK permissions inverted call graph is dumped.", type = OptionType.Expert)//
+        public static final HostedOptionKey<String> TruffleTCKDumpCallGraph = new HostedOptionKey<>(null);
     }
 
     /**
@@ -202,6 +230,7 @@ public class PermissionsFeature implements Feature {
         safePackages = EconomicSet.create();
         safePackages.add("org.graalvm.polyglot.");
         safePackages.add("org.graalvm.home.");
+        safePackages.add("org.graalvm.nativebridge.");
         safePackages.add("jdk.graal.compiler.");
         safePackages.add("com.oracle.graalvm.");
         safePackages.add("com.oracle.svm.core.");
@@ -236,7 +265,7 @@ public class PermissionsFeature implements Feature {
     /**
      * Methods which should not be found.
      */
-    private final Set<BaseMethodNode> deniedMethods = new HashSet<>(); // noEconomicSet(streaming)
+    private final Set<BaseMethodNode> deniedMethods = new TreeSet<>(new BaseMethodNodeComparator());
 
     /**
      * Path to store report into.
@@ -252,6 +281,18 @@ public class PermissionsFeature implements Feature {
      * Language methods which are allowed to do privileged calls without being reported.
      */
     private Map<BaseMethodNode, Boolean> languageAllowList;
+
+    /**
+     * A set of methods containing functional implementation objects, such as lambdas, method
+     * references, or anonymous classes, that are safe to handle as inlined code within the method
+     * itself. These objects must either be no-escape or only escape through parameters. The
+     * motivation behind this is to introduce context sensitivity to points-to analyses. When an
+     * object implementing a megamorphic interface becomes reachable, points-to analyses cannot
+     * determine that the object is local and make its implementation invoked in unrelated call
+     * sites. Adding a method to this set ensures that all implementation objects allocated and
+     * referenced within it remain confined to the method's context.
+     */
+    private Set<? extends BaseMethodNode> platformInlinedImplementations;
 
     private Set<CallGraphFilter> contextFilters; // noEconomicSet(streaming)
 
@@ -297,6 +338,7 @@ public class PermissionsFeature implements Feature {
         Set<AnalysisMethod> preventInlineBeforeAnalysis = new HashSet<>(); // noEconomicSet(streaming)
         deniedMethods.stream().map(BaseMethodNode::getMethod).forEach(preventInlineBeforeAnalysis::add);
         platformAllowList.stream().map(BaseMethodNode::getMethod).forEach(preventInlineBeforeAnalysis::add);
+        platformInlinedImplementations.stream().map(BaseMethodNode::getMethod).forEach(preventInlineBeforeAnalysis::add);
         languageAllowList.keySet().stream().map(BaseMethodNode::getMethod).forEach(preventInlineBeforeAnalysis::add);
         contextFilters.stream().map(CallGraphFilter::getInspectedMethods).forEach(preventInlineBeforeAnalysis::addAll);
 
@@ -340,6 +382,12 @@ public class PermissionsFeature implements Feature {
         allowListparser = new AllowListParser(accessImpl.getImageClassLoader(), bb);
         ConfigurationParserUtils.parseAndRegisterConfigurations(allowListparser, accessImpl.getImageClassLoader(), featureName,
                         CONFIG,
+                        List.of(),
+                        List.of(getClass().getPackage().getName().replace('.', '/') + "/resources/jdk_inlined_implementations.json"));
+        platformInlinedImplementations = allowListparser.getMethods();
+        allowListparser = new AllowListParser(accessImpl.getImageClassLoader(), bb);
+        ConfigurationParserUtils.parseAndRegisterConfigurations(allowListparser, accessImpl.getImageClassLoader(), featureName,
+                        CONFIG,
                         Options.TruffleTCKPermissionsExcludeFiles.getValue().values(),
                         List.of());
         languageAllowList = allowListparser.getMethods().stream().collect(Collectors.toMap(Function.identity(), _ -> false));
@@ -364,7 +412,7 @@ public class PermissionsFeature implements Feature {
         // jdk_allowed_methods.json).
         deniedMethods.addAll(findMethods(bb, BigInteger.class, (m) -> m.getName().startsWith("parallel")));
         // We deny SynchronousQueue as it creates ForkJoinWorkerThread.
-        deniedMethods.addAll(findConstructors(bb, SynchronousQueue.class, (m) -> "<init>".equals(m.getName())));
+        deniedMethods.addAll(findConstructors(bb, SynchronousQueue.class, (m) -> INIT.equals(m.getName())));
         // Reflective calls
         deniedMethods.addAll(findMethods(bb, Method.class, (m) -> m.getName().equals("invoke") && m.isPublic() && m.getParameters().length == 2));
         deniedMethods.addAll(findMethods(bb, Constructor.class, (m) -> m.getName().equals("newInstance") && m.isPublic() && m.getParameters().length == 1));
@@ -372,9 +420,42 @@ public class PermissionsFeature implements Feature {
         deniedMethods.addAll(findMethods(bb, Class.class, (m) -> m.getName().equals("newInstance") && m.isPublic() && m.getParameters().length == 0));
         // ProcessIsolate entry method
         deniedMethods.addAll(findMethods(bb, ProcessIsolate.class, (m) -> m.getName().equals("spawnProcessIsolate")));
+        /*
+         * Forbid instantiation of java.nio.file.FileTreeIterator. Its next() and hasNext()
+         * methods perform privileged calls, but these methods must remain allowed because
+         * FileTreeIterator is one of many implementations behind the megamorphic Iterator
+         * interface in points-to analysis. Instead, we block construction of
+         * FileTreeIterator itself to prevent instances from being created.
+         */
+        deniedMethods.addAll(findConstructors(bb, accessImpl.getImageClassLoader().findClass("java.nio.file.FileTreeIterator").get(), (m) -> INIT.equals(m.getName())));
         if (inlinedUnsafeCall != null) {
             deniedMethods.add(inlinedUnsafeCall);
         }
+    }
+
+    private static void computeInlinedImplementationReferences(AnalysisMethod method, Map<AnalysisType, Collection<AnalysisMethod>> result) {
+        MethodTypeFlow methodTypeFlow = ((PointsToAnalysisMethod) method).getTypeFlow();
+        if (methodTypeFlow.flowsGraphCreated()) {
+            for (TypeFlow<?> flow : methodTypeFlow.getMethodFlowsGraph().flows()) {
+                if (flow instanceof ConstantTypeFlow || flow instanceof NewInstanceTypeFlow) {
+                    AnalysisType declaredType = flow.getDeclaredType();
+                    if (isInlinedImplementationType(declaredType)) {
+                        result.computeIfAbsent(declaredType, (_) -> new HashSet<>()).add(method);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean isInlinedImplementationType(AnalysisType type) {
+        if (type == null) {
+            return false;
+        }
+        if (LambdaUtils.isLambdaClassName(type.toJavaName())) {
+            return AnnotationUtil.isAnnotationPresent(type, LambdaFormHiddenMethod.class);
+        }
+        Class<?> javaClass = type.getJavaClass();
+        return javaClass != null && javaClass.isAnonymousClass();
     }
 
     @Override
@@ -389,7 +470,48 @@ public class PermissionsFeature implements Feature {
         CollectMode collectMode = Options.TruffleTCKCollectMode.getValue();
         try (DebugContext.Scope _ = debugContext.scope(ClassUtil.getUnqualifiedName(getClass()))) {
             BigBang bb = accessImpl.getBigBang();
+            Map<AnalysisType, Collection<AnalysisMethod>> inlinedImplementationUsages = new HashMap<>();
+            for (BaseMethodNode methodNode : platformInlinedImplementations) {
+                AnalysisMethod method = methodNode.getMethod();
+                if (bb.getHostVM().platformSupported(method)) {
+                    computeInlinedImplementationReferences(method, inlinedImplementationUsages);
+                }
+            }
+            Map<AnalysisType, AnalysisMethod> inlinedImplementations = new HashMap<>();
+            for (Map.Entry<AnalysisType, Collection<AnalysisMethod>> e : inlinedImplementationUsages.entrySet()) {
+                Collection<AnalysisMethod> users = e.getValue();
+                if (users.size() == 1) {
+                    inlinedImplementations.put(e.getKey(), users.iterator().next());
+                } else {
+                    VMError.shouldNotReachHere("Implementation type %s with multiple inlined scopes cannot be inlined, usages: %s",
+                                    e.getKey().toJavaName(),
+                                    users.stream().map(PermissionsFeature::getMethodName).collect(Collectors.joining(", ")));
+                }
+            }
             Map<BaseMethodNode, Set<BaseMethodNode>> cg = callGraph(bb, deniedMethods, debugContext, (SVMHost) bb.getHostVM());
+            String dumpCallGraph = Options.TruffleTCKDumpCallGraph.getValue();
+            if (dumpCallGraph != null) {
+                Path callGraphPath = Paths.get(dumpCallGraph);
+                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(callGraphPath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                                StandardOpenOption.TRUNCATE_EXISTING))) {
+                    for (Map.Entry<BaseMethodNode, Set<BaseMethodNode>> e : cg.entrySet()) {
+                        out.print(e.getKey().getId());
+                        out.print(" -> [");
+                        boolean first = true;
+                        for (BaseMethodNode methodNode : e.getValue()) {
+                            if (first) {
+                                first = false;
+                            } else {
+                                out.print(", ");
+                            }
+                            out.print(methodNode.getId());
+                        }
+                        out.println("]");
+                    }
+                } catch (IOException e) {
+                    throw UserError.abort(e, "Cannot write generated call graph to %s", callGraphPath);
+                }
+            }
             List<List<BaseMethodNode>> report = new ArrayList<>();
             int maxStackDepth = Options.TruffleTCKPermissionsMaxStackTraceDepth.getValue();
             maxStackDepth = maxStackDepth == -1 ? Integer.MAX_VALUE : maxStackDepth;
@@ -397,8 +519,8 @@ public class PermissionsFeature implements Feature {
                 if (cg.containsKey(deniedMethod)) {
                     collectViolations(report, deniedMethod,
                                     maxStackDepth, Options.TruffleTCKPermissionsMaxErrors.getValue(),
-                                    cg, contextFilters, collectMode,
-                                    new LinkedList<>(), new HashSet<>(), 1, 0);  // noEconomicSet(streaming)
+                                    cg, inlinedImplementations, contextFilters, collectMode, new LinkedList<>(),
+                                    new VisitedNodes(), null, false, 1, 0);  // noEconomicSet(streaming)
                     if (!report.isEmpty() && collectMode == CollectMode.Single) {
                         break;
                     }
@@ -456,9 +578,9 @@ public class PermissionsFeature implements Feature {
     private Map<BaseMethodNode, Set<BaseMethodNode>> callGraph(BigBang bb, Set<BaseMethodNode> targets,
                     DebugContext debugContext, SVMHost hostVM) {
         Deque<AnalysisMethodNode> todo = new LinkedList<>();
-        Map<BaseMethodNode, Set<BaseMethodNode>> visited = new HashMap<>(); // noEconomicSet(streaming)
+        Map<BaseMethodNode, Set<BaseMethodNode>> visited = new HashMap<>();
         for (AnalysisMethodNode m : findMethods(bb, OptimizedCallTarget.class, (m) -> "profiledPERoot".equals(m.getName()))) {
-            visited.put(m, new HashSet<>()); // noEconomicSet(streaming)
+            visited.put(m, newCallerSet());
             todo.add(m);
         }
         Deque<BaseMethodNode> path = new LinkedList<>();
@@ -466,6 +588,10 @@ public class PermissionsFeature implements Feature {
             callGraphImpl(m, targets, visited, path, debugContext, hostVM);
         }
         return visited;
+    }
+
+    private static Set<BaseMethodNode> newCallerSet() {
+        return new TreeSet<>(CALLERS_COMPARATOR);
     }
 
     private void findUnsafeAccesses(
@@ -508,7 +634,7 @@ public class PermissionsFeature implements Feature {
                 current = current.getCaller();
             }
             if (!foundSystemClass) {
-                visited.computeIfAbsent(inlinedUnsafeCall, _ -> new HashSet<>()).add(mNode); // noEconomicSet(streaming)
+                visited.computeIfAbsent(inlinedUnsafeCall, _ -> newCallerSet()).add(mNode); // noEconomicSet(streaming)
                 return;
             }
         }
@@ -529,14 +655,16 @@ public class PermissionsFeature implements Feature {
             boolean callPathContainsTarget = false;
             debugContext.log(DebugContext.VERY_DETAILED_LEVEL, "Entered method: %s.", mName);
             for (InvokeInfo invoke : m.getInvokes()) {
-                for (AnalysisMethod callee : invoke.getOriginalCallees()) {
+                Collection<AnalysisMethod> callees = invoke.getOriginalCallees();
+                Iterable<AnalysisMethod> ordered = callees.size() > 1 ? callees.stream().sorted(INVOKE_COMPARATOR).toList() : callees;
+                for (AnalysisMethod callee : ordered) {
                     AnalysisMethodNode calleeNode = new AnalysisMethodNode(callee);
                     if (callee.isImplementationInvoked()) {
                         Set<BaseMethodNode> parents = visited.get(calleeNode);
                         String calleeName = getMethodName(callee);
                         debugContext.log(DebugContext.VERY_DETAILED_LEVEL, "Callee: %s, new: %b.", calleeName, parents == null);
                         if (parents == null) {
-                            parents = new HashSet<>(); // noEconomicSet(streaming)
+                            parents = newCallerSet();
                             visited.put(calleeNode, parents);
                             if (targets.contains(calleeNode)) {
                                 parents.add(mNode);
@@ -550,9 +678,23 @@ public class PermissionsFeature implements Feature {
                             }
                             callPathContainsTarget |= add;
                         } else if (!isBacktrace(calleeNode, path) || isBackTraceOverLanguageMethod(calleeNode, path)) {
-                            parents.add(mNode);
-                            debugContext.log(DebugContext.VERY_DETAILED_LEVEL, "Added backtrace callee: %s for %s.", calleeName, mName);
-                            callPathContainsTarget = true;
+                            /*
+                             * The outer branch handles already visited callees that are either not on the current
+                             * path, or are back edges that must be kept because they cross a language method. A
+                             * visited node with an empty caller set can also mean "this subtree was already proven
+                             * not to reach a target", so do not blindly propagate it to the current caller. Keep it
+                             * only when:
+                             * - it is a backtrace: together with the outer condition this means
+                             *   isBackTraceOverLanguageMethod(...) is true, so the recursive edge closes a path over a
+                             *   language method and is part of a violation;
+                             * - it is itself a target privileged method; or
+                             * - it already has parents, meaning a previous traversal found a path from it to a target.
+                             */
+                            if (isBacktrace(calleeNode, path) || targets.contains(calleeNode) || !parents.isEmpty()) {
+                                parents.add(mNode);
+                                debugContext.log(DebugContext.VERY_DETAILED_LEVEL, "Added backtrace callee: %s for %s.", calleeName, mName);
+                                callPathContainsTarget = true;
+                            }
                         } else {
                             if (debugContext.isLogEnabled(DebugContext.VERY_DETAILED_LEVEL)) {
                                 debugContext.log(DebugContext.VERY_DETAILED_LEVEL, "Ignoring backtrace callee: %s for %s.", calleeName, mName);
@@ -619,11 +761,16 @@ public class PermissionsFeature implements Feature {
      * @param maxReports maximal number of reports
      * @param callGraph call graph obtained from
      *            {@link PermissionsFeature#callGraph(BigBang, Set, DebugContext, SVMHost)}
+     * @param inlinedImplementations implementation types that should be reported only by a method
+     *            creating (referencing) the implementation object
      * @param contextFiltersParam filters removing known valid calls
      * @param collectMode violation collect mode, see {@link Options#TruffleTCKCollectMode}
      * @param currentPath current path from a privileged method in a call graph
-     * @param visited set of already visited methods, these methods are already part of an existing
-     *            report or do not lead to language class
+     * @param visited tracks fully processed unscoped methods and scoped method/scope pairs
+     * @param implementationScope if non {@code null} we process an inlined implementation that
+     *            should be reported only to {@code implementationScope} method.
+     * @param scopedPath {@code true} if the current path has previously entered an inlined
+     *            implementation scope, even if {@code implementationScope} has already been cleared
      * @param depth current depth
      */
     private int collectViolations(
@@ -632,10 +779,13 @@ public class PermissionsFeature implements Feature {
                     int maxDepth,
                     int maxReports,
                     Map<BaseMethodNode, Set<BaseMethodNode>> callGraph,
+                    Map<AnalysisType, AnalysisMethod> inlinedImplementations,
                     Set<CallGraphFilter> contextFiltersParam,
                     CollectMode collectMode,
                     List<BaseMethodNode> currentPath,
-                    Set<BaseMethodNode> visited,
+                    VisitedNodes visited,
+                    AnalysisMethod implementationScope,
+                    boolean scopedPath,
                     int depth,
                     int initialNumReports) {
         int numReports = initialNumReports;
@@ -645,36 +795,110 @@ public class PermissionsFeature implements Feature {
         if (isSafeClass(mNode) || isExcludedClass(mNode)) {
             return numReports;
         }
-        if (!visited.contains(mNode)) {
-            visited.add(mNode);
-            currentPath.add(mNode);
-            try {
-                Set<BaseMethodNode> callers = callGraph.get(mNode);
-                if (depth > maxDepth) {
-                    if (!callers.isEmpty()) {
-                        numReports = collectViolations(report, callers.iterator().next(), maxDepth, maxReports, callGraph, contextFiltersParam, collectMode, currentPath, visited, depth + 1,
-                                        numReports);
-                    }
-                } else if (!isSystemOrSafeClass(mNode)) {
-                    List<BaseMethodNode> callPath = new ArrayList<>(currentPath);
-                    report.add(callPath);
-                    numReports++;
-                } else {
-                    for (BaseMethodNode caller : callers) {
-                        if (contextFiltersParam.stream().noneMatch((f) -> f.test(mNode, caller, currentPath))) {
-                            numReports = collectViolations(report, caller, maxDepth, maxReports, callGraph, contextFiltersParam, collectMode, currentPath, visited, depth + 1, numReports);
-                            if (numReports > initialNumReports && collectMode != CollectMode.All) {
-                                break;
-                            }
+        boolean useScopedPath = scopedPath || implementationScope != null;
+        if (useScopedPath && currentPath.contains(mNode)) {
+            return numReports;
+        }
+        if (!visited.add(mNode, implementationScope, useScopedPath)) {
+            return numReports;
+        }
+        currentPath.add(mNode);
+        try {
+            Set<BaseMethodNode> callers = callGraph.get(mNode);
+            if (depth > maxDepth) {
+                if (!callers.isEmpty()) {
+                    BaseMethodNode caller = callers.iterator().next();
+                    AnalysisMethod useImplementationScope = mergeImplementationScope(implementationScope, caller.getMethod(), inlinedImplementations);
+                    boolean useCallerScopedPath = useScopedPath || useImplementationScope != null;
+                    numReports = collectViolations(report, caller, maxDepth, maxReports, callGraph,
+                                    inlinedImplementations, contextFiltersParam, collectMode, currentPath, visited,
+                                    useImplementationScope, useCallerScopedPath, depth + 1, numReports);
+                }
+            } else if (!isSystemOrSafeClass(mNode) && implementationScope == null) {
+                List<BaseMethodNode> callPath = new ArrayList<>(currentPath);
+                report.add(callPath);
+                numReports++;
+            } else {
+                for (BaseMethodNode caller : callers) {
+                    if (contextFiltersParam.stream().noneMatch((f) -> f.test(mNode, caller, currentPath))) {
+                        AnalysisMethod useImplementationScope = mergeImplementationScope(implementationScope, caller.getMethod(), inlinedImplementations);
+                        boolean useCallerScopedPath = useScopedPath || useImplementationScope != null;
+                        numReports = collectViolations(report, caller, maxDepth, maxReports, callGraph,
+                                        inlinedImplementations, contextFiltersParam, collectMode, currentPath, visited,
+                                        useImplementationScope, useCallerScopedPath, depth + 1, numReports);
+                        if (numReports > initialNumReports && collectMode != CollectMode.All) {
+                            break;
                         }
                     }
                 }
-            } finally {
-                BaseMethodNode last = currentPath.removeLast();
-                assert last == mNode;
             }
+        } finally {
+            BaseMethodNode last = currentPath.removeLast();
+            assert last == mNode;
         }
         return numReports;
+    }
+
+    private static final class VisitedNodes {
+
+        private final Set<BaseMethodNode> globallyVisited = new HashSet<>();
+        private final Set<VisitKey> visitedInScope = new HashSet<>();
+
+        /**
+         * Records that {@code node} is being processed and returns whether processing should
+         * continue. The permission report traversal has three relevant states:
+         * <ol>
+         * <li>A naturally unscoped path ({@code scopedPath == false} and
+         * {@code implementationScope == null}). The node can be
+         * stored in {@link #globallyVisited}, because all later naturally unscoped visits to the
+         * same node would process the same caller subgraph.</li>
+         * <li>A path inside an inlined implementation scope ({@code implementationScope != null}).
+         * This must be cached separately by both node and scope, because the same node can be
+         * reached under different implementation scopes and each scope clears at a different
+         * defining method.</li>
+         * <li>A path that entered an inlined implementation scope earlier, but whose active scope
+         * has already been cleared ({@code scopedPath == true} and
+         * {@code implementationScope == null}). Although violations are reportable again, this path
+         * is still not equivalent to a naturally unscoped path: it has a different lower call-path
+         * prefix, and context filters inspect {@code currentPath}. Therefore it must not write to
+         * {@link #globallyVisited}, or it could suppress a later natural path through the same
+         * shared JDK node.</li>
+         * </ol>
+         *
+         * @return {@code true} if this visit was not processed before in the corresponding state
+         */
+        boolean add(BaseMethodNode node, AnalysisMethod implementationScope, boolean scopedPath) {
+            if (!scopedPath) {
+                return globallyVisited.add(node);
+            }
+            return visitedInScope.add(new VisitKey(node, implementationScope));
+        }
+
+        private record VisitKey(BaseMethodNode method, AnalysisMethod implementationScope) {
+        }
+    }
+
+    private static AnalysisMethod mergeImplementationScope(AnalysisMethod currentScope, AnalysisMethod caller, Map<AnalysisType, AnalysisMethod> inlinedImplementations) {
+        AnalysisMethod useCurrentScope = currentScope;
+        if (useCurrentScope != null && isSameMethodFamily(useCurrentScope, caller)) {
+            useCurrentScope = null;
+        }
+        String callerName = caller.getName();
+        if (INIT.equals(callerName) || CLINIT.equals(callerName)) {
+            return useCurrentScope;
+        }
+        AnalysisMethod newScope = inlinedImplementations.get(caller.getDeclaringClass());
+        return newScope != null ? newScope : useCurrentScope;
+    }
+
+    private static boolean isSameMethodFamily(AnalysisMethod left, AnalysisMethod right) {
+        /*
+         * AnalysisMethod.equals is identity based. Method variants (for example %%D and %%R) are
+         * represented by distinct AnalysisMethod instances, but share the same analysis method id.
+         * The implementation scope must be cleared when the traversal reaches any variant of the
+         * method that introduced the scoped implementation object.
+         */
+        return left.equals(right) || left.getId() == right.getId();
     }
 
     private static boolean isSystemOrSafeClass(BaseMethodNode methodNode) {
@@ -699,8 +923,7 @@ public class PermissionsFeature implements Feature {
     }
 
     /**
-     * Tests if the given {@link AnalysisMethod} is from Truffle library, GraalVM SDK or compiler
-     * package.
+     * Tests if {@code method} is from Truffle library, GraalVM SDK or compiler package.
      *
      * @param method the {@link AnalysisMethod} to check
      */
@@ -708,6 +931,11 @@ public class PermissionsFeature implements Feature {
         return isSafeClass(method.getOwner());
     }
 
+    /**
+     * Tests if {@code type} is from Truffle library, GraalVM SDK or compiler package.
+     *
+     * @param type the {@link AnalysisType} to check
+     */
     private static boolean isSafeClass(AnalysisType type) {
         return isClassInPackage(type.toJavaName(), safePackages);
     }
@@ -1201,6 +1429,9 @@ public class PermissionsFeature implements Feature {
     }
 
     abstract static class BaseMethodNode {
+
+        abstract String getId();
+
         abstract StackTraceElement asStackTraceElement();
 
         abstract AnalysisType getOwner();
@@ -1214,6 +1445,11 @@ public class PermissionsFeature implements Feature {
 
         InlinedUnsafeMethodNode(AnalysisType unsafe) {
             this.unsafe = unsafe;
+        }
+
+        @Override
+        String getId() {
+            return unsafe.toJavaName() + ".<inlined>";
         }
 
         @Override
@@ -1263,6 +1499,11 @@ public class PermissionsFeature implements Feature {
         }
 
         @Override
+        String getId() {
+            return getMethodName(method) + '-' + method.getId();
+        }
+
+        @Override
         StackTraceElement asStackTraceElement() {
             return method.asStackTraceElement(0);
         }
@@ -1297,6 +1538,44 @@ public class PermissionsFeature implements Feature {
         @Override
         public String toString() {
             return String.format("%s[method=%s]", ClassUtil.getUnqualifiedName(getClass()), method);
+        }
+    }
+
+    static final class BaseMethodNodeComparator implements Comparator<BaseMethodNode> {
+
+        @Override
+        public int compare(BaseMethodNode o1, BaseMethodNode o2) {
+            String k1 = o1.getId();
+            String k2 = o2.getId();
+            return k1.compareTo(k2);
+        }
+    }
+
+    static final class AnalysisMethodComparator implements Comparator<AnalysisMethod> {
+
+        @Override
+        public int compare(AnalysisMethod m1, AnalysisMethod m2) {
+            int res = removeLambdaHash(m1.getDeclaringClass().toClassName()).compareTo(removeLambdaHash(m2.getDeclaringClass().toClassName()));
+            if (res != 0) {
+                return res;
+            }
+            res = m1.getName().compareTo(m2.getName());
+            if (res != 0) {
+                return res;
+            }
+            return m1.getSignature().toString().compareTo(m2.getSignature().toString());
+        }
+
+        /**
+         *
+         * Lambda function names are not completely deterministic e.g. in name
+         * Lambda$7ad16f47b695d909/0x00000007c0b4c630.accept(java.lang.Object):void hash part is not
+         * deterministic. In order to avoid comparing based on that part, we need to eliminate hash
+         * part from name of lambda function.
+         *
+         */
+        private static String removeLambdaHash(String className) {
+            return className.contains("$$Lambda") ? className.replaceAll("/[0-9a-fA-Fx]*$", "") : className;
         }
     }
 }

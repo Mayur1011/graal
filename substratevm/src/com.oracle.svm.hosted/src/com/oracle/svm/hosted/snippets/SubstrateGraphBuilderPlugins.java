@@ -53,7 +53,6 @@ import org.graalvm.word.UnsignedWord;
 import com.oracle.graal.pointsto.AbstractAnalysisEngine;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.svm.core.ArenaIntrinsics;
-import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.MissingRegistrationSupport;
 import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.ParsingReason;
@@ -157,6 +156,7 @@ import jdk.graal.compiler.options.Option;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.AllocateUninitializedArrayPlugin;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.ReachabilityFencePlugin;
+import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.Poly1305ProcessBlocksPlugin;
 import jdk.graal.compiler.replacements.nodes.AESNode;
 import jdk.graal.compiler.replacements.nodes.MacroNode.MacroParams;
 import jdk.graal.compiler.word.WordCastNode;
@@ -210,6 +210,7 @@ public class SubstrateGraphBuilderPlugins {
         if (supportsStubBasedPlugins) {
             registerAESPlugins(plugins);
             registerArraysSupportPlugins(plugins);
+            registerPoly1305Plugin(plugins);
         }
     }
 
@@ -1092,7 +1093,7 @@ public class SubstrateGraphBuilderPlugins {
         if (clazzOrHub instanceof Class<?> clazz) {
             return RuntimeAssertionsSupport.singleton().desiredAssertionStatus(clazz);
         } else if (clazzOrHub instanceof DynamicHub hub) {
-            return hub.desiredAssertionStatus();
+            return RuntimeAssertionsSupport.singleton().desiredAssertionStatus(hub.getHostedJavaClass());
         }
         return null;
     }
@@ -1254,7 +1255,7 @@ public class SubstrateGraphBuilderPlugins {
                     ValueNode compressedObj = SubstrateCompressionNode.compress(b.getGraph(), objectNode, ImageSingletons.lookup(CompressEncoding.class));
                     JavaKind compressedIntKind = JavaKind.fromWordSize(ObjectLayout.singleton().getReferenceSize());
                     ValueNode compressedValue = b.add(WordCastNode.narrowOopToUntrackedWord(compressedObj, compressedIntKind));
-                    b.addPush(JavaKind.Object, ZeroExtendNode.convertUnsigned(compressedValue, FrameAccess.getWordStamp(), NodeView.DEFAULT));
+                    b.addPush(JavaKind.Object, ZeroExtendNode.convertUnsigned(compressedValue, SubstrateTarget.getWordStamp(), NodeView.DEFAULT));
                 } else {
                     b.addPush(JavaKind.Object, WordCastNode.objectToUntrackedPointer(objectNode, SubstrateTarget.getWordKind()));
                 }
@@ -1284,6 +1285,11 @@ public class SubstrateGraphBuilderPlugins {
         InvocationPlugins.Registration r = new InvocationPlugins.Registration(plugins, "jdk.internal.util.ArraysSupport");
         r.register(new StandardGraphBuilderPlugins.VectorizedMismatchInvocationPlugin());
         r.register(new StandardGraphBuilderPlugins.VectorizedHashCodeInvocationPlugin());
+    }
+
+    private static void registerPoly1305Plugin(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "com.sun.crypto.provider.Poly1305");
+        r.register(new Poly1305ProcessBlocksPlugin());
     }
 
     public static class SubstrateCipherBlockChainingCryptPlugin extends StandardGraphBuilderPlugins.CipherBlockChainingCryptPlugin {
@@ -1319,6 +1325,37 @@ public class SubstrateGraphBuilderPlugins {
         protected ResolvedJavaType getTypeAESCrypt(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
             Class<?> classAESCrypt = ReflectionUtil.lookupClass("com.sun.crypto.provider.AESCrypt");
             return metaAccess.lookupJavaType(classAESCrypt);
+        }
+    }
+
+    public static class SubstrateGaloisCounterModeCryptPlugin extends StandardGraphBuilderPlugins.GaloisCounterModeCryptPlugin {
+
+        @Override
+        protected boolean canApply(GraphBuilderContext b) {
+            return b instanceof BytecodeParser;
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeAESCrypt(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classAESCrypt = ReflectionUtil.lookupClass("com.sun.crypto.provider.AESCrypt");
+            return metaAccess.lookupJavaType(classAESCrypt);
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeGCTR(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classGCTR = ReflectionUtil.lookupClass("com.sun.crypto.provider.GCTR");
+            return metaAccess.lookupJavaType(classGCTR);
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeGHASH(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classGHASH = ReflectionUtil.lookupClass("com.sun.crypto.provider.GHASH");
+            return metaAccess.lookupJavaType(classGHASH);
+        }
+
+        @Override
+        public boolean isRuntimeChecked(Architecture arch) {
+            return false;
         }
     }
 
@@ -1376,6 +1413,9 @@ public class SubstrateGraphBuilderPlugins {
                 return false;
             }
         });
+
+        r = new Registration(plugins, "com.sun.crypto.provider.GaloisCounterMode");
+        r.register(new SubstrateGaloisCounterModeCryptPlugin());
     }
 
     private static <T> T constantObjectParameter(GraphBuilderContext b, ResolvedJavaMethod targetMethod, int parameterIndex, Class<T> declaredType, ValueNode classNode) {

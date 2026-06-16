@@ -34,7 +34,6 @@ import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.shared.util.BasedOnJDKFile;
-import com.oracle.svm.shared.util.SubstrateUtil;
 
 /**
  * Substitution class for {@link java.lang.Module}. We need to substitute native methods
@@ -59,15 +58,14 @@ public final class Target_java_lang_Module {
     // @Stable (no effect currently GR-60154)
     ModuleLayer layer;
 
-    /**
-     * Creating an {@link Alias} directly for {@code ALL_UNNAMED_MODULE} and {@code EVERYONE_MODULE}
-     * makes {@code java.util.regex.Pattern} reachable, which increases the size of the binary.
-     */
     // Checkstyle: stop
     @Alias //
-    private static Set<Module> ALL_UNNAMED_MODULE_SET;
+    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.None, isFinal = true) //
+    static Module ALL_UNNAMED_MODULE;
+
     @Alias //
-    private static Set<Module> EVERYONE_SET;
+    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.None, isFinal = true) //
+    static Module EVERYONE_MODULE;
     // Checkstyle: resume
 
     @Substitute
@@ -81,31 +79,31 @@ public final class Target_java_lang_Module {
     public native void ensureNativeAccess(Class<?> owner, String methodName, Class<?> currentClass, boolean jni);
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+21/src/hotspot/share/classfile/modules.cpp#L279-L474")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+21/src/hotspot/share/classfile/modules.cpp#L279-L474")
     private static void defineModule0(Module module, boolean isOpen, String version, String location, Object[] pns) {
         ModuleNative.defineModule(module, isOpen, pns);
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L763-L799")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L763-L799")
     private static void addReads0(Module from, Module to) {
         ModuleNative.addReads(from, to);
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L753-L761")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L753-L761")
     private static void addExports0(Module from, String pn, Module to) {
         ModuleNative.addExports(from, pn, to);
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L686-L750")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L686-L750")
     private static void addExportsToAll0(Module from, String pn) {
         ModuleNative.addExportsToAll(from, pn);
     }
 
     @Substitute
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L869-L918")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/share/classfile/modules.cpp#L869-L918")
     private static void addExportsToAllUnnamed0(Module from, String pn) {
         ModuleNative.addExportsToAllUnnamed(from, pn);
     }
@@ -114,7 +112,7 @@ public final class Target_java_lang_Module {
     @SuppressWarnings("static-method")
     private boolean allows(Set<Module> targets, Module module) {
         if (targets != null) {
-            Module everyoneModule = EVERYONE_SET.stream().findFirst().get();
+            Module everyoneModule = EVERYONE_MODULE;
             if (targets.contains(everyoneModule)) {
                 return true;
             }
@@ -122,7 +120,7 @@ public final class Target_java_lang_Module {
                 if (targets.contains(module)) {
                     return true;
                 }
-                if (!module.isNamed() && targets.contains(ALL_UNNAMED_MODULE_SET.stream().findFirst().get())) {
+                if (!module.isNamed() && targets.contains(ALL_UNNAMED_MODULE)) {
                     return true;
                 }
                 if (ImageLayerBuildingSupport.buildingImageLayer()) {
@@ -140,13 +138,5 @@ public final class Target_java_lang_Module {
         }
         return false;
     }
-}
 
-final class ModuleSubstitutionsSupport {
-    private ModuleSubstitutionsSupport() {
-    }
-
-    static void patchLayer(Module module, ModuleLayer newLayer) {
-        SubstrateUtil.cast(module, Target_java_lang_Module.class).layer = newLayer;
-    }
 }

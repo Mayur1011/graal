@@ -1,8 +1,8 @@
 suite = {
     "name": "vm",
-    "version" : "25.1.0",
     "mxversion": "7.67.0",
-    "release" : False,
+    "version_from" : "sdk",
+    "release_from" : "sdk",
     "groupId" : "org.graalvm",
 
     "url" : "http://www.graalvm.org/",
@@ -34,7 +34,7 @@ suite = {
                 "name": "graal-nodejs",
                 "subdir": True,
                 "dynamic": True,
-                "version": "d4e6c4172e839014bcd3cc68e0a30957c8e71e9b",
+                "version": "4d3d89f5b3bf7e7678584de2c199fc2f6c230c74",
                 "urls" : [
                     {"url" : "https://github.com/graalvm/graaljs.git", "kind" : "git"},
                 ]
@@ -43,7 +43,7 @@ suite = {
                 "name": "graal-js",
                 "subdir": True,
                 "dynamic": True,
-                "version": "d4e6c4172e839014bcd3cc68e0a30957c8e71e9b",
+                "version": "4d3d89f5b3bf7e7678584de2c199fc2f6c230c74",
                 "urls": [
                     {"url": "https://github.com/graalvm/graaljs.git", "kind" : "git"},
                 ]
@@ -58,7 +58,7 @@ suite = {
             },
             {
                 "name": "graalpython",
-                "version": "c63af28d14c4e934a9b381ec5ac7e1e61bcc9124",
+                "version": "d65574200996828810078cc9dd4d59816f058280",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/graalpython.git", "kind": "git"},
@@ -66,7 +66,7 @@ suite = {
             },
             {
                 "name": "polybenchmarks",
-                "version": "a04259d72ab94b6245d3ce775833c8e8a3af42fa",
+                "version": "692ba4ccdb4ca317525ea342940cf96c45806c6e",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/polybenchmarks.git", "kind": "git"},

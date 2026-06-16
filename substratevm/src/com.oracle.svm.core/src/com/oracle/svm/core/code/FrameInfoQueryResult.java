@@ -136,6 +136,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
          * When {@link #kind} is {@link JavaKind#Object}, indicates whether this value is a
          * compressed or uncompressed reference.
          */
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
         public boolean isCompressedReference() {
             return isCompressedReference;
         }
@@ -161,6 +162,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
          * Returns additional data for the value, according to the specification in
          * {@link ValueType}.
          */
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
         public long getData() {
             return data;
         }
@@ -227,7 +229,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public void init() {
         super.init();
         caller = null;
@@ -249,6 +251,8 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     /**
      * Returns the caller if this frame is an inlined method.
      */
+    @Override
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public FrameInfoQueryResult getCaller() {
         return caller;
     }
@@ -262,16 +266,18 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     }
 
     /**
-     * Returns the offset of the deoptimization target method. The offset is relative to the
-     * {@link CodeInfoAccess#getCodeStart code start} of {@link #deoptMethodImageCodeInfo}. Together
-     * with the BCI it is used to find the corresponding bytecode frame in the target method. Note
-     * that there is no inlining in target methods, so the method + BCI is unique.
+     * Returns the encoded relative IP of the deoptimization target method in
+     * {@link #deoptMethodImageCodeInfo}. For uncompressed code this is the same as the offset
+     * relative to {@link CodeInfoAccess#getCodeStart code start}; compressed code adds the
+     * {@link CodeInfoAccess#relativeIP relative IP} bias used by code-info encodings. Together with
+     * the BCI it is used to find the corresponding bytecode frame in the target method. Note that
+     * there is no inlining in target methods, so the method + BCI is unique.
      */
     public int getDeoptMethodOffset() {
         return deoptMethodOffset;
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     boolean isDeoptMethodImageCodeInfoNull() {
         if (SubstrateUtil.HOSTED) {
             return deoptMethodImageCodeInfo == null;
@@ -280,6 +286,14 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     }
 
     public CodeInfo getDeoptMethodImageCodeInfo() {
+        if (deoptMethodOffset == 0) {
+            /*
+             * A runtime-compiled Ristretto frame can have no AOT deopt target, but still carry the
+             * method so stack walking can recover its interpreter source information.
+             */
+            assert deoptMethod == null || deoptMethod.getInterpreterMethod() != null;
+            return Word.nullPointer();
+        }
         if (isDeoptMethodImageCodeInfoNull() && deoptMethod != null) {
             deoptMethodImageCodeInfo = CodeInfoTable.getImageCodeInfo(deoptMethod);
             assert !isDeoptMethodImageCodeInfoNull();
@@ -356,6 +370,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
      * {@code BytecodeFrame#values}. Trailing illegal values can be pruned, so the array size may
      * not be equal to (numLocals + numStack + numLocks).
      */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public ValueInfo[] getValueInfos() {
         return valueInfos;
     }
@@ -369,7 +384,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     protected void fillSourceFieldsIfMissing() {
         if (sourceMethodId != 0 && sourceClass == Encoders.INVALID_CLASS) {
             CodeInfoDecoder.fillSourceFields(this);
@@ -403,7 +418,7 @@ public class FrameInfoQueryResult extends FrameSourceInfo {
      * table's {@linkplain CodeInfoImpl#getMethodTableFirstId() starting id}. The identifier
      * returned here is <em>different</em> from others, such as from {@code AnalysisMethod.getId()}.
      */
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public int getSourceMethodId() {
         return sourceMethodId;
     }

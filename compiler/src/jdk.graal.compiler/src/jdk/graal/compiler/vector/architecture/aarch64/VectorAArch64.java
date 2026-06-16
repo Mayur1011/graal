@@ -174,6 +174,11 @@ public final class VectorAArch64 extends VectorArchitecture {
     }
 
     @Override
+    public boolean supportsVectorConcat(int inputSizeInBytes) {
+        return inputSizeInBytes > 0 && inputSizeInBytes * 2 <= maxVectorByteSize;
+    }
+
+    @Override
     public int getSupportedVectorArithmeticLength(Stamp stamp, int maxLength, Op op) {
         if (!enableArithmeticOps || !hasMinimumVectorizationRequirements(maxLength)) {
             return 1;

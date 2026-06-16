@@ -235,8 +235,13 @@
         linux_amd64      + tier3  + jdk + truffle_test_full_gate,
 
         linux_aarch64    + tier3  + jdk + truffle_test_lite_gate,
+      ] +
+      if jdk == jdk_latest_oracle then [
         darwin_aarch64   + tier3  + jdk + truffle_test_lite_gate,
         windows_amd64    + tier3  + jdk + truffle_test_lite_gate + winDevKit(jdk),
+      ] else [
+        darwin_aarch64   + daily  + jdk + truffle_test_lite_gate,
+        windows_amd64    + daily  + jdk + truffle_test_lite_gate + winDevKit(jdk),
       ]
     ),
 
@@ -267,7 +272,7 @@
     ),
 
     # Truffle Coverage
-    [linux_amd64 + weekly + jdk_21_oracle + truffle_coverage],
+    [linux_amd64 + weekly + jdk_latest_oracle + truffle_coverage],
 
     # Truffle Benchmarks
     [linux_amd64  + tier3  + jdk_latest_labs + jmh_benchmark_test],

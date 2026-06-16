@@ -1,8 +1,8 @@
 suite = {
   "mxversion": "7.65.0",
   "name" : "sulong",
-  "version" : "25.1.0",
-  "release" : False,
+  "version_from" : "truffle",
+  "release_from" : "truffle",
   "versionConflictResolution" : "latest",
   "groupId": "org.graalvm.llvm",
   "url": "http://www.graalvm.org/",
@@ -2186,6 +2186,7 @@ suite = {
     "SULONG_JVM_STANDALONE_RELEASE_ARCHIVE": {
         "class": "DeliverableStandaloneArchive",
         "platformDependent": True,
+        "deploy": False,
         "standalone_dist": "SULONG_JVM_STANDALONE",
         "language_id": "llvm",
         "community_archive_name": "llvm-community-jvm",

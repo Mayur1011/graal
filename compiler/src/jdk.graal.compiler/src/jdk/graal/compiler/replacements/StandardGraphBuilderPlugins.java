@@ -71,6 +71,7 @@ import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.graph.Edges;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.graph.NodeList;
+import jdk.graal.compiler.lir.SyncPort;
 import jdk.graal.compiler.lir.gen.ArithmeticLIRGeneratorTool.RoundingMode;
 import jdk.graal.compiler.nodes.AbstractBeginNode;
 import jdk.graal.compiler.nodes.BeginNode;
@@ -98,6 +99,7 @@ import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.ValuePhiNode;
 import jdk.graal.compiler.nodes.calc.AbsNode;
 import jdk.graal.compiler.nodes.calc.AddNode;
+import jdk.graal.compiler.nodes.calc.AndNode;
 import jdk.graal.compiler.nodes.calc.CompareNode;
 import jdk.graal.compiler.nodes.calc.ConditionalNode;
 import jdk.graal.compiler.nodes.calc.FloatEqualsNode;
@@ -119,6 +121,8 @@ import jdk.graal.compiler.nodes.calc.SqrtNode;
 import jdk.graal.compiler.nodes.calc.SubNode;
 import jdk.graal.compiler.nodes.calc.UnsignedDivNode;
 import jdk.graal.compiler.nodes.calc.UnsignedRemNode;
+import jdk.graal.compiler.nodes.calc.UnsignedRightShiftNode;
+import jdk.graal.compiler.nodes.calc.XorNode;
 import jdk.graal.compiler.nodes.calc.ZeroExtendNode;
 import jdk.graal.compiler.nodes.debug.BindToRegisterNode;
 import jdk.graal.compiler.nodes.debug.BlackholeNode;
@@ -181,7 +185,9 @@ import jdk.graal.compiler.nodes.java.ReachabilityFenceNode;
 import jdk.graal.compiler.nodes.java.RegisterFinalizerNode;
 import jdk.graal.compiler.nodes.java.UnsafeCompareAndExchangeNode;
 import jdk.graal.compiler.nodes.java.UnsafeCompareAndSwapNode;
+import jdk.graal.compiler.nodes.memory.address.AddressNode;
 import jdk.graal.compiler.nodes.memory.address.IndexAddressNode;
+import jdk.graal.compiler.nodes.memory.address.OffsetAddressNode;
 import jdk.graal.compiler.nodes.spi.TrackedUnsafeAccess;
 import jdk.graal.compiler.nodes.type.StampTool;
 import jdk.graal.compiler.nodes.util.ConstantFoldUtil;
@@ -195,17 +201,40 @@ import jdk.graal.compiler.replacements.nodes.ArrayEqualsNode;
 import jdk.graal.compiler.replacements.nodes.Base64DecodeBlockNode;
 import jdk.graal.compiler.replacements.nodes.Base64EncodeBlockNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMulAddNode;
+import jdk.graal.compiler.replacements.nodes.BigIntegerLeftShiftWorkerNode;
+import jdk.graal.compiler.replacements.nodes.BigIntegerMontgomeryMultiplyNode;
+import jdk.graal.compiler.replacements.nodes.BigIntegerMontgomerySquareNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerMultiplyToLenNode;
+import jdk.graal.compiler.replacements.nodes.BigIntegerRightShiftWorkerNode;
 import jdk.graal.compiler.replacements.nodes.BigIntegerSquareToLenNode;
 import jdk.graal.compiler.replacements.nodes.BitCountNode;
 import jdk.graal.compiler.replacements.nodes.CipherBlockChainingAESNode;
+import jdk.graal.compiler.replacements.nodes.ChaCha20Node;
 import jdk.graal.compiler.replacements.nodes.CountLeadingZerosNode;
 import jdk.graal.compiler.replacements.nodes.CountPositivesNode;
 import jdk.graal.compiler.replacements.nodes.CountTrailingZerosNode;
 import jdk.graal.compiler.replacements.nodes.CounterModeAESNode;
+import jdk.graal.compiler.replacements.nodes.CRC32CUpdateBytesNode;
+import jdk.graal.compiler.replacements.nodes.CRC32TableNode;
+import jdk.graal.compiler.replacements.nodes.CRC32UpdateBytesNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode.DilithiumAlmostInverseNttNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode.DilithiumAlmostNttNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode.DilithiumDecomposePolyNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode.DilithiumMontMulByConstantNode;
+import jdk.graal.compiler.replacements.nodes.DilithiumNode.DilithiumNttMultNode;
 import jdk.graal.compiler.replacements.nodes.ElectronicCodeBookAESNode;
 import jdk.graal.compiler.replacements.nodes.EncodeArrayNode;
+import jdk.graal.compiler.replacements.nodes.GaloisCounterModeAESNode;
 import jdk.graal.compiler.replacements.nodes.GHASHProcessBlocksNode;
+import jdk.graal.compiler.replacements.nodes.KyberNode;
+import jdk.graal.compiler.replacements.nodes.KyberNode.Kyber12To16Node;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberAddPoly2Node;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberAddPoly3Node;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberBarrettReduceNode;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberInverseNttNode;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberNttMultNode;
+import jdk.graal.compiler.replacements.nodes.KyberNode.KyberNttNode;
 import jdk.graal.compiler.replacements.nodes.LogNode;
 import jdk.graal.compiler.replacements.nodes.MacroNode;
 import jdk.graal.compiler.replacements.nodes.MessageDigestNode;
@@ -214,6 +243,7 @@ import jdk.graal.compiler.replacements.nodes.MessageDigestNode.SHA1Node;
 import jdk.graal.compiler.replacements.nodes.MessageDigestNode.SHA256Node;
 import jdk.graal.compiler.replacements.nodes.MessageDigestNode.SHA3Node;
 import jdk.graal.compiler.replacements.nodes.MessageDigestNode.SHA512Node;
+import jdk.graal.compiler.replacements.nodes.Poly1305ProcessBlocksNode;
 import jdk.graal.compiler.replacements.nodes.ProfileBooleanNode;
 import jdk.graal.compiler.replacements.nodes.ReverseBitsNode;
 import jdk.graal.compiler.replacements.nodes.ReverseBytesNode;
@@ -290,7 +320,11 @@ public class StandardGraphBuilderPlugins {
             if (enableAesPlugins) {
                 registerAESPlugins(plugins);
             }
+            registerCRCPlugins(plugins);
             registerGHASHPlugin(plugins);
+            registerChaCha20Plugin(plugins);
+            registerMLDSAPlugins(plugins);
+            registerMLKEMPlugins(plugins);
             registerBigIntegerPlugins(plugins);
             registerBase64Plugins(plugins);
             registerMessageDigestPlugins(plugins);
@@ -353,6 +387,91 @@ public class StandardGraphBuilderPlugins {
                 return false;
             }
 
+        });
+    }
+
+    // @formatter:off
+    @SyncPort(from = "https://github.com/openjdk/jdk25u/blob/2fce64f0ecc22355298b9ab9c1ba9477a2f1ec86/src/hotspot/share/opto/library_call.cpp#L6629-L6662",
+              sha1 = "8d23966e9240c567d49763b85a49c336f3988100")
+    // @formatter:on
+    private static void registerCRCPlugins(InvocationPlugins plugins) {
+        Registration crc32 = new Registration(plugins, java.util.zip.CRC32.class);
+        crc32.register(new InvocationPlugin("update", int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode crc, ValueNode arg) {
+                ValueNode table = b.add(new CRC32TableNode());
+                ValueNode c = new XorNode(crc, ConstantNode.forInt(-1));
+                ValueNode index = new AndNode(new XorNode(arg, c), ConstantNode.forInt(0xff));
+                ValueNode offset = new LeftShiftNode(index, ConstantNode.forInt(2));
+                AddressNode address = new OffsetAddressNode(table, new SignExtendNode(offset, 32, 64));
+                ValueNode tableValue = b.add(new JavaReadNode(JavaKind.Int, address, OFF_HEAP_LOCATION, BarrierType.NONE, PLAIN, false));
+                ValueNode result = new XorNode(tableValue, new UnsignedRightShiftNode(c, ConstantNode.forInt(8)));
+                b.addPush(JavaKind.Int, new XorNode(result, ConstantNode.forInt(-1)));
+                return true;
+            }
+        });
+
+        crc32.register(new ConditionalInvocationPlugin("updateBytes0", int.class, byte[].class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode crc, ValueNode buf, ValueNode off, ValueNode len) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullBuf = b.nullCheckedValue(buf);
+                    ValueNode bufAddr = helper.arrayElementPointer(nonNullBuf, JavaKind.Byte, off);
+                    b.addPush(JavaKind.Int, new CRC32UpdateBytesNode(crc, bufAddr, len));
+                }
+                return true;
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return CRC32UpdateBytesNode.isSupported(arch);
+            }
+        });
+        crc32.register(new ConditionalInvocationPlugin("updateByteBuffer0", int.class, long.class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode crc, ValueNode addr, ValueNode off, ValueNode len) {
+                ValueNode bufAddr = b.add(new AddNode(addr, new SignExtendNode(off, 32, 64)));
+                b.addPush(JavaKind.Int, new CRC32UpdateBytesNode(crc, bufAddr, len));
+                return true;
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return CRC32UpdateBytesNode.isSupported(arch);
+            }
+        });
+
+        Registration crc32c = new Registration(plugins, "java.util.zip.CRC32C");
+        // HotSpot C2 passes CRC32C.byteTable to the runtime stub, but the x86 stub documents that
+        // argument as optional and the Graal AMD64/AArch64 ports do not consume it.
+        crc32c.register(new ConditionalInvocationPlugin("updateBytes", int.class, byte[].class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode crc, ValueNode buf, ValueNode off, ValueNode end) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullBuf = b.nullCheckedValue(buf);
+                    ValueNode bufAddr = helper.arrayElementPointer(nonNullBuf, JavaKind.Byte, off);
+                    b.addPush(JavaKind.Int, new CRC32CUpdateBytesNode(crc, bufAddr, new SubNode(end, off)));
+                }
+                return true;
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return CRC32CUpdateBytesNode.isSupported(arch);
+            }
+        });
+        crc32c.register(new ConditionalInvocationPlugin("updateDirectByteBuffer", int.class, long.class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode crc, ValueNode addr, ValueNode off, ValueNode end) {
+                ValueNode bufAddr = b.add(new AddNode(addr, new SignExtendNode(off, 32, 64)));
+                b.addPush(JavaKind.Int, new CRC32CUpdateBytesNode(crc, bufAddr, new SubNode(end, off)));
+                return true;
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return CRC32CUpdateBytesNode.isSupported(arch);
+            }
         });
     }
 
@@ -2479,6 +2598,67 @@ public class StandardGraphBuilderPlugins {
         }
     }
 
+    public abstract static class GaloisCounterModeCryptPlugin extends AESCryptDelegatePlugin {
+
+        public GaloisCounterModeCryptPlugin() {
+            super(CryptMode.ENCRYPT, "implGCMCrypt0",
+                            byte[].class, int.class, int.class, byte[].class, int.class, byte[].class, int.class,
+                            new InvocationPlugins.OptionalLazySymbol("com.sun.crypto.provider.GCTR"),
+                            new InvocationPlugins.OptionalLazySymbol("com.sun.crypto.provider.GHASH"));
+        }
+
+        protected abstract boolean canApply(GraphBuilderContext b);
+
+        protected abstract ResolvedJavaType getTypeGCTR(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException;
+
+        protected abstract ResolvedJavaType getTypeGHASH(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException;
+
+        @Override
+        public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode in, ValueNode inOffset, ValueNode len,
+                        ValueNode ct, ValueNode ctOffset, ValueNode out, ValueNode outOffset, ValueNode gctr, ValueNode ghash) {
+            if (!canApply(b)) {
+                return false;
+            }
+            ResolvedJavaType receiverType = targetMethod.getDeclaringClass();
+            ResolvedJavaType typeAESCrypt;
+            ResolvedJavaType typeGCTR;
+            ResolvedJavaType typeGHASH;
+            try {
+                typeAESCrypt = getTypeAESCrypt(b.getMetaAccess(), receiverType);
+                typeGCTR = getTypeGCTR(b.getMetaAccess(), receiverType);
+                typeGHASH = getTypeGHASH(b.getMetaAccess(), receiverType);
+            } catch (ClassNotFoundException e) {
+                return false;
+            }
+            try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                ValueNode nonNullGCTR = b.nullCheckedValue(gctr);
+                ValueNode nonNullGHASH = b.nullCheckedValue(ghash);
+
+                ValueNode inAddr = helper.arrayElementPointer(in, JavaKind.Byte, inOffset);
+                ValueNode ctAddr = helper.arrayElementPointer(ct, JavaKind.Byte, ctOffset);
+                ValueNode outAddr = helper.arrayElementPointer(out, JavaKind.Byte, outOffset);
+
+                // Read GCTR.K
+                ValueNode kAddr = readEmbeddedAESCryptKArrayStart(b, helper, typeGCTR, typeAESCrypt, nonNullGCTR);
+                // Read GCTR.counter
+                ValueNode counterAddr = readFieldArrayStart(b, helper, typeGCTR, "counter", nonNullGCTR, JavaKind.Byte);
+                // Read GHASH.state
+                ValueNode stateAddr = readFieldArrayStart(b, helper, typeGHASH, "state", nonNullGHASH, JavaKind.Long);
+                // Read GHASH.subkeyHtbl
+                ValueNode subkeyHtblAddr = readFieldArrayStart(b, helper, typeGHASH, "subkeyHtbl", nonNullGHASH, JavaKind.Long);
+
+                GaloisCounterModeAESNode node = new GaloisCounterModeAESNode(inAddr, len, ctAddr, outAddr, kAddr, stateAddr, subkeyHtblAddr, counterAddr);
+                helper.emitFinalReturn(JavaKind.Int, node);
+                return true;
+            }
+        }
+
+        @Override
+        public final boolean isApplicable(Architecture arch) {
+            return GaloisCounterModeAESNode.isSupported(arch);
+        }
+    }
+
     private static void registerAESPlugins(InvocationPlugins plugins) {
         Registration r = new Registration(plugins, "com.sun.crypto.provider.AESCrypt");
         r.register(new AESCryptPlugin(ENCRYPT));
@@ -2503,6 +2683,245 @@ public class StandardGraphBuilderPlugins {
             @Override
             public boolean isApplicable(Architecture arch) {
                 return GHASHProcessBlocksNode.isSupported(arch);
+            }
+        });
+    }
+
+    public static class Poly1305ProcessBlocksPlugin extends ConditionalInvocationPlugin {
+
+        public Poly1305ProcessBlocksPlugin() {
+            super("processMultipleBlocks", Receiver.class, byte[].class, int.class, int.class, long[].class, long[].class);
+        }
+
+        @Override
+        public boolean isApplicable(Architecture arch) {
+            return Poly1305ProcessBlocksNode.isSupported(arch);
+        }
+
+        @Override
+        public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode input, ValueNode offset, ValueNode length, ValueNode aLimbs,
+                        ValueNode rLimbs) {
+            try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                receiver.get(true);
+                ValueNode inputNotNull = b.nullCheckedValue(input);
+                ValueNode aLimbsNotNull = b.nullCheckedValue(aLimbs);
+                ValueNode rLimbsNotNull = b.nullCheckedValue(rLimbs);
+
+                ValueNode inputStart = helper.arrayElementPointer(inputNotNull, JavaKind.Byte, offset);
+                ValueNode aLimbsStart = helper.arrayStart(aLimbsNotNull, JavaKind.Long);
+                ValueNode rLimbsStart = helper.arrayStart(rLimbsNotNull, JavaKind.Long);
+
+                b.add(new Poly1305ProcessBlocksNode(inputStart, length, aLimbsStart, rLimbsStart));
+                return true;
+            }
+        }
+    }
+
+    public static void registerChaCha20Plugin(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "com.sun.crypto.provider.ChaCha20Cipher");
+        r.register(new ConditionalInvocationPlugin("implChaCha20Block", int[].class, byte[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode initState, ValueNode result) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode stateAddress = helper.arrayStart(b.nullCheckedValue(initState), JavaKind.Int);
+                    ValueNode resultAddress = helper.arrayStart(b.nullCheckedValue(result), JavaKind.Byte);
+                    b.addPush(JavaKind.Int, new ChaCha20Node(stateAddress, resultAddress));
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return ChaCha20Node.isSupported(arch);
+            }
+        });
+    }
+
+    private abstract static class MLDSAInvocationPlugin extends ConditionalInvocationPlugin {
+        MLDSAInvocationPlugin(String name, Type... argumentTypes) {
+            super(name, argumentTypes);
+        }
+
+        @Override
+        public boolean isApplicable(Architecture arch) {
+            return DilithiumNode.isSupported(arch);
+        }
+    }
+
+    private static void registerMLDSAPlugins(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "sun.security.provider.ML_DSA");
+        r.register(new MLDSAInvocationPlugin("implDilithiumAlmostNtt", int[].class, int[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode coeffs, ValueNode zetas) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullCoeffs = b.nullCheckedValue(coeffs);
+                    ValueNode nonNullZetas = b.nullCheckedValue(zetas);
+
+                    ValueNode coeffsStart = helper.arrayStart(nonNullCoeffs, JavaKind.Int);
+                    ValueNode zetasStart = helper.arrayStart(nonNullZetas, JavaKind.Int);
+
+                    b.addPush(JavaKind.Int, new DilithiumAlmostNttNode(coeffsStart, zetasStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLDSAInvocationPlugin("implDilithiumAlmostInverseNtt", int[].class, int[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode coeffs, ValueNode zetas) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullCoeffs = b.nullCheckedValue(coeffs);
+                    ValueNode nonNullZetas = b.nullCheckedValue(zetas);
+
+                    ValueNode coeffsStart = helper.arrayStart(nonNullCoeffs, JavaKind.Int);
+                    ValueNode zetasStart = helper.arrayStart(nonNullZetas, JavaKind.Int);
+
+                    b.addPush(JavaKind.Int, new DilithiumAlmostInverseNttNode(coeffsStart, zetasStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLDSAInvocationPlugin("implDilithiumNttMult", int[].class, int[].class, int[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode product, ValueNode coeffs1, ValueNode coeffs2) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullProduct = b.nullCheckedValue(product);
+                    ValueNode nonNullCoeffs1 = b.nullCheckedValue(coeffs1);
+                    ValueNode nonNullCoeffs2 = b.nullCheckedValue(coeffs2);
+
+                    ValueNode productStart = helper.arrayStart(nonNullProduct, JavaKind.Int);
+                    ValueNode coeffs1Start = helper.arrayStart(nonNullCoeffs1, JavaKind.Int);
+                    ValueNode coeffs2Start = helper.arrayStart(nonNullCoeffs2, JavaKind.Int);
+
+                    b.addPush(JavaKind.Int, new DilithiumNttMultNode(productStart, coeffs1Start, coeffs2Start));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLDSAInvocationPlugin("implDilithiumMontMulByConstant", int[].class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode coeffs, ValueNode constant) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullCoeffs = b.nullCheckedValue(coeffs);
+
+                    ValueNode coeffsStart = helper.arrayStart(nonNullCoeffs, JavaKind.Int);
+
+                    b.addPush(JavaKind.Int, new DilithiumMontMulByConstantNode(coeffsStart, constant));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLDSAInvocationPlugin("implDilithiumDecomposePoly", int[].class, int[].class, int[].class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode input, ValueNode lowPart, ValueNode highPart, ValueNode twoGamma2,
+                            ValueNode multiplier) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode nonNullInput = b.nullCheckedValue(input);
+                    ValueNode nonNullLowPart = b.nullCheckedValue(lowPart);
+                    ValueNode nonNullHighPart = b.nullCheckedValue(highPart);
+
+                    ValueNode inputStart = helper.arrayStart(nonNullInput, JavaKind.Int);
+                    ValueNode lowPartStart = helper.arrayStart(nonNullLowPart, JavaKind.Int);
+                    ValueNode highPartStart = helper.arrayStart(nonNullHighPart, JavaKind.Int);
+
+                    b.addPush(JavaKind.Int, new DilithiumDecomposePolyNode(inputStart, lowPartStart, highPartStart, twoGamma2, multiplier));
+                    return true;
+                }
+            }
+        });
+    }
+
+    private abstract static class MLKEMInvocationPlugin extends ConditionalInvocationPlugin {
+        MLKEMInvocationPlugin(String name, Type... argumentTypes) {
+            super(name, argumentTypes);
+        }
+
+        @Override
+        public boolean isApplicable(Architecture arch) {
+            return KyberNode.isSupported(arch);
+        }
+    }
+
+    private static void registerMLKEMPlugins(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "com.sun.crypto.provider.ML_KEM");
+        r.register(new MLKEMInvocationPlugin("implKyberNtt", short[].class, short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode poly, ValueNode zetas) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode polyStart = helper.arrayStart(b.nullCheckedValue(poly), JavaKind.Short);
+                    ValueNode zetasStart = helper.arrayStart(b.nullCheckedValue(zetas), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberNttNode(polyStart, zetasStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyberInverseNtt", short[].class, short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode poly, ValueNode zetas) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode polyStart = helper.arrayStart(b.nullCheckedValue(poly), JavaKind.Short);
+                    ValueNode zetasStart = helper.arrayStart(b.nullCheckedValue(zetas), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberInverseNttNode(polyStart, zetasStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyberNttMult", short[].class, short[].class, short[].class, short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode result, ValueNode ntta, ValueNode nttb, ValueNode zetas) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode resultStart = helper.arrayStart(b.nullCheckedValue(result), JavaKind.Short);
+                    ValueNode nttaStart = helper.arrayStart(b.nullCheckedValue(ntta), JavaKind.Short);
+                    ValueNode nttbStart = helper.arrayStart(b.nullCheckedValue(nttb), JavaKind.Short);
+                    ValueNode zetasStart = helper.arrayStart(b.nullCheckedValue(zetas), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberNttMultNode(resultStart, nttaStart, nttbStart, zetasStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyberAddPoly", short[].class, short[].class, short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode result, ValueNode aIn, ValueNode bIn) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode resultStart = helper.arrayStart(b.nullCheckedValue(result), JavaKind.Short);
+                    ValueNode aStart = helper.arrayStart(b.nullCheckedValue(aIn), JavaKind.Short);
+                    ValueNode bStart = helper.arrayStart(b.nullCheckedValue(bIn), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberAddPoly2Node(resultStart, aStart, bStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyberAddPoly", short[].class, short[].class, short[].class, short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode result, ValueNode aIn, ValueNode bIn, ValueNode cIn) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode resultStart = helper.arrayStart(b.nullCheckedValue(result), JavaKind.Short);
+                    ValueNode aStart = helper.arrayStart(b.nullCheckedValue(aIn), JavaKind.Short);
+                    ValueNode bStart = helper.arrayStart(b.nullCheckedValue(bIn), JavaKind.Short);
+                    ValueNode cStart = helper.arrayStart(b.nullCheckedValue(cIn), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberAddPoly3Node(resultStart, aStart, bStart, cStart));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyber12To16", byte[].class, int.class, short[].class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode condensed, ValueNode index, ValueNode parsed, ValueNode parsedLength) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode condensedStart = helper.arrayStart(b.nullCheckedValue(condensed), JavaKind.Byte);
+                    ValueNode parsedStart = helper.arrayStart(b.nullCheckedValue(parsed), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new Kyber12To16Node(condensedStart, index, parsedStart, parsedLength));
+                    return true;
+                }
+            }
+        });
+        r.register(new MLKEMInvocationPlugin("implKyberBarrettReduce", short[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode coeffs) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    ValueNode coeffsStart = helper.arrayStart(b.nullCheckedValue(coeffs), JavaKind.Short);
+                    b.addPush(JavaKind.Int, new KyberBarrettReduceNode(coeffsStart));
+                    return true;
+                }
             }
         });
     }
@@ -2549,6 +2968,83 @@ public class StandardGraphBuilderPlugins {
                     b.setStateAfter(squareToLen);
                     return true;
                 }
+            }
+        });
+        r.register(new ConditionalInvocationPlugin("implMontgomeryMultiply", int[].class, int[].class, int[].class, int.class, long.class, int[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode a, ValueNode bObject, ValueNode n, ValueNode len, ValueNode inv,
+                            ValueNode product) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    /*
+                     * The intrinsified method writes the Montgomery product into the product
+                     * array and returns the same reference. Push the product before setting the
+                     * stateAfter so deoptimization observes the Java-level return value.
+                     */
+                    BigIntegerMontgomeryMultiplyNode montgomeryMultiply = b.append(new BigIntegerMontgomeryMultiplyNode(helper.arrayStart(a, JavaKind.Int),
+                                    helper.arrayStart(bObject, JavaKind.Int),
+                                    helper.arrayStart(n, JavaKind.Int),
+                                    len,
+                                    inv,
+                                    helper.arrayStart(product, JavaKind.Int)));
+                    b.push(JavaKind.Object, product);
+                    b.setStateAfter(montgomeryMultiply);
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return BigIntegerMontgomeryMultiplyNode.isSupported(arch);
+            }
+        });
+        r.register(new ConditionalInvocationPlugin("implMontgomerySquare", int[].class, int[].class, int.class, long.class, int[].class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode a, ValueNode n, ValueNode len, ValueNode inv, ValueNode product) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    BigIntegerMontgomerySquareNode montgomerySquare = b.append(new BigIntegerMontgomerySquareNode(helper.arrayStart(a, JavaKind.Int),
+                                    helper.arrayStart(n, JavaKind.Int),
+                                    len,
+                                    inv,
+                                    helper.arrayStart(product, JavaKind.Int)));
+                    b.push(JavaKind.Object, product);
+                    b.setStateAfter(montgomerySquare);
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return BigIntegerMontgomerySquareNode.isSupported(arch);
+            }
+        });
+        r.register(new ConditionalInvocationPlugin("shiftLeftImplWorker", int[].class, int[].class, int.class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver,
+                            ValueNode newArr, ValueNode oldArr, ValueNode newIdx, ValueNode shiftCount, ValueNode numIter) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    b.add(new BigIntegerLeftShiftWorkerNode(helper.arrayStart(newArr, JavaKind.Int), helper.arrayStart(oldArr, JavaKind.Int), newIdx, shiftCount, numIter));
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return BigIntegerLeftShiftWorkerNode.isSupported(arch);
+            }
+        });
+        r.register(new ConditionalInvocationPlugin("shiftRightImplWorker", int[].class, int[].class, int.class, int.class, int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver,
+                            ValueNode newArr, ValueNode oldArr, ValueNode newIdx, ValueNode shiftCount, ValueNode numIter) {
+                try (InvocationPluginHelper helper = new InvocationPluginHelper(b, targetMethod)) {
+                    b.add(new BigIntegerRightShiftWorkerNode(helper.arrayStart(newArr, JavaKind.Int), helper.arrayStart(oldArr, JavaKind.Int), newIdx, shiftCount, numIter));
+                    return true;
+                }
+            }
+
+            @Override
+            public boolean isApplicable(Architecture arch) {
+                return BigIntegerRightShiftWorkerNode.isSupported(arch);
             }
         });
     }

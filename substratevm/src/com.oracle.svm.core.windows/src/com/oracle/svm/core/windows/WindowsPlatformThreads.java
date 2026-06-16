@@ -42,7 +42,7 @@ import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.core.thread.Parker;
 import com.oracle.svm.core.thread.Parker.ParkerFactory;
 import com.oracle.svm.core.thread.PlatformThreads;
-import com.oracle.svm.core.thread.VMThreads.OSThreadHandle;
+import com.oracle.svm.guest.staging.core.thread.OSThreadHandle;
 import com.oracle.svm.core.util.TimeUtils;
 import com.oracle.svm.core.windows.headers.Process;
 import com.oracle.svm.core.windows.headers.SynchAPI;
@@ -103,7 +103,11 @@ public final class WindowsPlatformThreads extends PlatformThreads {
 
     @Override
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    public OSThreadHandle startThreadUnmanaged(CFunctionPointer threadRoutine, PointerBase userData, int stackSize) {
+    public OSThreadHandle startThreadUnmanaged(CFunctionPointer threadRoutine, PointerBase userData, long stackSize) {
+        // _beginthreadex takes an unsigned int stack size; reject values that cannot be preserved.
+        if (stackSize > 0xFFFF_FFFFL) {
+            return Word.nullPointer();
+        }
         int initFlag = 0;
 
         // If caller specified a stack size, don't commit it all at once.
@@ -111,7 +115,7 @@ public final class WindowsPlatformThreads extends PlatformThreads {
             initFlag |= Process.STACK_SIZE_PARAM_IS_A_RESERVATION();
         }
 
-        WinBase.HANDLE osThreadHandle = Process.NoTransitions._beginthreadex(Word.nullPointer(), stackSize,
+        WinBase.HANDLE osThreadHandle = Process.NoTransitions._beginthreadex(Word.nullPointer(), (int) stackSize,
                         threadRoutine, userData, initFlag, Word.nullPointer());
         return (OSThreadHandle) osThreadHandle;
     }
@@ -218,7 +222,7 @@ class WindowsParker extends Parker {
     }
 
     @Override
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L5672-L5714")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L5672-L5714")
     protected void park(boolean isAbsolute, long time) {
         assert time >= 0 && !(isAbsolute && time == 0) : "must not be called otherwise";
 
@@ -266,7 +270,7 @@ class WindowsParker extends Parker {
     }
 
     @Override
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L5716-L5719")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+26/src/hotspot/os/windows/os_windows.cpp#L5716-L5719")
     protected void unpark() {
         StackOverflowCheck.singleton().makeYellowZoneAvailable();
         try {

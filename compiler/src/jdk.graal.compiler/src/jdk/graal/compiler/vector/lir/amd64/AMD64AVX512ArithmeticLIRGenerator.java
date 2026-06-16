@@ -270,6 +270,7 @@ import jdk.graal.compiler.nodes.calc.AndNode;
 import jdk.graal.compiler.nodes.calc.FloatDivNode;
 import jdk.graal.compiler.nodes.calc.MulNode;
 import jdk.graal.compiler.nodes.calc.OrNode;
+import jdk.graal.compiler.nodes.calc.ReinterpretNode;
 import jdk.graal.compiler.nodes.calc.SqrtNode;
 import jdk.graal.compiler.nodes.calc.SubNode;
 import jdk.graal.compiler.nodes.calc.XorNode;
@@ -1114,13 +1115,6 @@ public class AMD64AVX512ArithmeticLIRGenerator extends AMD64VectorArithmeticLIRG
         return resultMask;
     }
 
-    private Value emitConstOpmaskInK1(AMD64Kind maskKind, JavaConstant maskValue) {
-        Value mask = emitConstOpmask(maskKind, maskValue);
-        Value k1 = AMD64.k1.asValue(LIRKind.value(maskKind));
-        getLIRGen().append(new AMD64Move.MoveToRegOp((AMD64Kind) mask.getPlatformKind(), asAllocatable(k1), asAllocatable(mask)));
-        return k1;
-    }
-
     public Value emitConstOpmask(AMD64Kind maskKind, JavaConstant maskValue) {
         if (maskValue.asLong() == 0) {
             Variable mask = getLIRGen().newVariable(LIRKind.value(maskKind));
@@ -1159,14 +1153,13 @@ public class AMD64AVX512ArithmeticLIRGenerator extends AMD64VectorArithmeticLIRG
         /*
          * Make an all-ones mask, meaning that we want to gather all elements. More general masked
          * gathers are not supported yet. We must construct this mask immediately before the gather
-         * instruction because it clobbers it. It must also be a fixed register for the Use+Temp
-         * trick to work. Note that k0 is not allowed as the mask register for the AVX512 gather
-         * instructions.
+         * instruction because it clobbers it. The mask can stay allocatable here because k0 is
+         * already excluded from the allocatable opmask set.
          */
         int maskValue = (1 << vectorLength) - 1;
-        Value maskInK1 = maskValue > 0xFF
-                        ? emitConstOpmaskInK1(AMD64Kind.MASK16, JavaConstant.forShort((short) maskValue))
-                        : emitConstOpmaskInK1(AMD64Kind.MASK8, JavaConstant.forByte((byte) maskValue));
+        AllocatableValue mask = asAllocatable(maskValue > 0xFF
+                        ? emitConstOpmask(AMD64Kind.MASK16, JavaConstant.forShort((short) maskValue))
+                        : emitConstOpmask(AMD64Kind.MASK8, JavaConstant.forByte((byte) maskValue)));
 
         EvexGatherOp op = offsetKind == AMD64Kind.DWORD
                         ? switch (resultElementKind) {
@@ -1184,7 +1177,7 @@ public class AMD64AVX512ArithmeticLIRGenerator extends AMD64VectorArithmeticLIRG
                             default -> throw GraalError.shouldNotReachHere("unsupported vector gather: offset kind " + offsetKind + ", result element kind " + resultElementKind); // ExcludeFromJacocoGeneratedReport
                         };
 
-        getLIRGen().append(new AMD64VectorGather.EvexVectorGatherOp(op, size, result, b, offs, asAllocatable(maskInK1)));
+        getLIRGen().append(new AMD64VectorGather.EvexVectorGatherOp(op, size, result, b, offs, mask));
         return result;
     }
 
@@ -2117,6 +2110,16 @@ public class AMD64AVX512ArithmeticLIRGenerator extends AMD64VectorArithmeticLIRG
                 case QWORD -> EVPERMQ;
                 case SINGLE -> EVPERMPS;
                 case DOUBLE -> EVPERMPD;
+                default -> null;
+            };
+        } else if (op == ReinterpretNode.class) {
+            return switch (dstEKind) {
+                case BYTE -> EVMOVDQU8;
+                case WORD -> EVMOVDQU16;
+                case DWORD -> EVMOVDQU32;
+                case QWORD -> EVMOVDQU64;
+                case SINGLE -> EVMOVUPS;
+                case DOUBLE -> EVMOVUPD;
                 default -> null;
             };
         } else if (op == SimdPrimitiveCompareNode.class) {

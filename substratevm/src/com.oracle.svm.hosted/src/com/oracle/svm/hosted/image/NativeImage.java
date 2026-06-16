@@ -123,9 +123,6 @@ import com.oracle.svm.hosted.pltgot.HostedPLTGOTConfiguration;
 import com.oracle.svm.hosted.pltgot.PLTSupport;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.option.SubstrateOptionsParser;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
 import com.oracle.svm.shared.util.VMError;
@@ -421,11 +418,15 @@ public abstract class NativeImage extends AbstractImage {
         objectFile.createDefinedSymbol(name, section, position, wordSize, false, SubstrateOptions.InternalSymbolsAreGlobal.getValue());
     }
 
-    private void defineRelocationForSymbol(String name, long position) {
-        objectFile.createUndefinedSymbol(name, true);
-        ProgbitsSectionImpl baseSectionImpl = (ProgbitsSectionImpl) rwDataSection.getImpl();
+    public static void markCGlobalDataSymbolReferenceRelocation(ObjectFile objectFile, long position, String symbolName) {
+        String dataSectionName = SectionName.DATA.getFormatDependentName(objectFile.getFormat());
+        Section dataSection = (Section) objectFile.elementForName(dataSectionName);
+        if (objectFile.getOrCreateSymbolTable().getSymbol(symbolName) == null) {
+            objectFile.createUndefinedSymbol(symbolName, true);
+        }
+        ProgbitsSectionImpl dataSectionImpl = (ProgbitsSectionImpl) dataSection.getImpl();
         int offsetInSection = Math.toIntExact(RWDATA_CGLOBALS_PARTITION_OFFSET + position);
-        baseSectionImpl.markRelocationSite(offsetInSection, wordSize == 8 ? RelocationKind.DIRECT_8 : RelocationKind.DIRECT_4, name, 0L);
+        dataSectionImpl.markRelocationSite(offsetInSection, RelocationKind.getDirect(objectFile.getWordSizeInBytes()), symbolName, 0L);
     }
 
     public static String getTextSectionStartSymbol() {
@@ -434,6 +435,10 @@ public abstract class NativeImage extends AbstractImage {
         } else {
             return "__svm_code_section";
         }
+    }
+
+    public static String getTextSectionEndSymbol() {
+        return "__svm_text_end";
     }
 
     /**
@@ -471,12 +476,17 @@ public abstract class NativeImage extends AbstractImage {
             rwDataSection = objectFile.newProgbitsSection(SectionName.DATA.getFormatDependentName(objectFile.getFormat()), pageSize, true, false, rwDataImpl);
 
             // Define symbols for the sections.
-            objectFile.createDefinedSymbol(textSection.getName(), textSection, 0, 0, false, false);
-            if (ImageLayerBuildingSupport.buildingSharedLayer() || SubstrateOptions.DeleteLocalSymbols.getValue()) {
-                /* add a dummy function symbol at the start of the code section */
-                objectFile.createDefinedSymbol(getTextSectionStartSymbol(), textSection, 0, 0, true, true);
+            if (codeCache.definesTextSectionBoundarySymbols()) {
+                objectFile.createDefinedSymbol(textSection.getName(), textSection, 0, 0, false, false);
+                if (ImageLayerBuildingSupport.buildingSharedLayer() || SubstrateOptions.DeleteLocalSymbols.getValue()) {
+                    /* add a dummy function symbol at the start of the code section */
+                    objectFile.createDefinedSymbol(getTextSectionStartSymbol(), textSection, 0, 0, true, true);
+                }
+                objectFile.createDefinedSymbol(getTextSectionEndSymbol(), textSection, textSectionSize, 0, false, SubstrateOptions.InternalSymbolsAreGlobal.getValue());
+            } else {
+                objectFile.createUndefinedSymbol(getTextSectionStartSymbol(), true);
+                objectFile.createUndefinedSymbol(getTextSectionEndSymbol(), false);
             }
-            objectFile.createDefinedSymbol("__svm_text_end", textSection, textSectionSize, 0, false, SubstrateOptions.InternalSymbolsAreGlobal.getValue());
             objectFile.createDefinedSymbol(roDataSection.getName(), roDataSection, 0, 0, false, false);
             objectFile.createDefinedSymbol(rwDataSection.getName(), rwDataSection, 0, 0, false, false);
 
@@ -490,7 +500,7 @@ public abstract class NativeImage extends AbstractImage {
             cGlobals.writeData(rwDataBuffer,
                             (offset, symbolName, isGlobalSymbol) -> objectFile.createDefinedSymbol(symbolName, rwDataSection, offset + RWDATA_CGLOBALS_PARTITION_OFFSET, wordSize, false,
                                             isGlobalSymbol || SubstrateOptions.InternalSymbolsAreGlobal.getValue()),
-                            (offset, symbolName, _) -> defineRelocationForSymbol(symbolName, offset));
+                            (offset, symbolName, _) -> markCGlobalDataSymbolReferenceRelocation(objectFile, offset, symbolName));
 
             // - Write the heap to its own section.
             long imageHeapSize = getImageHeapSize();
@@ -726,12 +736,7 @@ public abstract class NativeImage extends AbstractImage {
             assert isAddendAligned(arch, addend, info.getRelocationKind()) : "improper addend alignment";
             sectionImpl.markRelocationSite(offset, info.getRelocationKind(), rwDataSection.getName(), addend);
             if (dataInfo.isSymbolReference()) { // create relocation for referenced symbol
-                if (objectFile.getSymbolTable().getSymbol(data.symbolName) == null) {
-                    objectFile.createUndefinedSymbol(data.symbolName, true);
-                }
-                ProgbitsSectionImpl baseSectionImpl = (ProgbitsSectionImpl) rwDataSection.getImpl();
-                int offsetInSection = Math.toIntExact(RWDATA_CGLOBALS_PARTITION_OFFSET + dataInfo.getOffset());
-                baseSectionImpl.markRelocationSite(offsetInSection, RelocationKind.getDirect(wordSize), data.symbolName, 0L);
+                markCGlobalDataSymbolReferenceRelocation(objectFile, dataInfo.getOffset(), data.symbolName);
             }
         } else if (target instanceof ConstantReference cr) {
             markConstantReference(buffer, offset, info, cr, arch, heap);
@@ -1046,7 +1051,6 @@ public abstract class NativeImage extends AbstractImage {
     }
 }
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 @AutomaticallyRegisteredFeature
 final class MethodPointerInvalidHandlerFeature implements InternalFeature {
     @Override

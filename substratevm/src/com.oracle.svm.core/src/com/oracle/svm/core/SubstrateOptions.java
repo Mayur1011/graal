@@ -81,7 +81,6 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.LogUtils;
 import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.JVMCIReflectionUtil;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.asm.amd64.AMD64Assembler;
@@ -675,7 +674,7 @@ public class SubstrateOptions {
     @APIOption(name = "enable-http", fixedValue = "http", customHelp = "enable http support in the generated image")//
     @APIOption(name = "enable-https", fixedValue = "https", customHelp = "enable https support in the generated image")//
     @APIOption(name = "enable-url-protocols")//
-    @Option(help = "List of comma separated URL protocols to enable.")//
+    @Option(help = "List of comma separated URL protocols to enable. Use 'all' to enable all known JDK URL protocols. Use 'runtime' with runtime class loading to keep JDK URL protocol handling at runtime.")//
     public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> EnableURLProtocols = new HostedOptionKey<>(
                     AccumulatingLocatableMultiOptionValue.Strings.buildWithCommaDelimiter());
 
@@ -865,6 +864,23 @@ public class SubstrateOptions {
     @Option(help = "Parse and consume standard options and system properties from the command line arguments when the VM is created.", stability = OptionStability.STABLE)//
     public static final HostedOptionKey<Boolean> ParseRuntimeOptions = new HostedOptionKey<>(true);
 
+    @Option(help = """
+                    Preserve legacy Java option handling at runtime.
+
+                    When true, only these Java options are consumed by the VM:
+                      - System properties with or without an explicit value (i.e. "-Dname=value" or "-Dname")
+                      - "-Xms", "-Xmx", "-Xmn" and "-Xss"
+                      - "-XX:"
+                    All other options are passed through to main or ignored for CreateJavaVM/graal_create_isolate.
+
+                    When false, the VM parses all options passed via CreateJavaVM/graal_create_isolate.
+                    A recognized but unimplemented option reports an error and exits the VM.
+                    If the VM entry point is main, unrecognized options are passed through to main.
+                    Otherwise, an unrecognized option reports an error and exits the VM unless
+                    JNIJavaVMInitArgs.ignoreUnrecognized or graal_create_isolate_params_t.ignore_unrecognized_args
+                    is true in which case the unrecognized option is silently ignored.""", type = OptionType.Expert)//
+    public static final HostedOptionKey<Boolean> LegacyJavaOptionMode = new HostedOptionKey<>(true);
+
     @Option(help = "Enable wildcard expansion in command line arguments on Windows.")//
     public static final HostedOptionKey<Boolean> EnableWildcardExpansion = new HostedOptionKey<>(true);
 
@@ -913,17 +929,10 @@ public class SubstrateOptions {
 
     @LayerVerifiedOption(kind = Kind.Changed, severity = Severity.Error)//
     @Option(help = "Backend used by the compiler", type = OptionType.User)//
-    public static final HostedOptionKey<String> CompilerBackend = new HostedOptionKey<>("lir") {
+    public static final HostedOptionKey<String> CompilerBackend = new HostedOptionKey<>("lir", SubstrateOptions::validateCompilerBackend) {
         @Override
         protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, String oldValue, String newValue) {
             if ("llvm".equals(newValue)) {
-                boolean isLLVMBackendMissing = JVMCIReflectionUtil.bootModuleLayer().findModule("org.graalvm.nativeimage.llvm").isEmpty();
-                if (isLLVMBackendMissing) {
-                    throw UserError.invalidOptionValue(CompilerBackend, newValue,
-                                    "The LLVM backend for GraalVM Native Image is missing and needs to be built from source. " +
-                                                    "For instructions, please see https://github.com/oracle/graal/blob/master/docs/reference-manual/native-image/LLVMBackend.md.");
-                }
-
                 /* See GR-14405, https://github.com/oracle/graal/issues/1056 */
                 GraalOptions.EmitStringSubstitutions.update(values, false);
                 /*
@@ -939,6 +948,13 @@ public class SubstrateOptions {
             }
         }
     };
+
+    private static void validateCompilerBackend(HostedOptionKey<String> optionKey) {
+        String compilerBackend = optionKey.getValue();
+        if ("llvm".equals(compilerBackend) && !SpawnIsolates.getValue()) {
+            throw UserError.invalidOptionValue(optionKey, compilerBackend, "The LLVM backend requires isolate support. Use -H:+SpawnIsolates or select a different compiler backend.");
+        }
+    }
 
     @Fold
     public static boolean useLLVMBackend() {
@@ -1234,7 +1250,7 @@ public class SubstrateOptions {
 
         @Option(help = "Avoid linker relocations for code and instead emit address computations.", type = OptionType.Expert) //
         @LayerVerifiedOption(severity = Severity.Error, kind = Kind.Changed, positional = false) //
-        public static final HostedOptionKey<Boolean> RelativeCodePointers = new HostedOptionKey<>(false, SubstrateOptions::validateRelativeCodePointers);
+        public static final HostedOptionKey<Boolean> RelativeCodePointers = new HostedOptionKey<>(true, SubstrateOptions::validateRelativeCodePointers);
 
         /** Use {@link SubstrateOptions#getTearDownWarningNanos()} instead. */
         @Option(help = "The number of seconds that the isolate teardown can take before warnings are printed. Disabled if less or equal to 0.")//
@@ -1293,6 +1309,16 @@ public class SubstrateOptions {
                 if (SupportCompileInIsolates.getValue()) {
                     throw UserError.abort("Cannot enable Ristretto compilation if SupportCompileInIsolates is enabled.");
                 }
+            }
+        }
+
+        /** Use {@link SubstrateOptions#isForeignAPIEnabled} instead. */
+        @Option(help = "Support for calls via the Java Foreign Function and Memory API", type = Expert) //
+        public static final HostedOptionKey<Boolean> ForeignAPISupport = new HostedOptionKey<>(null, ConcealedOptions::validateForeignAPISupport);
+
+        private static void validateForeignAPISupport(HostedOptionKey<Boolean> optionKey) {
+            if (Boolean.TRUE.equals(optionKey.getValue()) && useLLVMBackend()) {
+                throw UserError.invalidOptionValue(optionKey, true, "Support for the Foreign Function and Memory API is not available with the LLVM backend.");
             }
         }
     }
@@ -1486,12 +1512,14 @@ public class SubstrateOptions {
     public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> IgnorePreserveForClasses = new HostedOptionKey<>(
                     AccumulatingLocatableMultiOptionValue.Strings.buildWithCommaDelimiter());
 
-    @Option(help = "Support for calls via the Java Foreign Function and Memory API", type = Expert) //
-    public static final HostedOptionKey<Boolean> ForeignAPISupport = new HostedOptionKey<>(true);
-
     @Fold
     public static boolean isForeignAPIEnabled() {
-        return SubstrateOptions.ForeignAPISupport.getValue();
+        Boolean value = ConcealedOptions.ForeignAPISupport.getValue();
+        if (value != null) {
+            return value;
+        }
+        /* Enabled by default but disabled for the LLVM backend. */
+        return !useLLVMBackend();
     }
 
     @Option(help = "Support for intrinsics from the Java Vector API", type = Expert) //
@@ -1637,18 +1665,23 @@ public class SubstrateOptions {
 
     @Fold
     public static boolean useRelativeCodePointers() {
-        return ConcealedOptions.RelativeCodePointers.getValue();
+        return ConcealedOptions.RelativeCodePointers.getValue() &&
+                        (Platform.includedIn(PLATFORM_JNI.class) || Platform.includedIn(NATIVE_ONLY.class)) &&
+                        !useLLVMBackend();
     }
 
+    /** @see #useRelativeCodePointers() */
     private static void validateRelativeCodePointers(HostedOptionKey<Boolean> optionKey) {
-        if (optionKey.getValue()) {
-            String enabledOption = SubstrateOptionsParser.commandArgument(optionKey, "+");
-
-            UserError.guarantee(Platform.includedIn(PLATFORM_JNI.class) || Platform.includedIn(NATIVE_ONLY.class), "%s is supported only with hardware target platforms.", enabledOption);
-
-            // The concept of a code base would need to be introduced in the LLVM backend first.
-            UserError.guarantee(!useLLVMBackend(), "%s is currently not supported with the LLVM backend.", enabledOption);
+        if (!optionKey.hasBeenSet() || !optionKey.getValue()) {
+            return;
         }
+
+        String enabledOption = SubstrateOptionsParser.commandArgument(optionKey, "+");
+
+        UserError.guarantee(Platform.includedIn(PLATFORM_JNI.class) || Platform.includedIn(NATIVE_ONLY.class), "%s is supported only with hardware target platforms.", enabledOption);
+
+        // The concept of a code base would need to be introduced in the LLVM backend first.
+        UserError.guarantee(!useLLVMBackend(), "%s is currently not supported with the LLVM backend.", enabledOption);
     }
 
     public static boolean hasDumpRuntimeCompiledMethodsSupport() {

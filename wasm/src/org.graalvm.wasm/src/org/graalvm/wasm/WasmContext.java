@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,11 +40,14 @@
  */
 package org.graalvm.wasm;
 
+import java.util.Objects;
+
 import org.graalvm.wasm.predefined.wasi.fd.FdManager;
 
 import com.oracle.truffle.api.TruffleLanguage.ContextReference;
 import com.oracle.truffle.api.TruffleLanguage.Env;
 import com.oracle.truffle.api.nodes.Node;
+import org.graalvm.wasm.vector.Vector128Ops;
 
 public final class WasmContext {
     private final Env env;
@@ -53,6 +56,7 @@ public final class WasmContext {
     private final WasmStore contextStore;
     private final FdManager fdManager;
     private final MemoryContext memoryContext;
+    private boolean missingVectorApiWarningEmitted;
 
     /**
      * Optional grow callback to notify the embedder.
@@ -68,10 +72,10 @@ public final class WasmContext {
     private Object memWaitCallback;
 
     @SuppressWarnings("this-escape")
-    public WasmContext(Env env, WasmLanguage language) {
-        this.env = env;
-        this.language = language;
-        this.contextOptions = WasmContextOptions.fromOptionValues(env.getOptions());
+    public WasmContext(Env env, WasmLanguage language, WasmContextOptions contextOptions) {
+        this.env = Objects.requireNonNull(env);
+        this.language = Objects.requireNonNull(language);
+        this.contextOptions = Objects.requireNonNull(contextOptions);
         this.fdManager = new FdManager(env);
         this.memoryContext = new MemoryContext();
         this.contextStore = new WasmStore(this, language);
@@ -99,7 +103,7 @@ public final class WasmContext {
     }
 
     public WasmModule readModule(String moduleName, byte[] data, ModuleLimits moduleLimits) {
-        final WasmModule module = WasmModule.create(moduleName, moduleLimits);
+        final WasmModule module = WasmModule.create(language, moduleName, moduleLimits);
         final BinaryParser reader = new BinaryParser(module, this, data);
         reader.readModule();
         return module;
@@ -107,6 +111,19 @@ public final class WasmContext {
 
     public WasmContextOptions getContextOptions() {
         return this.contextOptions;
+    }
+
+    public void warnAboutMissingVectorApi() {
+        if (!missingVectorApiWarningEmitted) {
+            synchronized (this) {
+                if (!missingVectorApiWarningEmitted) {
+                    env.getLogger(Vector128Ops.class).warning(
+                                    "WebAssembly SIMD code is using the fallback vector implementation because the JDK Vector API is not available. For better performance on the JVM, " +
+                                                    "run with --add-modules=jdk.incubator.vector. When building a native image, also pass -H:+UnlockExperimentalVMOptions and -H:+VectorAPISupport.");
+                    missingVectorApiWarningEmitted = true;
+                }
+            }
+        }
     }
 
     private static final ContextReference<WasmContext> REFERENCE = ContextReference.create(WasmLanguage.class);

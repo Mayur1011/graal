@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,21 +47,21 @@ import org.graalvm.wasm.parser.bytecode.RuntimeBytecodeGen;
  * Representation of a wasm try table during module validation.
  */
 public class TryTableFrame extends BlockFrame {
-    private final ExceptionTable table;
+
+    private final int startOffset;
+    private final ExceptionHandler[] handlers;
 
     TryTableFrame(int[] paramTypes, int[] resultTypes, int initialStackSize, ControlFrame parentFrame, int startOffset, ExceptionHandler[] handlers) {
         super(paramTypes, resultTypes, initialStackSize, parentFrame);
-        this.table = new ExceptionTable(startOffset, handlers);
-    }
-
-    ExceptionTable table() {
-        return table;
+        this.startOffset = startOffset;
+        this.handlers = handlers;
     }
 
     @Override
-    void exit(RuntimeBytecodeGen bytecode) {
-        super.exit(bytecode);
-
-        table.setTo(bytecode.location());
+    void exit(ParserState state, RuntimeBytecodeGen bytecode) {
+        exitBlock(bytecode);
+        final ExceptionTable table = new ExceptionTable(startOffset, bytecode.location(), handlers);
+        final int tableIndex = state.registerExceptionTable(table);
+        registerDelegateContinuationFixups(state, tableIndex);
     }
 }

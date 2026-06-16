@@ -105,12 +105,12 @@ import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
 import com.oracle.svm.core.threadlocal.VMThreadLocalSupport;
 import com.oracle.svm.core.util.UnsignedUtils;
 import com.oracle.svm.guest.staging.SubstrateGuestOptions;
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.guest.staging.c.CGlobalData;
 import com.oracle.svm.guest.staging.c.CGlobalDataFactory;
 import com.oracle.svm.guest.staging.c.function.CEntryPointActions;
 import com.oracle.svm.guest.staging.c.function.CEntryPointCreateIsolateParameters;
 import com.oracle.svm.guest.staging.c.function.CEntryPointErrors;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.util.VMError;
 
@@ -278,10 +278,11 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
     }
 
     /**
-     * After parsing the isolate arguments in
-     * {@link IsolateArgumentParser#parse(CEntryPointCreateIsolateParameters, IsolateArguments)} the
+     * After parsing the isolate arguments in {@link IsolateArgumentParser#parse} the
      * {@code providedParameters} should no longer be used. Instead {@link IsolateArguments}
      * contains the correct values.
+     * <p>
+     * This method is called via the {@code runtimeCall} in {@link #createIsolateSnippet}.
      */
     @Uninterruptible(reason = "Thread state not yet set up.")
     @SubstrateForeignCallTarget(stubCallingConvention = false)
@@ -359,7 +360,7 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
             return CEntryPointErrors.THREADING_INITIALIZATION_FAILED;
         }
 
-        int error = enterAttachThread0(isolate, false, true);
+        int error = enterAttachThread0(isolate, false, true, true, false);
         if (error != CEntryPointErrors.NO_ERROR) {
             return error;
         }
@@ -498,14 +499,16 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
                         throw VMError.shouldNotReachHereAtRuntime();
                     }
                 } else if (!ignoreUnrecognized && remainingArgs.length != 0) {
-                    /*
-                     * GR-73367: we currently don't recognize many commonly passed VM options like
-                     * module options, -ea, or --enable-native-access at runtime, so failing here
-                     * would be disruptive to existing code
-                     *
-                     * (Note: such options are passed as args to a Java main method above)
-                     */
-                    // return CEntryPointErrors.ARGUMENT_PARSING_FAILED;
+                    if (!SubstrateOptions.LegacyJavaOptionMode.getValue()) {
+                        Log.logStream().println("Error: Unrecognized option: " + remainingArgs[0]);
+                        return CEntryPointErrors.ARGUMENT_PARSING_FAILED;
+                    } else {
+                        /*
+                         * GR-73367: Failing here would be disruptive to existing/legacy code.
+                         *
+                         * (Note: such options are passed as args to a Java main method above)
+                         */
+                    }
                 }
             } catch (IllegalArgumentException e) {
                 Log.logStream().println("Error: " + e.getMessage());
@@ -578,11 +581,6 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
     @Uninterruptible(reason = "Thread state not yet set up.")
     @SubstrateForeignCallTarget(stubCallingConvention = false)
     private static int attachThread(Isolate isolate, boolean startedByIsolate, boolean ensureJavaThread) {
-        return enterAttachThread0(isolate, startedByIsolate, ensureJavaThread);
-    }
-
-    @Uninterruptible(reason = "Thread state not yet set up.")
-    private static int enterAttachThread0(Isolate isolate, boolean startedByIsolate, boolean ensureJavaThread) {
         return enterAttachThread0(isolate, startedByIsolate, ensureJavaThread, true, false);
     }
 
@@ -612,10 +610,10 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
         }
 
         if (thread.isNull()) { // not attached
-            if (!allowAttach) {
+            if (!allowAttach || inCrashHandler) {
                 return CEntryPointErrors.UNATTACHED_THREAD;
             }
-            return attachUnattachedThread(isolate, startedByIsolate, inCrashHandler);
+            return attachUnattachedThread(isolate, startedByIsolate);
         } else {
             writeCurrentVMThread(thread);
             if (runtimeAssertionsEnabled() || SubstrateOptions.CheckIsolateThreadAtEntry.getValue()) {
@@ -630,8 +628,8 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
     }
 
     @Uninterruptible(reason = "Thread state not yet set up.")
-    private static int attachUnattachedThread(Isolate isolate, boolean startedByIsolate, boolean inCrashHandler) {
-        int isolateThreadSize = VMThreadLocalSupport.singleton().vmThreadSize;
+    private static int attachUnattachedThread(Isolate isolate, boolean startedByIsolate) {
+        int isolateThreadSize = VMThreadLocalSupport.singleton().sizeOfIsolateThread();
         IsolateThread thread = VMThreads.singleton().allocateIsolateThread(isolateThreadSize);
         if (thread.isNull()) {
             return CEntryPointErrors.ALLOCATION_FAILED;
@@ -642,25 +640,14 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
             return CEntryPointErrors.UNKNOWN_STACK_BOUNDARIES;
         }
 
-        if (inCrashHandler) {
-            // If we are in the crash handler then we only want to make sure that this thread can
-            // print diagnostics. A full attach operation would be too dangerous.
-            SubstrateDiagnostics.setOnlyAttachedForCrashHandler(thread);
-        } else {
-            int error = VMThreads.singleton().attachCurrentThread(startedByIsolate);
-            if (error != CEntryPointErrors.NO_ERROR) {
-                VMThreads.singleton().freeCurrentIsolateThread();
-                return error;
-            }
+        int error = VMThreads.singleton().attachCurrentThread(startedByIsolate);
+        if (error != CEntryPointErrors.NO_ERROR) {
+            VMThreads.singleton().freeCurrentIsolateThread();
+            return error;
         }
 
         VMThreads.IsolateTL.set(thread, isolate);
         return CEntryPointErrors.NO_ERROR;
-    }
-
-    @Uninterruptible(reason = "Thread state not yet set up.")
-    public static int enterAttachFromCrashHandler(Isolate isolate) {
-        return enterAttachThread0(isolate, false, false, true, true);
     }
 
     @Uninterruptible(reason = "Thread state not yet set up.")
@@ -832,6 +819,9 @@ public final class CEntryPointSnippets extends SubstrateTemplates implements Sni
         }
 
         writeCurrentVMThread(thread);
+        if (runtimeAssertionsEnabled() || SubstrateOptions.CheckIsolateThreadAtEntry.getValue()) {
+            verifyIsolateThread(thread, true);
+        }
         return CEntryPointErrors.NO_ERROR;
     }
 

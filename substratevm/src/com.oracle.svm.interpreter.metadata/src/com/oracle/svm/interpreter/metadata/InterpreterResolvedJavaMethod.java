@@ -32,6 +32,8 @@ import static com.oracle.svm.espresso.classfile.Constants.ACC_STATIC;
 import static com.oracle.svm.espresso.classfile.Constants.ACC_SYNTHETIC;
 import static com.oracle.svm.espresso.classfile.Constants.ACC_VARARGS;
 import static com.oracle.svm.espresso.classfile.Constants.JVM_RECOGNIZED_METHOD_MODIFIERS;
+import static com.oracle.svm.core.code.FrameSourceInfo.LINENUMBER_NATIVE;
+import static com.oracle.svm.core.code.FrameSourceInfo.LINENUMBER_UNKNOWN;
 import static com.oracle.svm.interpreter.metadata.Bytecodes.BREAKPOINT;
 import static com.oracle.svm.interpreter.metadata.CremaMethodAccess.toJVMCI;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
@@ -492,12 +494,27 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         return interpretedCode;
     }
 
-    @Platforms(Platform.HOSTED_ONLY.class)
-    public final void setCode(byte[] code) {
-        VMError.guarantee(originalCode == null);
-        this.interpretedCode = code;
+    /**
+     * Runtime-linked {@code invokedynamic} sites patch the published extra CPI only into the live
+     * interpreter bytecodes. The cached {@link #originalCode} view is initialized lazily from the
+     * interpreter bytecodes the first time {@link #getCode()} is requested and then keeps its own
+     * stable per-call-site encoding, so it deliberately does not mirror later runtime mutations.
+     */
+    public final void patchInvokeDynamicExtraCPI(int bci, int extraCPI) {
+        VMError.guarantee(interpretedCode != null);
+        BytecodeStream.patchIndyExtraCPI(interpretedCode, bci, extraCPI);
     }
 
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public final void setCode(byte[] code) {
+        this.interpretedCode = code;
+        this.originalCode = null;
+    }
+
+    /**
+     * Cached spec-compliant bytecode view used by JVMCI/compiler consumers. Lazily derived from
+     * {@link #interpretedCode} on the first {@link #getCode()} access.
+     */
     private volatile byte[] originalCode;
 
     public final int getOriginalOpcodeAt(int bci) {
@@ -514,7 +531,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
             synchronized (this) {
                 result = originalCode;
                 if (result == null) {
-                    originalCode = result = getInterpretedCode().clone();
+                    originalCode = result = createOriginalCode();
                     verifySanitizedCode(result); // assert
                 }
             }
@@ -522,10 +539,68 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         return result;
     }
 
+    /**
+     * Builds the compiler-visible bytecode snapshot from the live interpreter bytecodes.
+     *
+     * <p>
+     * Runtime linking mutates only {@link #interpretedCode}. This snapshot rewrites each runtime
+     * {@code invokedynamic} operand into a stable compiler view so compiler consumers never observe
+     * torn extra-CPI publication or other interpreter-only bytecode rewrites.
+     */
+    private byte[] createOriginalCode() {
+        byte[] result = getInterpretedCode().clone();
+        InterpreterConstantPool constantPool = getConstantPool();
+        for (int bci = 0; bci < BytecodeStream.endBCI(result); bci = BytecodeStream.nextBCI(result, bci)) {
+            int opcode = BytecodeStream.opcode(result, bci);
+            if (Bytecodes.isQuickenedFieldAccess(opcode)) {
+                /*
+                 * Quickened field bytecodes are only meaningful to the interpreter; JVMCI clients
+                 * must keep seeing the original class-file opcode and operands.
+                 */
+                BytecodeStream.patchOpcodeOpaque(result, bci, Bytecodes.unquickenedFieldAccess(opcode));
+                continue;
+            }
+            if (opcode != Bytecodes.INVOKEDYNAMIC) {
+                continue;
+            }
+            int fullCpi = BytecodeStream.readCPI4(result, bci);
+            int indyCpi = fullCpi >>> 16;
+            if (indyCpi == 0) {
+                continue;
+            }
+            Object indyEntry = constantPool.resolvedAt(indyCpi, getDeclaringClass());
+            if (!(indyEntry instanceof InterpreterResolvedJavaMethod)) {
+                BytecodeStream.patchIndyExtraCPI(result, bci, encodeCompilerIndyBci(bci));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Encodes one compiler-visible {@code invokedynamic} call site as the current method plus an
+     * in-method BCI in the low 16 bits.
+     *
+     * <p>
+     * The enclosing {@link InterpreterResolvedJavaMethod} already fixes which bytecode array and
+     * constant-pool view we are talking about, so the per-call-site state only needs to preserve
+     * the {@code bci} within that method.
+     */
+    private static int encodeCompilerIndyBci(int bci) {
+        /*
+         * Store bci + 1 so zero remains the sentinel for "no compiler-visible BCI encoded yet".
+         * That makes 0xFFFF the only non-negative BCI value that does not fit this encoding.
+         */
+        if (!(0 <= bci && bci < 0xFFFF)) {
+            throw VMError.shouldNotReachHere("BCI does not fit into compiler indy encoding: " + bci);
+        }
+        return bci + 1;
+    }
+
     private static void verifySanitizedCode(byte[] code) {
         for (int bci = 0; bci < BytecodeStream.endBCI(code); bci = BytecodeStream.nextBCI(code, bci)) {
             int currentBC = BytecodeStream.currentBC(code, bci);
             VMError.guarantee(Bytecodes.BREAKPOINT != currentBC);
+            VMError.guarantee(!Bytecodes.isQuickenedFieldAccess(currentBC));
         }
     }
 
@@ -581,7 +656,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
 
     @Override
     public final boolean isClassInitializer() {
-        return ParserSymbols.ParserNames._clinit_ == getSymbolicName() && isStatic();
+        return ParserMethod.isClassInitializer(getModifiers(), getSymbolicName(), getSymbolicSignature());
     }
 
     @Override
@@ -691,7 +766,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         this.gotOffset = gotOffset;
     }
 
-    public final int getGotOffset() {
+    public final int getGOTOffset() {
         return gotOffset;
     }
 
@@ -836,6 +911,10 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
         return this;
     }
 
+    /**
+     * Installs the precomputed ABI-ready signature used by interpreter entry stubs and runtime-made
+     * method metadata that cannot rely on hosted initialization.
+     */
     @Platforms(Platform.HOSTED_ONLY.class)
     public void setPreparedSignature(PreparedSignature preparedSignature) {
         this.preparedSignature = preparedSignature;
@@ -955,8 +1034,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
     public final StackTraceElement asStackTraceElement(int bci) {
         int lineNumber;
         if (Modifier.isNative(getModifiers())) {
-            // StackTraceElement uses -2 to mark native methods distinctly from "line unknown".
-            lineNumber = -2;
+            lineNumber = LINENUMBER_NATIVE;
         } else {
             LineNumberTable methodLineNumberTable = getLineNumberTable();
             if (methodLineNumberTable == null || bci < 0) {
@@ -964,7 +1042,7 @@ public class InterpreterResolvedJavaMethod extends InterpreterAnnotated implemen
                  * Missing line-table metadata or an unknown BCI means the source line is
                  * unavailable, not that the method metadata is corrupt.
                  */
-                lineNumber = -1;
+                lineNumber = LINENUMBER_UNKNOWN;
             } else {
                 lineNumber = methodLineNumberTable.getLineNumber(bci);
             }

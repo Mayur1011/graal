@@ -33,7 +33,6 @@ import static com.oracle.svm.core.jfr.JfrArgumentParser.parseMaxSize;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Map;
 
 import org.graalvm.nativeimage.ImageSingletons;
@@ -154,7 +153,7 @@ public class JfrManager {
 
         try {
             if (dumpPath != null) {
-                Options.setDumpPath(Paths.get(dumpPath));
+                Options.setDumpPath(Path.of(dumpPath));
             } else {
                 Options.setDumpPath(null);
             }
@@ -164,7 +163,7 @@ public class JfrManager {
     }
 
     private static void setRepositoryBasePath(String repositoryPath) throws IOException {
-        Path path = Paths.get(repositoryPath);
+        Path path = Path.of(repositoryPath);
         SubstrateUtil.cast(Repository.getRepository(), Target_jdk_jfr_internal_Repository.class).setBasePath(path);
     }
 
@@ -191,9 +190,9 @@ public class JfrManager {
         FlightRecorder.addPeriodicEvent(EndChunkNativePeriodicEvents.class, EndChunkNativePeriodicEvents::emit);
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L219-L247")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L146-L180")
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L130-L144")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L219-L247")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L146-L180")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-24+18/src/hotspot/share/jfr/dcmd/jfrDcmds.cpp#L130-L144")
     private static void initRecording() {
         Target_jdk_jfr_internal_dcmd_DCmdStart cmd = new Target_jdk_jfr_internal_dcmd_DCmdStart();
         String[] result = SubstrateUtil.cast(cmd, Target_jdk_jfr_internal_dcmd_AbstractDCmd.class).execute("internal", SubstrateOptions.StartFlightRecording.getValue(), ',');

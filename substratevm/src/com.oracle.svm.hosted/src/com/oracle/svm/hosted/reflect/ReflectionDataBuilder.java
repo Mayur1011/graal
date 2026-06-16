@@ -720,7 +720,8 @@ public class ReflectionDataBuilder extends ConditionalConfigurationRegistry impl
             try {
                 ResolvedJavaField field = JVMCIReflectionUtil.getUniqueDeclaredField(true, GuestAccess.get().lookupType(declaringClass), fieldName);
                 if (field != null) {
-                    registerField(cnd, ACCESSED, preserved, field);
+                    ConfigurationMemberAccessibility accessibility = throwMissingRegistrationErrors() ? QUERIED : ACCESSED;
+                    registerField(cnd, accessibility, preserved, field);
                 }
             } catch (LinkageError ignored) {
                 // Field lookup errors will be handled by the declaring class registration
@@ -1195,9 +1196,10 @@ public class ReflectionDataBuilder extends ConditionalConfigurationRegistry impl
         Map<AnalysisType, Map<AnalysisField, ConditionalRuntimeValue<Field>>> registeredFields = new HashMap<>();
         fields.forEach((field, data) -> {
             if (data.isRegisteredAs(QUERIED)) {
-                if (ClassAccess.getJavaField(field) != null) {
+                Field javaField = ClassAccess.getJavaField(field);
+                if (javaField != null) {
                     registeredFields.computeIfAbsent(field.getDeclaringClass(), _ -> new HashMap<>()).put(field,
-                                    new ConditionalRuntimeValue<>(data.getDynamicAccessMetadata(), ClassAccess.getJavaField(field)));
+                                    new ConditionalRuntimeValue<>(data.getDynamicAccessMetadata(), javaField));
                 }
             }
         });

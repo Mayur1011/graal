@@ -673,6 +673,38 @@ public final class VectorAMD64 extends VectorArchitecture {
     }
 
     @Override
+    public boolean supportsVectorInsert(SimdStamp vectorStamp, SimdStamp valueStamp, int offset) {
+        if (!valueStamp.getComponent(0).isCompatible(vectorStamp.getComponent(0))) {
+            return false;
+        } else if (offset < 0 || valueStamp.getVectorLength() + offset > vectorStamp.getVectorLength()) {
+            return false;
+        } else {
+            int elementBytes = getVectorStride(vectorStamp.getComponent(0));
+            int vectorSizeInBytes = vectorStamp.getVectorLength() * elementBytes;
+            int valueSizeInBytes = valueStamp.getVectorLength() * elementBytes;
+            int offsetInBytes = offset * elementBytes;
+            int maxSupportedAVXBytes = getMaxSupportedAVXSize(arch.getFeatures()).getBytes();
+            if (vectorSizeInBytes > maxSupportedAVXBytes) {
+                return false;
+            } else if (valueSizeInBytes == Byte.BYTES || valueSizeInBytes == Short.BYTES || valueSizeInBytes == Integer.BYTES || valueSizeInBytes == Long.BYTES) {
+                /*
+                 * InsertOp can materialize sub-128-bit vector inserts on AMD64 if the insert is
+                 * aligned to the inserted value size and stays within a single XMM lane. Wider
+                 * inserts are lowered to this case lane-by-lane in AMD64VectorLoweringPhase.
+                 */
+                int offsetWithinXmmLane = offsetInBytes % AVXSize.XMM.getBytes();
+                return offsetInBytes % valueSizeInBytes == 0 && offsetWithinXmmLane + valueSizeInBytes <= AVXSize.XMM.getBytes();
+            } else if (valueSizeInBytes == AVXSize.XMM.getBytes()) {
+                return vectorSizeInBytes > AVXSize.XMM.getBytes() && offsetInBytes % AVXSize.XMM.getBytes() == 0;
+            } else if (valueSizeInBytes == AVXSize.YMM.getBytes()) {
+                return vectorSizeInBytes > AVXSize.YMM.getBytes() && maxSupportedAVXBytes >= AVXSize.ZMM.getBytes() && offsetInBytes % AVXSize.YMM.getBytes() == 0;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    @Override
     public boolean supportsAES() {
         return arch.getFeatures().contains(CPUFeature.AES) && arch.getFeatures().contains(CPUFeature.AVX);
     }
@@ -897,7 +929,7 @@ public final class VectorAMD64 extends VectorArchitecture {
                                             op(BYTE_BITS, null),
                                             op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
                                             op(DWORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512F_VL),
-                                            op(QWORD_BITS, VectorFeatureAssertion.AVX512DQ_VL)),
+                                            op(QWORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512DQ_VL)),
 
                             entry(IntegerStamp.OPS.getMulHigh(),
                                             op(BYTE_BITS, null),

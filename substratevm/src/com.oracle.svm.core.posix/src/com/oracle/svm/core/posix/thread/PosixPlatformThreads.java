@@ -67,7 +67,7 @@ import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.core.thread.Parker;
 import com.oracle.svm.core.thread.Parker.ParkerFactory;
 import com.oracle.svm.core.thread.PlatformThreads;
-import com.oracle.svm.core.thread.VMThreads.OSThreadHandle;
+import com.oracle.svm.guest.staging.core.thread.OSThreadHandle;
 import com.oracle.svm.core.util.UnsignedUtils;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
@@ -219,7 +219,7 @@ public final class PosixPlatformThreads extends PlatformThreads {
 
     @Override
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    public OSThreadHandle startThreadUnmanaged(CFunctionPointer threadRoutine, PointerBase userData, int stackSize) {
+    public OSThreadHandle startThreadUnmanaged(CFunctionPointer threadRoutine, PointerBase userData, long stackSize) {
         pthread_attr_t attributes = StackValue.get(pthread_attr_t.class);
         int status = Pthread.pthread_attr_init_no_transition(attributes);
         if (status != 0) {
@@ -370,7 +370,7 @@ final class PosixParker extends Parker {
         }
     }
 
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/os/posix/os_posix.cpp#L1662-L1738")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/os/posix/os_posix.cpp#L1662-L1738")
     private void park0(boolean isAbsolute, long time) {
         int status = Pthread.pthread_mutex_trylock_no_transition(mutex);
         if (status == Errno.EBUSY()) {
@@ -409,7 +409,7 @@ final class PosixParker extends Parker {
     }
 
     @Override
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/os/posix/os_posix.cpp#L1740-L1763")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-23+10/src/hotspot/os/posix/os_posix.cpp#L1740-L1763")
     protected void unpark() {
         StackOverflowCheck.singleton().makeYellowZoneAvailable();
         try {

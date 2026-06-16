@@ -418,6 +418,8 @@ class NativeImageBenchmarkConfig:
             base_image_build_args += ['-Ob']
         if vm.graalos or vm.graalhost_graalos:
             base_image_build_args += ['-H:+GraalOS']
+        if vm.layered:
+            base_image_build_args += ['-H:+WarnOnSharedLayerSetRuntimeOptions']
         if vm.use_string_inlining:
             base_image_build_args += ['-H:+UseStringInlining']
         if vm.static:
@@ -865,6 +867,7 @@ class NativeImageVM(StageAwareGraalVm):
         # When this is set, run the instrumentation-image and instrumentation-run stages.
         # Does not necessarily do instrumentation.
         self.pgo_instrumentation = False
+        self.pgo_layouting = False
         self.pgo_exclude_conditional = False
         self.pgo_sampler_only = False
         self.pgo_use_perf = False
@@ -873,7 +876,6 @@ class NativeImageVM(StageAwareGraalVm):
         self.is_quickbuild = False
         self.graalos = False
         self.graalhost_graalos = False
-        self.pie = False
         self.layered = False
         self.use_string_inlining = False
         self.static = False
@@ -888,6 +890,7 @@ class NativeImageVM(StageAwareGraalVm):
         self.use_upx = False
         self.use_open_type_world = False
         self.copyingoldgen_oldpolicy = False # for later removal: GR-73132
+        self.product_profile = False
         self.graalvm_edition = None
         self.config: NativeImageBenchmarkConfig | None = None
         self.stages: StagesContext | None = None
@@ -943,8 +946,6 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["graalos"]
         if self.graalhost_graalos is True:
             config += ["graalhost-graalos"]
-        if self.pie is True:
-            config += ["pie"]
         if self.layered is True:
             config += ["layered"]
         if self.future_defaults_all is True:
@@ -957,6 +958,8 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["quickbuild"]
         if self.gc == "G1":
             config += ["g1gc"]
+        if self.product_profile is True:
+            config += ["product"]
         if self.is_llvm is True:
             config += ["llvm"]
         is_pgo_set = False
@@ -964,7 +967,9 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["pgo-sampler"]
             is_pgo_set = True
         # pylint: disable=too-many-boolean-expressions
-        if not is_pgo_set and self.pgo_instrumentation is True \
+        if self.pgo_layouting is True:
+            config += ["pgo-layouting"]
+        elif not is_pgo_set and self.pgo_instrumentation is True \
                 and self.jdk_profiles_collect is False \
                 and self.adopted_jdk_pgo is False \
                 and self.safepoint_sampler is False \
@@ -1028,9 +1033,9 @@ class NativeImageVM(StageAwareGraalVm):
         # This defines the allowed config names for NativeImageVM. The ones registered will be available via --jvm-config
         # Note: the order of entries here must match the order of statements in NativeImageVM.config_name()
         rule = r'^(?P<native_architecture>native-architecture-)?(?P<string_inlining>string-inlining-)?(?P<static>mostly-static-|static-)?(?P<otw>otw-)?(?P<copyingoldgen_oldpolicy>copyingoldgen-oldpolicy-)?(?P<crema>crema-)?' \
-               r'(?P<preserve_all>preserve-all-)?(?P<preserve_classpath>preserve-classpath-)?(?P<graalos>graalos-)?(?P<graalhost_graalos>graalhost-graalos-)?(?P<pie>pie-)?(?P<layered>layered-)?' \
+               r'(?P<preserve_all>preserve-all-)?(?P<preserve_classpath>preserve-classpath-)?(?P<graalos>graalos-)?(?P<graalhost_graalos>graalhost-graalos-)?(?P<layered>layered-)?' \
                r'(?P<future_defaults_all>future-defaults-all-)?(?P<gate>gate-)?(?P<upx>upx-)?(?P<quickbuild>quickbuild-)?(?P<gc>g1gc-)?' \
-               r'(?P<llvm>llvm-)?(?P<pgo>pgo-|pgo-sampler-|pgo-perf-sampler-invoke-multiple-|pgo-perf-sampler-invoke-|pgo-perf-sampler-)?(?P<inliner>inline-)?' \
+               r'(?P<product>product-)?(?P<llvm>llvm-)?(?P<pgo>pgo-|pgo-layouting-|pgo-sampler-|pgo-perf-sampler-invoke-multiple-|pgo-perf-sampler-invoke-|pgo-perf-sampler-)?(?P<inliner>inline-)?' \
                r'(?P<analysis_context_sensitivity>insens-|allocsens-|1obj-|2obj1h-|3obj2h-|4obj3h-)?(?P<jdk_profiles>jdk-profiles-collect-|adopted-jdk-pgo-)?' \
                r'(?P<profile_inference>profile-inference-feature-extraction-|profile-inference-call-count-|profile-inference-call-count-conservative-|profile-inference-call-count-aggressive-|profile-inference-pgo-|profile-inference-debug-)?' \
                r'(?P<sampler>safepoint-sampler-|async-sampler-)?(?P<optimization_level>O0-|O1-|O2-|O3-|Os-)?(default-)?(?P<edition>ce-|ee-)?$'
@@ -1064,10 +1069,6 @@ class NativeImageVM(StageAwareGraalVm):
         if matching.group("graalhost_graalos") is not None:
             mx.logv(f"'graalhost-graalos' is enabled for {config_name}")
             self.graalhost_graalos = True
-
-        if matching.group("pie") is not None:
-            mx.logv(f"'pie' is enabled for {config_name}")
-            self.pie = True
 
         if matching.group("layered") is not None:
             mx.logv(f"'layered' is enabled for {config_name}")
@@ -1120,6 +1121,11 @@ class NativeImageVM(StageAwareGraalVm):
             else:
                 mx.abort(f"Unknown GC: {gc}")
 
+        if matching.group("product") is not None:
+            # Language benchmarks interpret this as their released-product launcher configuration.
+            mx.logv(f"'product' mode is enabled for {config_name}")
+            self.product_profile = True
+
         if matching.group("llvm") is not None:
             mx.logv(f"'llvm' mode is enabled for {config_name}")
             self.is_llvm = True
@@ -1129,6 +1135,9 @@ class NativeImageVM(StageAwareGraalVm):
             if pgo_mode == "pgo":
                 mx.logv(f"'pgo' is enabled for {config_name}")
                 self.pgo_instrumentation = True
+            elif pgo_mode == "pgo-layouting":
+                self.pgo_instrumentation = True
+                self.pgo_layouting = True
             elif pgo_mode == "pgo-sampler":
                 self.pgo_instrumentation = True
                 self.pgo_sampler_only = True
@@ -1145,6 +1154,9 @@ class NativeImageVM(StageAwareGraalVm):
                 self.pgo_perf_invoke_profile_collection_strategy = PerfInvokeProfileCollectionStrategy.MULTIPLE_CALLEES
             else:
                 mx.abort(f"Unknown pgo mode: {pgo_mode}")
+
+        if self.product_profile and self.pgo_instrumentation:
+            mx.abort("'product' and benchmark-collected PGO modes cannot be combined.")
 
         if matching.group("jdk_profiles") is not None:
             config = matching.group("jdk_profiles")[:-1]
@@ -1403,7 +1415,10 @@ class NativeImageVM(StageAwareGraalVm):
         return dims
 
     def _get_pgo_dimension(self) -> str:
-        if self.pgo_instrumentation:
+        if self.product_profile and self.graalvm_edition == "ee":
+            # Product EE configs report as PGO because language build code supplies the product profile.
+            return "pgo"
+        elif self.pgo_instrumentation:
             if self.pgo_sampler_only:
                 return "sampler-only"
             else:
@@ -1696,6 +1711,8 @@ class NativeImageVM(StageAwareGraalVm):
             instrument_args += svm_experimental_options([f'-H:PGOPerfSourceMappings={self.config.source_mappings_path}'])
         else:
             instrument_args += ['--pgo-sampling' if self.pgo_sampler_only else '--pgo-instrument', f"-R:ProfilesDumpFile={self.config.profile_path}"]
+            if self.pgo_layouting:
+                instrument_args += svm_experimental_options(['-H:+ProfileMethodTimestamps', '-H:-IncludeCallingContextInMethodTimestampProfiles', '-H:+ProfileObjectAccesses', '-H:+PrintAccessedCAHPsStats'])
 
         if self.jdk_profiles_collect:
             instrument_args += svm_experimental_options(['-H:+AOTPriorityInline', '-H:-SamplingCollect',
@@ -1804,10 +1821,6 @@ class NativeImageVM(StageAwareGraalVm):
         current_stage = self.stages_info.current_stage
         layer_aware_build_args = []
 
-        if self.pie and (not self.layered or not current_stage.layer_info.is_shared_library):
-            # This option should not be applied to base layers
-            layer_aware_build_args += ["-H:NativeLinkerOption=-pie"]
-
         if self.layered and not current_stage.layer_info.is_shared_library:
             # Set LinkerRPath to point to the directories containing the shared objects of underlying layers
             shared_library_stages = [stage for stage in self.stages_info.complete_stage_list
@@ -1864,6 +1877,8 @@ class NativeImageVM(StageAwareGraalVm):
             jdk_profiles_args = []
         if self.pgo_exclude_conditional:
             pgo_args += svm_experimental_options(['-H:PGOExcludeProfiles=CONDITIONAL'])
+        if self.pgo_layouting:
+            pgo_args += svm_experimental_options(['-H:CodeSectionLayoutOptimization=OrderByFirstCall', '-H:ImageHeapObjectSortStrategy=ClusterAccessed', '-H:+PGOIgnoreVersionCheck', '-H:+PrintImageHeapSortDiagnostics'])
 
         if self.profile_inference_feature_extraction:
             ml_args = svm_experimental_options(['-H:+MLGraphFeaturesExtraction', '-H:+ProfileInferenceDumpFeatures'])
@@ -2314,6 +2329,12 @@ def register_graalvm_vms():
             config_names = []
             for main_config in ['default', 'gate', 'llvm', 'native-architecture', 'crema', 'future-defaults-all', 'preserve-all', 'preserve-classpath'] + analysis_context_sensitivity + (['g1gc', 'pgo', 'g1gc-pgo'] if config_suffix != '-ce' else []):
                 config_names.append(f'{main_config}{config_suffix}')
+
+            # Product profile configs are used to benchmark language launchers similar to how they are released.
+            if config_suffix == '-ce':
+                config_names.append('product-ce')
+            elif config_suffix == '-ee':
+                config_names += ['product-ee', 'g1gc-product-ee']
 
             for optimization_level in optimization_levels:
                 config_names.append(f'{optimization_level}{config_suffix}')
@@ -4772,13 +4793,24 @@ class NativeImageBenchmarkMixin(StageAwareBenchmarkMixin):
 
     def is_native_mode(self, bm_suite_args: list[str]):
         """Checks whether the given arguments request a Native Image benchmark"""
-        jvm_flag = self.jvm(bm_suite_args)
-        if not jvm_flag:
-            # In case the --jvm argument was not given explicitly, let the registry load the appropriate vm and extract
-            # the name from there.
-            # This is much more expensive, so it is only used as a fallback
-            jvm_flag = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args).name()
-        return "native-image" in jvm_flag
+        vm_args = self.vmAndRunArgs(bm_suite_args)[0]
+        if "--guest" not in vm_args:
+            # The common non-guest path can avoid registry resolution unless --jvm was omitted.
+            jvm_flag = self.jvm(bm_suite_args)
+            if not jvm_flag:
+                # In case the --jvm argument was not given explicitly, let the registry load the appropriate vm and extract
+                # the name from there.
+                # This is much more expensive, so it is only used as a fallback
+                jvm_flag = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args).name()
+            return "native-image" in jvm_flag
+
+        # Guest syntax selects the guest VM as the effective VM. For native PolyBench dispatch we still need to look
+        # through it and treat a native-image host as native mode.
+        vm = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args, quiet=True)
+        if isinstance(vm, mx_benchmark.GuestVm):
+            host_vm = vm.host_vm()
+            return host_vm is not None and "native-image" in host_vm.name()
+        return "native-image" in vm.name()
 
     def apply_command_mapper_hooks(self, cmd, vm):
         return mx.apply_command_mapper_hooks(cmd, vm.command_mapper_hooks)

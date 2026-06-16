@@ -234,7 +234,7 @@ public class InterpreterConstantPool extends ConstantPool implements jdk.vm.ci.m
     }
 
     @Override
-    public RuntimeException classFormatError(String message) {
+    public final RuntimeException classFormatError(String message) {
         throw new ClassFormatError(message);
     }
 

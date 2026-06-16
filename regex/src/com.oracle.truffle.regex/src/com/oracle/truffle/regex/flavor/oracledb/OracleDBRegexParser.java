@@ -42,9 +42,11 @@ package com.oracle.truffle.regex.flavor.oracledb;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.regex.AbstractRegexObject;
 import com.oracle.truffle.regex.RegexFlags;
 import com.oracle.truffle.regex.RegexLanguage;
+import com.oracle.truffle.regex.RegexRootNode;
 import com.oracle.truffle.regex.RegexSource;
 import com.oracle.truffle.regex.RegexSyntaxException;
 import com.oracle.truffle.regex.RegexSyntaxException.ErrorCode;
@@ -56,6 +58,7 @@ import com.oracle.truffle.regex.charset.Constants;
 import com.oracle.truffle.regex.charset.Range;
 import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
 import com.oracle.truffle.regex.tregex.buffer.IntArrayBuffer;
+import com.oracle.truffle.regex.tregex.buffer.ObjectArrayBuffer;
 import com.oracle.truffle.regex.tregex.parser.CaseFoldData;
 import com.oracle.truffle.regex.tregex.parser.CaseFoldData.CaseFoldAlgorithm;
 import com.oracle.truffle.regex.tregex.parser.MultiCharacterCaseFolding;
@@ -109,10 +112,12 @@ public final class OracleDBRegexParser implements RegexParser {
     @TruffleBoundary
     public RegexAST parse() throws RegexSyntaxException {
         IntArrayBuffer literalStringBuffer = new IntArrayBuffer();
+        ObjectArrayBuffer<SourceSection> literalStringSourceSections = source.getOptions().isDumpAutomataWithSourceSections() ? new ObjectArrayBuffer<>() : null;
         astBuilder.pushRootGroup();
         Token token = null;
         Token.Kind prevKind;
         while (lexer.hasNext()) {
+            RegexRootNode.checkThreadInterrupted();
             prevKind = token == null ? null : token.kind;
             token = lexer.next();
             if (token.kind != Token.Kind.literalChar && !literalStringBuffer.isEmpty()) {
@@ -120,11 +125,11 @@ public final class OracleDBRegexParser implements RegexParser {
                 if (token.kind == Token.Kind.quantifier) {
                     last = literalStringBuffer.removeLast();
                 }
-                addLiteralString(literalStringBuffer);
+                addLiteralString(literalStringBuffer, literalStringSourceSections);
                 if (last >= 0) {
                     assert literalStringBuffer.isEmpty();
                     literalStringBuffer.add(last);
-                    addLiteralString(literalStringBuffer);
+                    addLiteralString(literalStringBuffer, literalStringSourceSections);
                 }
             }
             switch (token.kind) {
@@ -197,6 +202,9 @@ public final class OracleDBRegexParser implements RegexParser {
                     break;
                 case literalChar:
                     literalStringBuffer.add(((Token.LiteralCharacter) token).getCodePoint());
+                    if (source.getOptions().isDumpAutomataWithSourceSections()) {
+                        literalStringSourceSections.add(token.getSourceSection());
+                    }
                     break;
                 case charClass:
                     astBuilder.addCharClass((Token.CharacterClass) token);
@@ -223,7 +231,7 @@ public final class OracleDBRegexParser implements RegexParser {
             throw syntaxError(OracleDBErrorMessages.UNTERMINATED_GROUP, ErrorCode.UnmatchedParenthesis);
         }
         if (!literalStringBuffer.isEmpty()) {
-            addLiteralString(literalStringBuffer);
+            addLiteralString(literalStringBuffer, literalStringSourceSections);
         }
         return astBuilder.popRootGroup();
     }
@@ -431,7 +439,7 @@ public final class OracleDBRegexParser implements RegexParser {
         astBuilder.clearOverrideSourceSection();
     }
 
-    private void addLiteralString(IntArrayBuffer literalStringBuffer) {
+    private void addLiteralString(IntArrayBuffer literalStringBuffer, ObjectArrayBuffer<SourceSection> sourceSections) {
         if (flags.isIgnoreCase()) {
             int[] codepoints = literalStringBuffer.toArray();
             CodePointSet encodingRange = Encoding.UTF_8.getFullSet();
@@ -439,10 +447,13 @@ public final class OracleDBRegexParser implements RegexParser {
             MultiCharacterCaseFolding.caseFoldUnfoldString(CaseFoldAlgorithm.OracleDB, codepoints, encodingRange, false, false, astBuilder, null, compilationBuffer);
         } else {
             for (int i = 0; i < literalStringBuffer.length(); i++) {
-                astBuilder.addCharClass(CodePointSet.create(literalStringBuffer.get(i)), true);
+                astBuilder.addCharClass(CodePointSet.create(literalStringBuffer.get(i)), true, sourceSections == null ? null : sourceSections.get(i));
             }
         }
         literalStringBuffer.clear();
+        if (sourceSections != null) {
+            sourceSections.clear();
+        }
     }
 
     private RegexSyntaxException syntaxError(String msg, ErrorCode errorCode) {

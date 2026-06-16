@@ -80,12 +80,12 @@ import com.oracle.svm.core.MissingRegistrationSupport;
 import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.NeverInlineTrivial;
 import com.oracle.svm.core.NeverStrengthenGraphWithConstants;
-import com.oracle.svm.core.RuntimeAssertionsSupport;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateOptions.OptimizationLevel;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.InjectAccessors;
 import com.oracle.svm.core.annotate.TargetClass;
+import com.oracle.svm.core.code.FactoryMethodMarker;
 import com.oracle.svm.core.encoder.SymbolEncoder;
 import com.oracle.svm.core.graal.meta.SubstrateForeignCallLinkage;
 import com.oracle.svm.core.graal.meta.SubstrateForeignCallsProvider;
@@ -105,8 +105,10 @@ import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.interpreter.InterpreterSupport;
 import com.oracle.svm.core.jdk.LambdaFormHiddenMethod;
 import com.oracle.svm.core.reflect.proxy.DynamicProxySupport;
+import com.oracle.svm.core.stringformat.StringFormatPhase;
 import com.oracle.svm.core.thread.ContinuationSupport;
 import com.oracle.svm.core.threadlocal.VMThreadLocalInfo;
+import com.oracle.svm.core.threadlocal.VMThreadLocalSupport;
 import com.oracle.svm.core.util.Counter;
 import com.oracle.svm.core.util.HostedStringDeduplication;
 import com.oracle.svm.core.util.UserError;
@@ -330,7 +332,11 @@ public class SVMHost extends HostVM {
      */
     @Override
     public boolean isCoreType(ResolvedJavaType type) {
-        return loader.getCoreModules().contains(GuestAccess.get().getModule(OriginalClassProvider.getOriginalType(type)));
+        ResolvedJavaType originalType = OriginalClassProvider.getOriginalType(type);
+        if (!loader.getCoreModules().contains(GuestAccess.get().getModule(originalType))) {
+            return false;
+        }
+        return !AnnotationUtil.isAnnotationPresent(originalType, FactoryMethodMarker.class);
     }
 
     @Override
@@ -619,7 +625,6 @@ public class SVMHost extends HostVM {
 
         boolean isHidden = javaClass.isHidden();
         boolean isRecord = javaClass.isRecord();
-        boolean assertionStatus = RuntimeAssertionsSupport.singleton().desiredAssertionStatus(javaClass);
         boolean isSealed = javaClass.isSealed();
         boolean isVMInternal = AnnotationUtil.isAnnotationPresent(type, GuestAccess.elements().InternalVMMethod);
         boolean isLambdaFormHidden = AnnotationUtil.isAnnotationPresent(type, LambdaFormHiddenMethod.class);
@@ -633,7 +638,7 @@ public class SVMHost extends HostVM {
          */
         boolean isProxyClass = Proxy.isProxyClass(javaClass);
 
-        short flags = DynamicHub.makeFlags(javaClass.isPrimitive(), javaClass.isInterface(), isHidden, isRecord, assertionStatus,
+        short flags = DynamicHub.makeFlags(javaClass.isPrimitive(), javaClass.isInterface(), isHidden, isRecord,
                         type.hasDefaultMethods(), type.declaresDefaultMethods(), isSealed, isVMInternal,
                         isLambdaFormHidden, isLinked, isProxyClass);
 
@@ -837,6 +842,17 @@ public class SVMHost extends HostVM {
                 new PartialEscapePhase(false, false, CanonicalizerPhase.create(), null, options).apply(graph, getProviders(method.getMethodVariantKey()));
             }
         }
+        if (shouldIntrinsifyStringFormat(method)) {
+            new StringFormatPhase(allowStringFormatFormatterFallback()).apply(graph, bb.getProviders(method));
+        }
+    }
+
+    protected boolean shouldIntrinsifyStringFormat(AnalysisMethod method) {
+        return method.isOriginalMethod() && StringFormatPhase.Options.IntrinsifyStringFormat.getValue();
+    }
+
+    protected boolean allowStringFormatFormatterFallback() {
+        return true;
     }
 
     @Override
@@ -1028,6 +1044,13 @@ public class SVMHost extends HostVM {
          * FastThreadLocalBytes.getSizeSupplier
          */
         closedFields.add(lookupOriginalDeclaredField(VMThreadLocalInfo.class, "sizeSupplier"));
+        /*
+         * These fields need to fold to constants when compiling the base layer. Including them as
+         * shared-layer root fields would mark them as accessed, which prevents constant folding.
+         */
+        closedFields.add(lookupOriginalDeclaredField(VMThreadLocalSupport.class, "vmThreadSize"));
+        closedFields.add(lookupOriginalDeclaredField(VMThreadLocalSupport.class, "vmThreadReferenceMapEncoding"));
+        closedFields.add(lookupOriginalDeclaredField(VMThreadLocalSupport.class, "vmThreadReferenceMapIndex"));
         /* This field cannot be written to (see documentation) */
         closedFields.add(lookupOriginalDeclaredField(Counter.Group.class, "enabled"));
         /* This field can contain a reference to a Thread, which is not allowed in the heap */

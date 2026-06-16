@@ -607,7 +607,9 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
                 boxComponentOutputs(graph, context, component, expanded, vectorArch);
                 /* Expand, starting from sinks and recursing upwards through inputs. */
                 for (VectorAPISinkNode sink : component.sinks) {
-                    expandRecursivelyUpwards(graph, context, expanded, component.simdStamps, sink, vectorArch);
+                    if (sink.isAlive()) {
+                        expandRecursivelyUpwards(graph, context, expanded, component.simdStamps, sink, vectorArch);
+                    }
                 }
                 /*
                  * Normally, expanding upwards from sinks should take care of all nodes in the
@@ -616,7 +618,7 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
                  * handled as well.
                  */
                 for (ValueNode node : component.simdStamps.getKeys()) {
-                    if (!expanded.containsKey(node)) {
+                    if (node.isAlive() && !expanded.containsKey(node)) {
                         expandRecursivelyUpwards(graph, context, expanded, component.simdStamps, node, vectorArch);
                     }
                 }
@@ -667,6 +669,9 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
     private static void boxComponentOutputs(StructuredGraph graph, CoreProviders providers, ConnectedComponent component, NodeMap<ValueNode> expanded, VectorArchitecture vectorArch) {
         GraalError.guarantee(component.canExpand, "should only place box nodes once we know the component can expand");
         for (ValueNode valueToBox : component.boxes) {
+            if (!valueToBox.isAlive()) {
+                continue;
+            }
             expandRecursivelyUpwards(graph, providers, expanded, component.simdStamps, valueToBox, vectorArch);
             ValueNode expandedDef = expanded.get(valueToBox);
             GraalError.guarantee(expandedDef != null, "must be expanded %s", valueToBox);
@@ -705,6 +710,8 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
                         useCloned = graph.addOrUniqueWithInputs(useCloned);
                         fixedSuccessor.replaceAllInputs(use, useCloned);
                     }
+                    GraalError.guarantee(use.hasNoUsages(), "all users of the original call target must have been replaced: %s", use);
+                    use.safeDelete();
                 } else if (use instanceof ValuePhiNode phi) {
                     for (int i = 0; i < phi.valueCount(); i++) {
                         ValueNode phiValue = phi.valueAt(i);
@@ -1009,6 +1016,8 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
      * usages outside the component (scalar usages, states) are replaced here.
      */
     private static void replaceComponentNodes(StructuredGraph graph, HighTierContext context, ConnectedComponent component, NodeMap<ValueNode> expanded, VectorArchitecture vectorArch) {
+        replaceComponentFrameStateUsages(graph, context, component, expanded, vectorArch);
+
         for (ValueNode node : component.simdStamps.getKeys()) {
             if (!node.isAlive()) {
                 // As we kill CFGs while replacing each element of the component, it may be the case
@@ -1025,14 +1034,58 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
             }
 
             /*
-             * Fix up frame state usages. These may need to materialize a SIMD value as a Vector API
-             * object, so we need to build a corresponding virtual object.
+             * Clear out all other usages because we will replace nodes with SIMD versions that have
+             * different stamps. The usages themselves will be deleted since they are part of the
+             * same component, and all nodes in the component are replaced.
              */
+            node.replaceAtUsages(null, usage -> component.simdStamps.containsKey((ValueNode) usage));
+            GraalError.guarantee(node.hasNoUsages(), "unexpected remaining usage %s of expanded Vector API node %s", node.usages().first(), node);
+            if (node instanceof FixedWithNextNode fixedNode) {
+                if (replacement instanceof FixedWithNextNode fixedReplacement && fixedReplacement.next() != null) {
+                    /*
+                     * The replacement is already linked into the control flow. This happens for
+                     * unboxing operations, which expand to multiple fixed nodes that we add to the
+                     * control flow during unboxing.
+                     */
+                    graph.removeFixed(fixedNode);
+                } else {
+                    graph.replaceFixed(fixedNode, replacement);
+                }
+            } else if (node instanceof MacroWithExceptionNode macroWithExceptionNode) {
+                AbstractBeginNode exceptionEdge = macroWithExceptionNode.exceptionEdge();
+                if (replacement instanceof FixedWithNextNode fixedReplacement && fixedReplacement.next() != null) {
+                    graph.removeSplit(macroWithExceptionNode, macroWithExceptionNode.getPrimarySuccessor());
+                } else {
+                    graph.replaceSplit(macroWithExceptionNode, replacement, macroWithExceptionNode.getPrimarySuccessor());
+                }
+                GraphUtil.killCFG(exceptionEdge);
+            }
+        }
+        graph.getDebug().dump(DebugContext.DETAILED_LEVEL, graph, "after adding duplicates for %s", component);
+    }
+
+    /**
+     * Fix up frame state usages before the component's fixed nodes are destructively replaced.
+     * Replacing fixed nodes can kill CFGs, including replacement phis needed to materialize values
+     * in still-unprocessed frame states.
+     */
+    private static void replaceComponentFrameStateUsages(StructuredGraph graph, HighTierContext context, ConnectedComponent component, NodeMap<ValueNode> expanded,
+                    VectorArchitecture vectorArch) {
+        for (ValueNode node : component.simdStamps.getKeys()) {
+            if (!node.isAlive()) {
+                continue;
+            }
             if (node.usages().filter(u -> u instanceof FrameState || u instanceof VirtualObjectState).isNotEmpty()) {
+                ValueNode replacement = expanded.get(node);
+                GraalError.guarantee(replacement != null, "node was not expanded: %s", node);
+                if (node instanceof VectorAPISinkNode && replacement.stamp(NodeView.DEFAULT) instanceof PrimitiveStamp) {
+                    node.replaceAtUsages(replacement, usage -> usage instanceof FrameState || usage instanceof VirtualObjectState);
+                    continue;
+                }
                 ResolvedJavaType type = StampTool.typeOrNull(node);
                 GraalError.guarantee(type != null, "could not resolve type for %s (%s)", node, node.stamp(NodeView.DEFAULT));
                 VectorAPIType vectorType = VectorAPIType.ofType(type, context);
-                GraalError.guarantee(type != null, "could not find Vector API type for %s (%s)", node, node.stamp(NodeView.DEFAULT));
+                GraalError.guarantee(vectorType != null, "could not find Vector API type for %s (%s)", node, node.stamp(NodeView.DEFAULT));
                 VirtualInstanceNode virtualInstance = graph.add(new VirtualInstanceNode(type, true));
                 ValueNode replacementValue = replacement;
                 if (vectorType.isMask) {
@@ -1055,37 +1108,7 @@ public class VectorAPIExpansionPhase extends PostRunCanonicalizationPhase<HighTi
                 }
                 node.replaceAtUsages(virtualInstance, usage -> usage != virtualState && (usage instanceof FrameState || usage instanceof VirtualObjectState));
             }
-
-            /*
-             * Clear out all other usages because we will replace nodes with SIMD versions that have
-             * different stamps. The usages themselves will be deleted since they are part of the
-             * same component, and all nodes in the component are replaced.
-             */
-            node.replaceAtUsages(null, usage -> component.simdStamps.containsKey((ValueNode) usage));
-            if (node instanceof FixedWithNextNode fixedNode) {
-                if (replacement instanceof FixedWithNextNode fixedReplacement && fixedReplacement.next() != null) {
-                    /*
-                     * The replacement is already linked into the control flow. This happens for
-                     * unboxing operations, which expand to multiple fixed nodes that we add to the
-                     * control flow during unboxing.
-                     */
-                    fixedNode.replaceAtUsages(replacement);
-                    graph.removeFixed(fixedNode);
-                } else {
-                    graph.replaceFixed(fixedNode, replacement);
-                }
-            } else if (node instanceof MacroWithExceptionNode macroWithExceptionNode) {
-                AbstractBeginNode exceptionEdge = macroWithExceptionNode.exceptionEdge();
-                if (replacement instanceof FixedWithNextNode fixedReplacement && fixedReplacement.next() != null) {
-                    macroWithExceptionNode.replaceAtUsages(replacement);
-                    graph.removeSplit(macroWithExceptionNode, macroWithExceptionNode.getPrimarySuccessor());
-                } else {
-                    graph.replaceSplit(macroWithExceptionNode, replacement, macroWithExceptionNode.getPrimarySuccessor());
-                }
-                GraphUtil.killCFG(exceptionEdge);
-            }
         }
-        graph.getDebug().dump(DebugContext.DETAILED_LEVEL, graph, "after adding duplicates for %s", component);
     }
 
     /*

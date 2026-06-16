@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -86,6 +86,9 @@ public final class AlignedHeapChunk {
         @RawField
         int getObjectPinCount();
 
+        @RawField
+        void setObjectPinCount(int value);
+
         @RawFieldAddress
         Pointer addressOfObjectPinCount();
 
@@ -101,12 +104,13 @@ public final class AlignedHeapChunk {
         assert chunk.isNonNull();
         assert chunkSize.equal(HeapParameters.getAlignedHeapChunkSize()) : "expecting all aligned chunks to be the same size";
         HeapChunk.initialize(chunk, AlignedHeapChunk.getObjectsStart(chunk), chunkSize);
+        chunk.setObjectPinCount(0);
         chunk.setSweep(false);
     }
 
     public static void reset(AlignedHeader chunk) {
         long alignedChunkSize = SerialAndEpsilonGCOptions.AlignedHeapChunkSize.getValue();
-        assert HeapChunk.getEndOffset(chunk).rawValue() == alignedChunkSize;
+        assert HeapChunk.getSize(chunk).rawValue() == alignedChunkSize;
         initialize(chunk, Word.unsigned(alignedChunkSize));
     }
 

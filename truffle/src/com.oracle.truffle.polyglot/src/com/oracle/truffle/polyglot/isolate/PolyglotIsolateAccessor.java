@@ -58,7 +58,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 
 final class PolyglotIsolateAccessor extends Accessor {
 
@@ -73,14 +75,52 @@ final class PolyglotIsolateAccessor extends Accessor {
 
     static final class PolyglotIsolateSupportImpl extends PolyglotIsolateSupport {
 
+        private static final boolean ISOLATE_SUPPORTED = initializeSupported();
+
+        private static boolean initializeSupported() {
+            try {
+                Class.forName("org.graalvm.nativebridge.AbstractIsolate", false, PolyglotIsolateAccessor.class.getClassLoader());
+                return true;
+            } catch (ClassNotFoundException e) {
+                return false;
+            }
+        }
+
+        @Override
+        public boolean isSupported() {
+            return ISOLATE_SUPPORTED;
+        }
+
         @Override
         public boolean isIsolateHost() {
+            if (!ISOLATE_SUPPORTED) {
+                return false;
+            }
             return !ImageInfo.inImageRuntimeCode() || (ImageSingletons.contains(PolyglotIsolateHostFeatureEnabled.class) && PolyglotIsolateGuestSupport.isHost());
         }
 
         @Override
         public boolean isIsolateGuest() {
+            if (!ISOLATE_SUPPORTED) {
+                return false;
+            }
             return PolyglotIsolateGuestSupport.isGuest();
+        }
+
+        @Override
+        public boolean hasIsolateLibraryForLanguages(Set<String> languageIds) {
+            if (!ISOLATE_SUPPORTED) {
+                return false;
+            }
+            return PolyglotIsolateHostSupport.hasIsolateLibraryForLanguages(languageIds);
+        }
+
+        @Override
+        public Collection<Set<String>> getAvailableIsolatedLanguages() {
+            if (!ISOLATE_SUPPORTED) {
+                return Set.of();
+            }
+            return PolyglotIsolateHostSupport.getAvailableIsolatedLanguages();
         }
 
         @Override
@@ -88,6 +128,7 @@ final class PolyglotIsolateAccessor extends Accessor {
                         OutputStream err, InputStream in, Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
                         boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, boolean registerInActiveEngines, boolean externalProcess, long stackHeadroom,
                         String isolateLibrary, String isolateLauncher) {
+            checkIsolateSupported();
             return PolyglotIsolateHostSupport.buildIsolatedEngine(polyglot, localEngine, isolateLanguages, permittedLanguages, sandboxPolicy, out, err, in,
                             options, systemPropertiesOptions, useSystemProperties, allowExperimentalOptions, boundEngine, messageInterceptor, registerInActiveEngines,
                             externalProcess, stackHeadroom, isolateLibrary, isolateLauncher);
@@ -95,21 +136,25 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public ThreadScope createThreadScope(AbstractPolyglotImpl polyglot) {
+            checkIsolateSupported();
             return PolyglotIsolateGuestSupport.createThreadScope(polyglot);
         }
 
         @Override
         public boolean isInCurrentEngineHostCallback(Object engine) {
+            checkIsolateSupported();
             return PolyglotIsolateGuestSupport.lazy.polyglotHostServices.isInCurrentEngineHostCallback(engine);
         }
 
         @Override
         public boolean isDefaultProcessHandler(ProcessHandler processHandler) {
+            checkIsolateSupported();
             return PolyglotIsolateGuestSupport.lazy.polyglotHostServices.isDefaultProcessHandler(processHandler);
         }
 
         @Override
         public boolean isInternalFileSystem(FileSystem fileSystem) {
+            checkIsolateSupported();
             if (fileSystem instanceof ForeignFileSystem fs) {
                 // In polyglot isolate using host file system, ask host.
                 return PolyglotIsolateGuestSupport.lazy.polyglotHostServices.isInternalFileSystem(fs);
@@ -119,6 +164,7 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public <T extends Throwable> T mergeHostStackTrace(Throwable forException, T exception) {
+            checkIsolateSupported();
             Throwable hostStackTrace;
             Throwable isolateStackTrace;
             boolean originatedInHost;
@@ -140,6 +186,7 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public Object getEmbedderExceptionStackTrace(Object engine, Throwable exception, boolean fromHost) {
+            checkIsolateSupported();
             if (exception instanceof NativeTruffleException nativeTruffleException) {
                 // Delegate to isolate to get the exception stack trace
                 ForeignContext foreignContext = nativeTruffleException.reference.context;
@@ -152,6 +199,7 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public Object getIsolate(Object engine) {
+            checkIsolateSupported();
             Object receiver = PolyglotIsolateHostSupport.getPolyglot().getAPIAccess().getEngineReceiver(engine);
             if (!(receiver instanceof ForeignEngine)) {
                 throw new IllegalStateException("Not an isolated engine.");
@@ -161,12 +209,14 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public void invokeCleaners() {
+            checkIsolateSupported();
             CleanableWeakReference.clean();
             ForeignObjectCleaner.processPendingCleaners();
         }
 
         @Override
         public void triggerIsolateGC(Object engine) {
+            checkIsolateSupported();
             Object receiver = PolyglotIsolateHostSupport.getPolyglot().getAPIAccess().getEngineReceiver(engine);
             if (!(receiver instanceof ForeignEngine)) {
                 throw new IllegalStateException("Not an isolated engine.");
@@ -176,6 +226,7 @@ final class PolyglotIsolateAccessor extends Accessor {
 
         @Override
         public Path dumpIsolateHeap(Object engine, Path folder) throws IOException {
+            checkIsolateSupported();
             Object receiver = PolyglotIsolateHostSupport.getPolyglot().getAPIAccess().getEngineReceiver(engine);
             if (!(receiver instanceof ForeignEngine foreignEngine)) {
                 throw new IllegalStateException("Not an isolated engine.");
@@ -185,8 +236,29 @@ final class PolyglotIsolateAccessor extends Accessor {
         }
 
         private void triggerIsolateGCImpl(ForeignEngine foreignEngine) {
+            checkIsolateSupported();
             invokeCleaners();
             foreignEngine.getPolyglotIsolateServices().triggerGC();
+        }
+
+        @Override
+        public long getHostStackHeadRoom(Object engine) {
+            checkIsolateSupported();
+            Object receiver = PolyglotIsolateHostSupport.getPolyglot().getAPIAccess().getEngineReceiver(engine);
+            if (!(receiver instanceof ForeignEngine foreignEngine)) {
+                throw new IllegalStateException("Not an isolated engine.");
+            }
+            return foreignEngine.getHostStackHeadRoom();
+        }
+
+        static boolean isIsolateSupported() {
+            return ISOLATE_SUPPORTED;
+        }
+
+        private static void checkIsolateSupported() {
+            if (!ISOLATE_SUPPORTED) {
+                throw new IllegalStateException("Polyglot isolate support is unavailable because org.graalvm.sdk:nativebridge is not in the dependency graph.");
+            }
         }
     }
 }

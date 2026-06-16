@@ -36,6 +36,7 @@ import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
+import com.oracle.svm.core.util.AbstractImageHeapList;
 import com.oracle.svm.core.util.DuplicatedInNativeCode;
 import com.oracle.svm.core.util.ImageHeapList;
 import com.oracle.svm.shared.Uninterruptible;
@@ -89,7 +90,7 @@ public class GCCause {
         return getGCCauses().get(causeId);
     }
 
-    public static List<GCCause> getGCCauses() {
+    public static AbstractImageHeapList<GCCause> getGCCauses() {
         return ImageSingletons.lookup(GCCauseSupport.class).gcCauses;
     }
 
@@ -102,7 +103,7 @@ public class GCCause {
 @AutomaticallyRegisteredImageSingleton
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
 class GCCauseSupport {
-    final List<GCCause> gcCauses = ImageHeapList.create(GCCause.class, null);
+    final AbstractImageHeapList<GCCause> gcCauses = ImageHeapList.create(GCCause.class, null);
 
     @Platforms(Platform.HOSTED_ONLY.class)
     Object collectGCCauses(Object obj) {
@@ -135,6 +136,11 @@ class GCCauseFeature implements InternalFeature {
      * Here we track which {@link GCCause}s were installed in the initial layer to detect issues.
      */
     List<String> registeredGCCauses;
+
+    @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(GCCauseFeature.class, this);
+    }
 
     @Override
     public void duringSetup(DuringSetupAccess access) {

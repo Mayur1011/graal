@@ -44,6 +44,7 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import com.oracle.svm.core.image.ImageHeapLayoutInfo;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.dynamicaccess.AccessCondition;
@@ -82,6 +83,7 @@ import com.oracle.svm.core.meta.SharedField;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.guest.staging.layered.LayeredFieldValueTransformer;
 import com.oracle.svm.hosted.ameta.FieldValueInterceptionSupport;
 import com.oracle.svm.hosted.analysis.Inflation;
 import com.oracle.svm.hosted.bootstrap.BootstrapMethodConfiguration;
@@ -162,10 +164,10 @@ public class FeatureImpl {
         }
     }
 
-    public static class IsInConfigurationAccessImpl extends FeatureAccessImpl implements Feature.IsInConfigurationAccess {
+    abstract static class RegistrationAccessBase extends FeatureAccessImpl {
         private final MetaAccessProvider metaAccess;
 
-        IsInConfigurationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, DebugContext debugContext) {
+        RegistrationAccessBase(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.metaAccess = metaAccess;
         }
@@ -185,21 +187,28 @@ public class FeatureImpl {
         }
     }
 
-    public static class AfterRegistrationAccessImpl extends FeatureAccessImpl implements Feature.AfterRegistrationAccess {
-        private final MetaAccessProvider metaAccess;
+    public static class IsInConfigurationAccessImpl extends RegistrationAccessBase implements Feature.IsInConfigurationAccess {
+
+        IsInConfigurationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, DebugContext debugContext) {
+            super(featureHandler, imageClassLoader, metaAccess, debugContext);
+        }
+    }
+
+    public static class OnRegistrationAccessImpl extends RegistrationAccessBase implements Feature.OnRegistrationAccess {
+
+        OnRegistrationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess, DebugContext debugContext) {
+            super(featureHandler, imageClassLoader, metaAccess, debugContext);
+        }
+    }
+
+    public static class AfterRegistrationAccessImpl extends RegistrationAccessBase implements Feature.AfterRegistrationAccess {
         private MainEntryPoint mainEntryPoint;
 
         public AfterRegistrationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, MetaAccessProvider metaAccess,
                         MainEntryPoint mainEntryPoint,
                         DebugContext debugContext) {
-            super(featureHandler, imageClassLoader, debugContext);
-            this.metaAccess = metaAccess;
+            super(featureHandler, imageClassLoader, metaAccess, debugContext);
             this.mainEntryPoint = mainEntryPoint;
-        }
-
-        @Override
-        public MetaAccessProvider getMetaAccess() {
-            return metaAccess;
         }
 
         public void setMainEntryPoint(MainEntryPoint mainEntryPoint) {
@@ -228,15 +237,6 @@ public class FeatureImpl {
         @Override
         public ForeignAccess getForeignAccess() {
             return ForeignAccessImpl.singleton();
-        }
-
-        @Override
-        public ResolvedJavaType findTypeByName(String className) {
-            Class<?> clazz = findClassByName(className);
-            if (clazz == null) {
-                return null;
-            }
-            return getMetaAccess().lookupJavaType(clazz);
         }
     }
 
@@ -682,6 +682,20 @@ public class FeatureImpl {
         }
 
         /**
+         * Registers a {@link LayeredFieldValueTransformer} for a field whose value may be carried
+         * forward from an initial layer and updated by an extension layer. Unlike
+         * {@link #registerFieldValueTransformer(Field, FieldValueTransformer)}, the transformer is
+         * represented as an image-layer-aware JVMCI transformer so that updatable prior-layer field
+         * values can be tracked and patched when a later layer supplies a replacement value.
+         *
+         * @param field the field whose value should be transformed
+         * @param transformer the layered transformer instance to apply to the field
+         */
+        public void registerLayeredFieldValueTransformer(Field field, LayeredFieldValueTransformer<?> transformer) {
+            FieldValueInterceptionSupport.singleton().registerLayeredFieldValueTransformer(getMetaAccess().lookupJavaField(field), transformer);
+        }
+
+        /**
          * Registers a method as having an analysis-opaque return value. This designation limits the
          * type-flow analysis performed on the method's return value.
          */
@@ -933,11 +947,14 @@ public class FeatureImpl {
     public static class AfterHeapLayoutAccessImpl extends HostedFeatureAccessImpl implements Feature.AfterHeapLayoutAccess {
         protected final HostedMetaAccess hMetaAccess;
         protected final NativeImageHeap heap;
+        protected final ImageHeapLayoutInfo heapLayout;
 
-        public AfterHeapLayoutAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, NativeImageHeap heap, HostedMetaAccess hMetaAccess, DebugContext debugContext) {
+        public AfterHeapLayoutAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, NativeImageHeap heap, ImageHeapLayoutInfo heapLayout, HostedMetaAccess hMetaAccess,
+                        DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.heap = heap;
             this.hMetaAccess = hMetaAccess;
+            this.heapLayout = heapLayout;
         }
 
         @Override
@@ -947,6 +964,10 @@ public class FeatureImpl {
 
         public NativeImageHeap getHeap() {
             return heap;
+        }
+
+        public ImageHeapLayoutInfo getHeapLayout() {
+            return heapLayout;
         }
     }
 
@@ -1017,13 +1038,15 @@ public class FeatureImpl {
         protected final AbstractImage abstractImage;
         protected final RuntimeConfiguration runtimeConfiguration;
         private final HostedMetaAccess hMetaAccess;
+        protected final ImageHeapLayoutInfo heapLayout;
 
         AfterAbstractImageCreationAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedMetaAccess hMetaAccess, DebugContext debugContext, AbstractImage abstractImage,
-                        RuntimeConfiguration runtimeConfiguration) {
+                        ImageHeapLayoutInfo heapLayout, RuntimeConfiguration runtimeConfiguration) {
             super(featureHandler, imageClassLoader, debugContext);
             this.abstractImage = abstractImage;
             this.runtimeConfiguration = runtimeConfiguration;
             this.hMetaAccess = hMetaAccess;
+            this.heapLayout = heapLayout;
         }
 
         public AbstractImage getImage() {
@@ -1033,6 +1056,10 @@ public class FeatureImpl {
         @Override
         public HostedMetaAccess getMetaAccess() {
             return hMetaAccess;
+        }
+
+        public ImageHeapLayoutInfo getHeapLayout() {
+            return heapLayout;
         }
 
         public RuntimeConfiguration getRuntimeConfiguration() {
@@ -1045,16 +1072,16 @@ public class FeatureImpl {
         protected final LinkerInvocation linkerInvocation;
         protected final Path tempDirectory;
         protected final NativeImageKind imageKind;
-        private final HostedMetaAccess hMetaAcces;
+        private final HostedMetaAccess hMetaAccess;
 
         AfterImageWriteAccessImpl(FeatureHandler featureHandler, ImageClassLoader imageClassLoader, HostedUniverse hUniverse, LinkerInvocation linkerInvocation, Path tempDirectory,
-                        NativeImageKind imageKind, HostedMetaAccess hMetaAcces, DebugContext debugContext) {
+                        NativeImageKind imageKind, HostedMetaAccess hMetaAccess, DebugContext debugContext) {
             super(featureHandler, imageClassLoader, debugContext);
             this.hUniverse = hUniverse;
             this.linkerInvocation = linkerInvocation;
             this.tempDirectory = tempDirectory;
             this.imageKind = imageKind;
-            this.hMetaAcces = hMetaAcces;
+            this.hMetaAccess = hMetaAccess;
         }
 
         public HostedUniverse getUniverse() {
@@ -1084,7 +1111,7 @@ public class FeatureImpl {
 
         @Override
         public HostedMetaAccess getMetaAccess() {
-            return hMetaAcces;
+            return hMetaAccess;
         }
     }
 }

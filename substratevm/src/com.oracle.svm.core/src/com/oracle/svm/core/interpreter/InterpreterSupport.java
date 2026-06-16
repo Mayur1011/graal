@@ -36,7 +36,6 @@ import org.graalvm.word.UnsignedWord;
 
 import com.oracle.svm.core.BuildPhaseProvider;
 import com.oracle.svm.core.FrameAccess;
-import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.code.CodeInfoQueryResult;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
 import com.oracle.svm.core.code.FrameSourceInfo;
@@ -48,10 +47,10 @@ import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.UnknownPrimitiveField;
 import com.oracle.svm.core.log.Log;
-import com.oracle.svm.shared.AlwaysInline;
 import com.oracle.svm.shared.Uninterruptible;
 
 import jdk.graal.compiler.api.replacements.Fold;
+import jdk.vm.ci.code.BytecodeFrame;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
@@ -63,6 +62,10 @@ public abstract class InterpreterSupport {
     private CFunctionPointer leaveStubPointer;
     @UnknownPrimitiveField(availability = BuildPhaseProvider.AfterCompilation.class) //
     private int leaveStubLength;
+    @UnknownPrimitiveField(availability = BuildPhaseProvider.AfterCompilation.class) //
+    private CFunctionPointer leaveJNIStubPointer;
+    @UnknownPrimitiveField(availability = BuildPhaseProvider.AfterCompilation.class) //
+    private int leaveJNIStubLength;
 
     @Fold
     public static boolean isEnabled() {
@@ -80,6 +83,82 @@ public abstract class InterpreterSupport {
     public abstract boolean isInterpreterRoot(FrameInfoQueryResult frameInfo);
 
     /**
+     * Captured values from one decoded interpreter root frame. The {@link FrameInfoQueryResult}
+     * identity scopes the captured values to the frame that produced them, so callers can separate
+     * SP-relative reads from later source-info construction without reusing data for a different
+     * physical frame.
+     */
+    public static final class InterpretedFrameData {
+        private FrameInfoQueryResult frameInfo;
+        private ResolvedJavaMethod interpretedMethod;
+        private Object interpreterFrame;
+        private int bci;
+        private boolean intrinsic;
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public void clear() {
+            frameInfo = null;
+            interpretedMethod = null;
+            interpreterFrame = null;
+            bci = BytecodeFrame.UNKNOWN_BCI;
+            intrinsic = false;
+        }
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public void setInterpreted(FrameInfoQueryResult capturedFrameInfo, ResolvedJavaMethod method, int capturedBCI, Object frame) {
+            assert !hasData();
+
+            frameInfo = capturedFrameInfo;
+            interpretedMethod = method;
+            bci = capturedBCI;
+            interpreterFrame = frame;
+            intrinsic = false;
+        }
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public void setIntrinsic(FrameInfoQueryResult capturedFrameInfo, ResolvedJavaMethod method, Object frame) {
+            assert !hasData();
+
+            frameInfo = capturedFrameInfo;
+            interpretedMethod = method;
+            bci = BytecodeFrame.UNKNOWN_BCI;
+            interpreterFrame = frame;
+            intrinsic = true;
+        }
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public boolean isFor(FrameInfoQueryResult queryFrameInfo) {
+            assert queryFrameInfo != null;
+            return frameInfo == queryFrameInfo;
+        }
+
+        public ResolvedJavaMethod getInterpretedMethod() {
+            assert hasData() && interpretedMethod != null;
+            return interpretedMethod;
+        }
+
+        public Object getInterpreterFrame() {
+            assert hasData() && interpreterFrame != null;
+            return interpreterFrame;
+        }
+
+        public int getBCI() {
+            assert hasData();
+            return bci;
+        }
+
+        public boolean isIntrinsic() {
+            assert hasData();
+            return intrinsic;
+        }
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        private boolean hasData() {
+            return frameInfo != null;
+        }
+    }
+
+    /**
      * Transforms an interpreter (root) frame into a frame of the interpreted method. An error is
      * thrown if the passed frame is not an {@link #isInterpreterRoot interpreter root}.
      *
@@ -88,6 +167,27 @@ public abstract class InterpreterSupport {
      * @return a frame representing the interpreted method
      */
     public abstract FrameSourceInfo getInterpretedMethodFrameInfo(FrameInfoQueryResult frameInfo, Pointer sp);
+
+    /**
+     * Reads the SP-relative data needed by {@link #getInterpretedMethodFrameInfo(FrameInfoQueryResult, InterpretedFrameData)}
+     * while the caller guarantees that {@code sp} is stable.
+     */
+    @Uninterruptible(reason = "StoredContinuation must not move.", callerMustBe = true)
+    public abstract void captureInterpretedMethodFrameInfo(FrameInfoQueryResult frameInfo, Pointer sp, InterpretedFrameData data);
+
+    /**
+     * Transforms an interpreter root frame using data that was already captured from a stable stack
+     * pointer.
+     */
+    public abstract FrameSourceInfo getInterpretedMethodFrameInfo(FrameInfoQueryResult frameInfo, InterpretedFrameData data);
+
+    /**
+     * Returns synthetic source information only for runtime-compiled Ristretto frames whose
+     * metadata preserves the deopt method but omits the normal source-class and source-method
+     * fields. Returns {@code null} for frames that already carry encoded source fields and for
+     * non-Ristretto frames.
+     */
+    public abstract FrameSourceInfo getSyntheticMethodFrameInfo(FrameInfoQueryResult frameInfo);
 
     /**
      * Make a best-effort attempt at logging helpful information about the
@@ -116,11 +216,20 @@ public abstract class InterpreterSupport {
 
     public abstract PreparedSignature prepareSignature(Signature signature, boolean hasReceiver, ResolvedJavaType accessingClass);
 
+    public abstract PreparedSignature prepareJNISignature(Signature signature, boolean hasReceiver, ResolvedJavaType accessingClass);
+
     @Platforms(Platform.HOSTED_ONLY.class)
     public static void setLeaveStubPointer(CFunctionPointer leaveStubPointer, int length) {
         assert singleton().leaveStubPointer == null : "multiple leave stub methods registered";
         singleton().leaveStubPointer = leaveStubPointer;
         singleton().leaveStubLength = length;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static void setLeaveJNIStubPointer(CFunctionPointer leaveJNIStubPointer, int length) {
+        assert singleton().leaveJNIStubPointer == null : "multiple JNI leave stub methods registered";
+        singleton().leaveJNIStubPointer = leaveJNIStubPointer;
+        singleton().leaveJNIStubLength = length;
     }
 
     /**
@@ -131,8 +240,6 @@ public abstract class InterpreterSupport {
      * <pre>
      *     1. base address of outgoing stack args
      *     2. variable stack size
-     *     3. GC reference map
-     *     4. padding
      * </pre>
      */
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -142,32 +249,11 @@ public abstract class InterpreterSupport {
         return start.belowOrEqual((UnsignedWord) ip) && end.aboveOrEqual((UnsignedWord) ip);
     }
 
-    /**
-     * GC helper to visit stack slots of a leaveInterpreterStub frame. Frames of this stub require
-     * special handling, as they do not have a fixed frame map. The reference map of each frame is
-     * part of the frame itself.
-     */
-    @AlwaysInline("GC performance")
-    @Uninterruptible(reason = "Called by GC walker", mayBeInlined = true)
-    public static void walkInterpreterLeaveStubFrame(ObjectReferenceVisitor visitor, Pointer actualSP, Pointer sp) {
-        int wordSize = SubstrateTarget.getWordSize();
-        long gcReferenceMap = actualSP.readLong(2 * wordSize);
-
-        /* Visit object references passed on the stack */
-        int referenceIndex = 0;
-        while (gcReferenceMap != 0) {
-            int trail0 = Long.numberOfTrailingZeros(gcReferenceMap);
-            referenceIndex += trail0;
-            gcReferenceMap >>= trail0;
-
-            /* Constant offset due to "deopt slot" */
-            int baseOffset = wordSize;
-            Pointer objRef = sp.add(baseOffset + wordSize * referenceIndex);
-            callVisitor(visitor, objRef, 1);
-
-            referenceIndex++;
-            gcReferenceMap >>= 1;
-        }
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean isInInterpreterJNILeaveStub(CodePointer ip) {
+        Pointer start = (Pointer) singleton().leaveJNIStubPointer;
+        Pointer end = start.add(singleton().leaveJNIStubLength);
+        return start.belowOrEqual((UnsignedWord) ip) && end.aboveOrEqual((UnsignedWord) ip);
     }
 
     @Uninterruptible(reason = "Bridge between uninterruptible and potentially interruptible code.", mayBeInlined = true, calleeMustBe = false)

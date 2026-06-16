@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,7 +48,9 @@ import org.graalvm.collections.EconomicMap;
 import org.graalvm.wasm.BinaryParser;
 import org.graalvm.wasm.WasmCodeEntry;
 import org.graalvm.wasm.WasmContext;
+import org.graalvm.wasm.WasmContextOptions;
 import org.graalvm.wasm.WasmInstance;
+import org.graalvm.wasm.WasmLanguage;
 import org.graalvm.wasm.WasmModule;
 import org.graalvm.wasm.debugging.DebugLineSection;
 import org.graalvm.wasm.debugging.data.DebugContext;
@@ -58,7 +60,6 @@ import org.graalvm.wasm.memory.WasmMemory;
 import org.graalvm.wasm.memory.WasmMemoryLibrary;
 import org.graalvm.wasm.parser.ir.CodeEntry;
 
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.frame.MaterializedFrame;
@@ -129,6 +130,10 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
         return codeEntry.localCount();
     }
 
+    int stackBase() {
+        return codeEntry.stackBase();
+    }
+
     void execute(VirtualFrame frame, WasmInstance instance) {
         functionNode.execute(frame, instance);
     }
@@ -155,6 +160,11 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
         return tag == StandardTags.RootBodyTag.class || tag == StandardTags.RootTag.class;
     }
 
+    @TruffleBoundary
+    private WasmContext getContextOrNull() {
+        return ((WasmRootNode) getRootNode()).getContextOrNull();
+    }
+
     @Override
     @TruffleBoundary
     public SourceSection getSourceSection() {
@@ -164,7 +174,7 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
                 return debugFunction.getSourceSection();
             } else {
                 // fallback solution, if the source was not loaded by the root node
-                WasmContext context = WasmContext.get(this);
+                WasmContext context = getContextOrNull();
                 return debugFunction.createSourceSection(context == null ? null : context.environment());
             }
         }
@@ -175,7 +185,6 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
     @TruffleBoundary
     public InstrumentableNode materializeInstrumentableNodes(Set<Class<? extends Tag>> materializedTags) {
         if (this.instrumentation == null) {
-            WasmContext context = WasmContext.get(this);
             if (module.hasDebugInfo() && materializedTags.contains(StandardTags.StatementTag.class)) {
                 Lock lock = getLock();
                 lock.lock();
@@ -186,9 +195,12 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
                         if (debugFunction == null) {
                             return this;
                         }
+                        final WasmLanguage language = module.language();
+                        final WasmContextOptions contextOptions = language.contextOptions();
+                        final WasmContext context = getContextOrNull();
                         final SourceSection sourceSection;
-                        if (context.getContextOptions().debugTestMode()) {
-                            sourceSection = debugFunction.createSourceSection(context.environment());
+                        if (context == null || contextOptions.debugTestMode()) {
+                            sourceSection = debugFunction.createSourceSection(context == null ? null : context.environment());
                         } else {
                             sourceSection = debugFunction.loadSourceSection(context.environment());
                         }
@@ -202,7 +214,7 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
                         final int functionEndOffset = module.functionSourceCodeEndOffset(functionIndex);
                         final DebugLineSection debugLineSection = debugFunction.lineMap().getLineIndexMap(functionStartOffset, functionEndOffset);
                         final WasmInstrumentationSupportNode support = new WasmInstrumentationSupportNode(debugLineSection, sourceSection.getSource());
-                        final BinaryParser binaryParser = new BinaryParser(module, context, module.codeSection());
+                        final BinaryParser binaryParser = new BinaryParser(module, language, module.codeSection());
                         final var bytecodePair = binaryParser.createFunctionDebugBytecode(functionIndex, debugLineSection.offsetToLineIndexMap());
                         final CodeEntry bcInfo = bytecodePair.getLeft();
                         final byte[] bytecode = bytecodePair.getRight();
@@ -240,8 +252,7 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
         if (debugFunction.hasSourceSection()) {
             sourceSection = debugFunction.getSourceSection();
         } else {
-            CompilerDirectives.transferToInterpreter();
-            final WasmContext wasmContext = WasmContext.get(this);
+            final WasmContext wasmContext = getContextOrNull();
             sourceSection = debugFunction.createSourceSection(wasmContext == null ? null : wasmContext.environment());
         }
         return DebugScopeDisplayValue.fromDebugFunction(debugFunction, context, materializedFrame, this, sourceSection);
@@ -249,51 +260,51 @@ public class WasmInstrumentableFunctionNode extends Node implements Instrumentab
 
     @Override
     public boolean isValidStackIndex(MaterializedFrame frame, int index) {
-        return index >= 0 && localCount() + index < frame.getFrameDescriptor().getNumberOfSlots();
+        return index >= 0 && stackBase() + index < frame.getFrameDescriptor().getNumberOfSlots();
     }
 
     @Override
     @TruffleBoundary
     public int loadI32FromStack(MaterializedFrame frame, int index) {
-        return frame.getIntStatic(localCount() + index);
+        return frame.getIntStatic(stackBase() + index);
     }
 
     @Override
     public void storeI32IntoStack(MaterializedFrame frame, int index, int value) {
-        frame.setIntStatic(localCount() + index, value);
+        frame.setIntStatic(stackBase() + index, value);
     }
 
     @Override
     @TruffleBoundary
     public long loadI64FromStack(MaterializedFrame frame, int index) {
-        return frame.getLongStatic(localCount() + index);
+        return frame.getLongStatic(stackBase() + index);
     }
 
     @Override
     public void storeI64IntoStack(MaterializedFrame frame, int index, long value) {
-        frame.setLongStatic(localCount() + index, value);
+        frame.setLongStatic(stackBase() + index, value);
     }
 
     @Override
     @TruffleBoundary
     public float loadF32FromStack(MaterializedFrame frame, int index) {
-        return frame.getFloatStatic(localCount() + index);
+        return frame.getFloatStatic(stackBase() + index);
     }
 
     @Override
     public void storeF32IntoStack(MaterializedFrame frame, int index, float value) {
-        frame.setFloatStatic(localCount() + index, value);
+        frame.setFloatStatic(stackBase() + index, value);
     }
 
     @Override
     @TruffleBoundary
     public double loadF64FromStack(MaterializedFrame frame, int index) {
-        return frame.getDoubleStatic(localCount() + index);
+        return frame.getDoubleStatic(stackBase() + index);
     }
 
     @Override
     public void storeF64IntoStack(MaterializedFrame frame, int index, double value) {
-        frame.setDoubleStatic(localCount() + index, value);
+        frame.setDoubleStatic(stackBase() + index, value);
     }
 
     @Override

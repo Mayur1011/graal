@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -190,6 +190,17 @@ public class ValidationSuite extends WasmFileSuite {
                                         "size minimum must not be greater than maximum: 2 should be <= 1",
                                         "(memory $memory1 2 1)",
                                         Failure.Type.INVALID),
+                        binaryCase(
+                                        "Memory - 64-bit indexed without Memory64",
+                                        "64-bit indexed memory used without setting --wasm.Memory64",
+                                        // (memory i64 0)
+                                        "00 61 73 6D 01 00 00 00 " +
+                                                        "01 05 01 60 00 01 7F " + // type section
+                                                        "03 02 01 00 " + // function section
+                                                        "05 03 01 04 00 " + // memory section
+                                                        "07 09 01 05 5F 6D 61 69 6E 00 00 " + // export section
+                                                        "0A 06 01 04 00 41 01 0B", // code section
+                                        Failure.Type.MALFORMED),
 
                         // ### Global types
                         // Invalid value type
@@ -968,12 +979,15 @@ public class ValidationSuite extends WasmFileSuite {
                                         null),
 
                         binaryCase("Invalid instruction",
-                                        "Legacy exception handling is not supported (opcode: 0x06)",
+                                        "Legacy exception handling is not enabled (opcode: 0x06)",
 
                                         // (module
-                                        // (func
+                                        // (type (func))
+                                        // (func (type 0)
+                                        // try (type 0)
                                         // 0x06
                                         // drop
+                                        // end
                                         // )
                                         // )
                                         "00 61 73 6D 01 00 00 00 01 04 01 60 00 00 03 02 01 00 0A 07 01 05 00 06 00 1A 0B",

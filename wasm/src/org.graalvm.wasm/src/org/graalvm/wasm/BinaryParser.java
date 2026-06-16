@@ -103,6 +103,7 @@ import java.util.List;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.Pair;
 import org.graalvm.wasm.vector.Vector128;
+import org.graalvm.wasm.vector.Vector128Ops;
 import org.graalvm.wasm.vector.Vector128Shape;
 import org.graalvm.wasm.collection.IntArrayList;
 import org.graalvm.wasm.constants.Bytecode;
@@ -144,7 +145,9 @@ public class BinaryParser extends BinaryStreamParser {
     private static final int[] EMPTY_TYPES = new int[0];
 
     private final WasmModule module;
+    private final WasmLanguage language;
     private final WasmContext wasmContext;
+    private final WasmContextOptions contextOptions;
     private final int[] multiResult;
     private final long[] longMultiResult;
     private final boolean[] booleanMultiResult;
@@ -156,26 +159,45 @@ public class BinaryParser extends BinaryStreamParser {
     private final boolean threads;
     private final boolean simd;
     private final boolean exceptions;
+    private final boolean legacyExceptions;
+    private final boolean tagBasedExceptionHandling;
     private final boolean typedFunctionReferences;
     private final boolean gc;
+    private boolean usesCurrentExceptionHandling;
+    private boolean usesLegacyExceptionHandling;
 
     @TruffleBoundary
     public BinaryParser(WasmModule module, WasmContext context, byte[] data) {
+        this(module, context.language(), context, data);
+    }
+
+    @TruffleBoundary
+    public BinaryParser(WasmModule module, WasmLanguage language, byte[] data) {
+        this(module, language, null, data);
+    }
+
+    private BinaryParser(WasmModule module, WasmLanguage language, WasmContext context, byte[] data) {
         super(data);
         this.module = module;
+        this.language = language;
         this.wasmContext = context;
+        this.contextOptions = language.contextOptions();
         this.multiResult = new int[2];
         this.longMultiResult = new long[2];
         this.booleanMultiResult = new boolean[2];
-        this.multiValue = context.getContextOptions().supportMultiValue();
-        this.bulkMemoryAndRefTypes = context.getContextOptions().supportBulkMemoryAndRefTypes();
-        this.memory64 = context.getContextOptions().supportMemory64();
-        this.multiMemory = context.getContextOptions().supportMultiMemory();
-        this.threads = context.getContextOptions().supportThreads();
-        this.simd = context.getContextOptions().supportSIMD();
-        this.exceptions = context.getContextOptions().supportExceptions();
-        this.typedFunctionReferences = context.getContextOptions().supportTypedFunctionReferences();
-        this.gc = context.getContextOptions().supportGC();
+        this.multiValue = contextOptions.supportMultiValue();
+        this.bulkMemoryAndRefTypes = contextOptions.supportBulkMemoryAndRefTypes();
+        this.memory64 = contextOptions.supportMemory64();
+        this.multiMemory = contextOptions.supportMultiMemory();
+        this.threads = contextOptions.supportThreads();
+        this.simd = contextOptions.supportSIMD();
+        this.exceptions = contextOptions.supportExceptions();
+        this.legacyExceptions = contextOptions.supportLegacyExceptions();
+        this.tagBasedExceptionHandling = exceptions || legacyExceptions;
+        this.typedFunctionReferences = contextOptions.supportTypedFunctionReferences();
+        this.gc = contextOptions.supportGC();
+        this.usesCurrentExceptionHandling = false;
+        this.usesLegacyExceptionHandling = false;
     }
 
     @TruffleBoundary
@@ -468,7 +490,7 @@ public class BinaryParser extends BinaryStreamParser {
                 }
                 typeIndex++;
             }
-            module.finishRecursiveTypeGroup(recursiveTypeGroupStart, wasmContext.language());
+            module.finishRecursiveTypeGroup(recursiveTypeGroupStart, language);
             for (int subTypeIndex = typeIndex - subTypeCount; subTypeIndex < typeIndex; subTypeIndex++) {
                 if (module.hasSuperType(subTypeIndex)) {
                     int superTypeIndex = module.superType(subTypeIndex);
@@ -527,7 +549,7 @@ public class BinaryParser extends BinaryStreamParser {
                     break;
                 }
                 case ImportIdentifier.TAG: {
-                    if (!exceptions) {
+                    if (!tagBasedExceptionHandling) {
                         fail(Failure.MALFORMED_IMPORT_KIND, "Invalid import type identifier: 0x%02x", importType);
                     }
                     final byte attribute = readTagAttribute();
@@ -591,8 +613,8 @@ public class BinaryParser extends BinaryStreamParser {
             readMemoryLimits(longMultiResult, booleanMultiResult);
             final boolean is64Bit = booleanMultiResult[0];
             final boolean isShared = booleanMultiResult[1];
-            final boolean useUnsafeMemory = wasmContext.getContextOptions().useUnsafeMemory();
-            final boolean directByteBufferMemoryAccess = wasmContext.getContextOptions().directByteBufferMemoryAccess();
+            final boolean useUnsafeMemory = contextOptions.useUnsafeMemory();
+            final boolean directByteBufferMemoryAccess = contextOptions.directByteBufferMemoryAccess();
             module.symbolTable().allocateMemory(memoryIndex, longMultiResult[0], longMultiResult[1], is64Bit, isShared, multiMemory, useUnsafeMemory, directByteBufferMemoryAccess);
         }
     }
@@ -980,8 +1002,42 @@ public class BinaryParser extends BinaryStreamParser {
                     state.enterTryTable(tryTableParamTypes, tryTableResultTypes, handlers);
                     break;
                 }
+                case Instructions.TRY: {
+                    checkLegacyExceptionHandlingSupport(opcode);
+                    final int[] tryParamTypes;
+                    final int[] tryResultTypes;
+                    readBlockType(multiResult);
+                    switch (multiResult[1]) {
+                        case BLOCK_TYPE_VOID -> {
+                            tryParamTypes = WasmType.VOID_TYPE_ARRAY;
+                            tryResultTypes = WasmType.VOID_TYPE_ARRAY;
+                        }
+                        case BLOCK_TYPE_VALTYPE -> {
+                            tryParamTypes = WasmType.VOID_TYPE_ARRAY;
+                            tryResultTypes = encapsulateResultType(multiResult[0]);
+                        }
+                        case BLOCK_TYPE_TYPE_INDEX -> {
+                            int typeIndex = multiResult[0];
+                            checkFunctionTypeExists(typeIndex);
+                            tryParamTypes = extractBlockParamTypes(typeIndex);
+                            tryResultTypes = extractBlockResultTypes(typeIndex);
+                        }
+                        default -> throw WasmException.create(Failure.DISABLED_MULTI_VALUE);
+                    }
+                    state.popAll(tryParamTypes);
+                    state.enterLegacyTry(tryParamTypes, tryResultTypes);
+                    break;
+                }
+                case Instructions.CATCH: {
+                    checkLegacyExceptionHandlingSupport(opcode);
+                    final int tagIndex = readTagIndex();
+                    final int typeIndex = module.tagTypeIndex(tagIndex);
+                    final int[] tagParamTypes = module.functionTypeParamTypesAsArray(typeIndex);
+                    state.enterLegacyCatch(ExceptionHandlerType.LEGACY_CATCH, tagIndex, tagParamTypes, multiValue);
+                    break;
+                }
                 case Instructions.THROW: {
-                    checkExceptionHandlingSupport(opcode);
+                    checkTagSupport(opcode);
                     final int tagIndex = readTagIndex();
                     final int typeIndex = module.tagTypeIndex(tagIndex);
                     final int[] tagParamTypes = module.functionTypeParamTypesAsArray(typeIndex);
@@ -989,6 +1045,15 @@ public class BinaryParser extends BinaryStreamParser {
                     state.addMiscFlag();
                     state.addInstruction(Bytecode.THROW, tagIndex);
 
+                    state.setUnreachable();
+                    break;
+                }
+                case Instructions.RETHROW: {
+                    checkLegacyExceptionHandlingSupport(opcode);
+                    final int labelIndex = readTargetOffset();
+                    final int catchDepth = state.getLegacyRethrowDepth(labelIndex);
+                    state.addMiscFlag();
+                    state.addInstruction(Bytecode.RETHROW, catchDepth);
                     state.setUnreachable();
                     break;
                 }
@@ -1001,12 +1066,16 @@ public class BinaryParser extends BinaryStreamParser {
                     state.setUnreachable();
                     break;
                 }
-                case Instructions.TRY:
-                case Instructions.RETHROW:
-                case Instructions.CATCH:
-                case Instructions.DELEGATE:
                 case Instructions.CATCH_ALL: {
                     checkLegacyExceptionHandlingSupport(opcode);
+                    state.enterLegacyCatch(ExceptionHandlerType.LEGACY_CATCH_ALL, -1, WasmType.VOID_TYPE_ARRAY, multiValue);
+                    break;
+                }
+                case Instructions.DELEGATE: {
+                    checkLegacyExceptionHandlingSupport(opcode);
+                    final int delegateLabel = readTargetOffset();
+                    final int[] delegateResultTypes = state.legacyDelegate(delegateLabel, multiValue);
+                    state.pushAll(delegateResultTypes);
                     break;
                 }
                 case Instructions.LOCAL_GET: {
@@ -1304,23 +1373,24 @@ public class BinaryParser extends BinaryStreamParser {
             final int functionEndOffset = bytecode.location();
 
             bytecode.addCodeEntry(functionIndex, state.maxStackSize(), bytecodeEndOffset - bytecodeStartOffset, locals.length, resultTypes.length);
-            for (int local : locals) {
-                bytecode.addType(local);
-            }
             if (locals.length != 0) {
-                bytecode.addByte((byte) 0);
-            }
-            for (int result : resultTypes) {
-                bytecode.addType(result);
+                bytecode.add(locals.length);
+                for (int local : locals) {
+                    bytecode.addType(local);
+                }
             }
             if (resultTypes.length != 0) {
-                bytecode.addByte((byte) 0);
+                bytecode.add(resultTypes.length);
+                for (int result : resultTypes) {
+                    bytecode.addType(result);
+                }
             }
 
             // Do not override the code entry offset when rereading the function.
             module.setCodeEntryOffset(codeEntryIndex, functionEndOffset);
         }
-        return new CodeEntry(functionIndex, state.maxStackSize(), locals, resultTypes, callNodes, bytecodeStartOffset, bytecodeEndOffset, state.usesMemoryZero(), exceptionTableOffset);
+        return new CodeEntry(functionIndex, state.maxStackSize(), state.maxLegacyCatchDepth(), locals, resultTypes, callNodes, bytecodeStartOffset, bytecodeEndOffset,
+                        state.usesMemoryZero(), exceptionTableOffset);
     }
 
     private void readNumericInstructions(ParserState state, int opcode) {
@@ -1884,6 +1954,10 @@ public class BinaryParser extends BinaryStreamParser {
                     }
                     case Instructions.ARRAY_NEW_DEFAULT: {
                         int arrayTypeIdx = readArrayTypeIndex();
+                        if (!WasmType.hasDefaultValue(module.arrayTypeElemType(arrayTypeIdx))) {
+                            Assert.fail(Failure.TYPE_MISMATCH, "array.new_default: array type %d has non-defaultable element type %s", arrayTypeIdx,
+                                            WasmType.toString(module.arrayTypeElemType(arrayTypeIdx)));
+                        }
                         state.popChecked(I32_TYPE);
                         state.push(WasmType.withNullable(false, arrayTypeIdx));
                         state.addInstruction(Bytecode.ARRAY_NEW_DEFAULT, arrayTypeIdx);
@@ -1952,8 +2026,8 @@ public class BinaryParser extends BinaryStreamParser {
                     case Instructions.ARRAY_FILL: {
                         int arrayTypeIdx = readArrayTypeIndex();
                         Assert.assertTrue(module.arrayTypeMutability(arrayTypeIdx) == Mutability.MUTABLE, Failure.ARRAY_IS_IMMUTABLE);
-                        state.popChecked(WasmType.unpack(module.arrayTypeElemType(arrayTypeIdx)));
                         state.popChecked(I32_TYPE);
+                        state.popChecked(WasmType.unpack(module.arrayTypeElemType(arrayTypeIdx)));
                         state.popChecked(I32_TYPE);
                         state.popChecked(WasmType.withNullable(true, arrayTypeIdx));
                         state.addInstruction(Bytecode.ARRAY_FILL, arrayTypeIdx);
@@ -2063,6 +2137,9 @@ public class BinaryParser extends BinaryStreamParser {
                         state.push(I32_TYPE);
                         state.addInstruction(aggregateOpcode);
                         break;
+                    }
+                    default: {
+                        fail(Failure.UNSPECIFIED_MALFORMED, "Unknown opcode: 0xFB 0x%X", aggregateOpcode);
                     }
                 }
                 break;
@@ -2795,43 +2872,66 @@ public class BinaryParser extends BinaryStreamParser {
     }
 
     private void checkSaturatingFloatToIntSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportSaturatingFloatToInt(), "Saturating float-to-int conversion is not enabled (opcode: 0xFC 0x%02x)", opcode);
+        checkContextOption(contextOptions.supportSaturatingFloatToInt(), "Saturating float-to-int conversion is not enabled (opcode: 0xFC 0x%02x)", opcode);
     }
 
     private void checkSignExtensionOpsSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportSignExtensionOps(), "Sign-extension operators are not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(contextOptions.supportSignExtensionOps(), "Sign-extension operators are not enabled (opcode: 0x%02x)", opcode);
     }
 
     private void checkBulkMemoryAndRefTypesSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportBulkMemoryAndRefTypes(), "Bulk memory operations and reference types are not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(bulkMemoryAndRefTypes, "Bulk memory operations and reference types are not enabled (opcode: 0x%02x)", opcode);
     }
 
     private void checkThreadsSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportThreads(), "Threads and atomics are not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(threads, "Threads and atomics are not enabled (opcode: 0x%02x)", opcode);
     }
 
     private void checkSIMDSupport() {
-        checkContextOption(wasmContext.getContextOptions().supportSIMD(), "Vector instructions are not enabled (opcode: 0x%02x)", Instructions.VECTOR);
+        checkContextOption(simd, "Vector instructions are not enabled (opcode: 0x%02x)", Instructions.VECTOR);
+        if (wasmContext != null && Vector128Ops.usesFallbackImplementation()) {
+            wasmContext.warnAboutMissingVectorApi();
+        }
     }
 
     private void checkRelaxedSIMDSupport(int vectorOpcode) {
-        checkContextOption(wasmContext.getContextOptions().supportRelaxedSIMD(), "Relaxed vector instructions are not enabled (opcode: 0x%02x 0x%x)", Instructions.VECTOR, vectorOpcode);
+        checkContextOption(contextOptions.supportRelaxedSIMD(), "Relaxed vector instructions are not enabled (opcode: 0x%02x 0x%x)", Instructions.VECTOR, vectorOpcode);
     }
 
-    private static void checkLegacyExceptionHandlingSupport(int opcode) {
-        Assert.fail(Failure.UNSPECIFIED_MALFORMED, "Legacy exception handling is not supported (opcode: 0x%02x)", opcode);
+    private void checkLegacyExceptionHandlingSupport(int opcode) {
+        checkContextOption(legacyExceptions, "Legacy exception handling is not enabled (opcode: 0x%02x)", opcode);
+        noteLegacyExceptionHandlingUsage();
     }
 
     private void checkExceptionHandlingSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportExceptions(), "Exception handling is not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(exceptions, "Exception handling is not enabled (opcode: 0x%02x)", opcode);
+        noteCurrentExceptionHandlingUsage();
+    }
+
+    private void checkTagSupport(int opcode) {
+        checkContextOption(tagBasedExceptionHandling, "Exception tags are not enabled (opcode: 0x%02x)", opcode);
     }
 
     private void checkTypedFunctionReferencesSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportTypedFunctionReferences(), "Typed function references are not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(typedFunctionReferences, "Typed function references are not enabled (opcode: 0x%02x)", opcode);
     }
 
     private void checkGCSupport(int opcode) {
-        checkContextOption(wasmContext.getContextOptions().supportGC(), "Garbage collected types are not enabled (opcode: 0x%02x)", opcode);
+        checkContextOption(gc, "Garbage collected types are not enabled (opcode: 0x%02x)", opcode);
+    }
+
+    private void noteLegacyExceptionHandlingUsage() {
+        if (usesCurrentExceptionHandling) {
+            throw fail(Failure.UNSPECIFIED_INVALID, "module uses a mix of legacy and new exception handling instructions");
+        }
+        usesLegacyExceptionHandling = true;
+    }
+
+    private void noteCurrentExceptionHandlingUsage() {
+        if (usesLegacyExceptionHandling) {
+            throw fail(Failure.UNSPECIFIED_INVALID, "module uses a mix of legacy and new exception handling instructions");
+        }
+        usesCurrentExceptionHandling = true;
     }
 
     private void store(ParserState state, int type, int n, long[] result) {
@@ -3102,7 +3202,7 @@ public class BinaryParser extends BinaryStreamParser {
                 case Instructions.I32_ADD:
                 case Instructions.I32_SUB:
                 case Instructions.I32_MUL:
-                    if (!wasmContext.getContextOptions().supportExtendedConstExpressions()) {
+                    if (!contextOptions.supportExtendedConstExpressions()) {
                         fail(Failure.ILLEGAL_OPCODE, "Invalid instruction for constant expression: 0x%02X", opcode);
                     }
                     state.popChecked(I32_TYPE);
@@ -3123,7 +3223,7 @@ public class BinaryParser extends BinaryStreamParser {
                 case Instructions.I64_ADD:
                 case Instructions.I64_SUB:
                 case Instructions.I64_MUL:
-                    if (!wasmContext.getContextOptions().supportExtendedConstExpressions()) {
+                    if (!contextOptions.supportExtendedConstExpressions()) {
                         fail(Failure.ILLEGAL_OPCODE, "Invalid instruction for constant expression: 0x%02X", opcode);
                     }
                     state.popChecked(I64_TYPE);
@@ -3183,6 +3283,10 @@ public class BinaryParser extends BinaryStreamParser {
                         }
                         case Instructions.ARRAY_NEW_DEFAULT: {
                             int arrayTypeIdx = readArrayTypeIndex();
+                            if (!WasmType.hasDefaultValue(module.arrayTypeElemType(arrayTypeIdx))) {
+                                Assert.fail(Failure.TYPE_MISMATCH, "array.new_default: array type %d has non-defaultable element type %s", arrayTypeIdx,
+                                                WasmType.toString(module.arrayTypeElemType(arrayTypeIdx)));
+                            }
                             state.popChecked(I32_TYPE);
                             state.push(WasmType.withNullable(false, arrayTypeIdx));
                             state.addInstruction(Bytecode.ARRAY_NEW_DEFAULT, arrayTypeIdx);
@@ -3223,7 +3327,7 @@ public class BinaryParser extends BinaryStreamParser {
                             state.push(WasmType.withNullable(false, I31_HEAPTYPE));
                             state.addInstruction(Bytecode.REF_I31);
                             if (calculable) {
-                                stack.add((int) stack.removeLast() & ~(1 << 31));
+                                stack.add(WasmType.asSignedI31((int) stack.removeLast()));
                             }
                             break;
                         }
@@ -3417,7 +3521,7 @@ public class BinaryParser extends BinaryStreamParser {
                     break;
                 }
                 case ExportIdentifier.TAG: {
-                    if (!exceptions) {
+                    if (!tagBasedExceptionHandling) {
                         fail(Failure.UNSPECIFIED_MALFORMED, "Invalid export type identifier: 0x%02x", exportType);
                     }
                     final int index = readTagIndex();
@@ -3432,6 +3536,7 @@ public class BinaryParser extends BinaryStreamParser {
     }
 
     private void readTagSection() {
+        checkContextOption(tagBasedExceptionHandling, "Exception tags are not enabled.");
         final int tagCount = readLength();
         module.limits().checkTagCount(tagCount);
         final int startingTagIndex = module.symbolTable().tagCount();
@@ -3616,10 +3721,15 @@ public class BinaryParser extends BinaryStreamParser {
             }
             case EXNREF_TYPE -> {
                 Assert.assertTrue(exceptions, Failure.MALFORMED_VALUE_TYPE);
+                noteCurrentExceptionHandlingUsage();
                 yield type;
             }
             case NULLEXNREF_TYPE, NULLFUNCREF_TYPE, NULLEXTERNREF_TYPE, NULLREF_TYPE, ANYREF_TYPE, EQREF_TYPE, I31REF_TYPE, STRUCTREF_TYPE, ARRAYREF_TYPE -> {
                 Assert.assertTrue(gc, Failure.MALFORMED_VALUE_TYPE);
+                if (type == NULLEXNREF_TYPE) {
+                    Assert.assertTrue(exceptions, Failure.MALFORMED_VALUE_TYPE);
+                    noteCurrentExceptionHandlingUsage();
+                }
                 yield type;
             }
             case REF_NULL_TYPE_HEADER -> {
@@ -3676,11 +3786,16 @@ public class BinaryParser extends BinaryStreamParser {
             }
             case EXNREF_TYPE -> {
                 Assert.assertTrue(exceptions, Failure.MALFORMED_VALUE_TYPE);
+                noteCurrentExceptionHandlingUsage();
                 result[0] = type;
                 result[1] = BLOCK_TYPE_VALTYPE;
             }
             case NULLEXNREF_TYPE, NULLFUNCREF_TYPE, NULLEXTERNREF_TYPE, NULLREF_TYPE, ANYREF_TYPE, EQREF_TYPE, I31REF_TYPE, STRUCTREF_TYPE, ARRAYREF_TYPE -> {
                 Assert.assertTrue(gc, Failure.MALFORMED_VALUE_TYPE);
+                if (type == NULLEXNREF_TYPE) {
+                    Assert.assertTrue(exceptions, Failure.MALFORMED_VALUE_TYPE);
+                    noteCurrentExceptionHandlingUsage();
+                }
                 result[0] = type;
                 result[1] = BLOCK_TYPE_VALTYPE;
             }
@@ -3895,10 +4010,15 @@ public class BinaryParser extends BinaryStreamParser {
             case FUNCREF_TYPE, EXTERNREF_TYPE -> refType;
             case EXNREF_TYPE -> {
                 assertTrue(exceptions, Failure.MALFORMED_REFERENCE_TYPE);
+                noteCurrentExceptionHandlingUsage();
                 yield refType;
             }
             case NULLEXNREF_TYPE, NULLFUNCREF_TYPE, NULLEXTERNREF_TYPE, NULLREF_TYPE, ANYREF_TYPE, EQREF_TYPE, I31REF_TYPE, STRUCTREF_TYPE, ARRAYREF_TYPE -> {
                 assertTrue(gc, Failure.MALFORMED_REFERENCE_TYPE);
+                if (refType == NULLEXNREF_TYPE) {
+                    assertTrue(exceptions, Failure.MALFORMED_REFERENCE_TYPE);
+                    noteCurrentExceptionHandlingUsage();
+                }
                 yield refType;
             }
             case REF_NULL_TYPE_HEADER -> {
@@ -3919,10 +4039,15 @@ public class BinaryParser extends BinaryStreamParser {
             case FUNC_HEAPTYPE, EXTERN_HEAPTYPE -> heapType;
             case EXN_HEAPTYPE -> {
                 assertTrue(exceptions, Failure.MALFORMED_HEAP_TYPE);
+                noteCurrentExceptionHandlingUsage();
                 yield heapType;
             }
             case NOEXN_HEAPTYPE, NOFUNC_HEAPTYPE, NOEXTERN_HEAPTYPE, NONE_HEAPTYPE, ANY_HEAPTYPE, EQ_HEAPTYPE, I31_HEAPTYPE, STRUCT_HEAPTYPE, ARRAY_HEAPTYPE -> {
                 assertTrue(gc, Failure.MALFORMED_HEAP_TYPE);
+                if (heapType == NOEXN_HEAPTYPE) {
+                    assertTrue(exceptions, Failure.MALFORMED_HEAP_TYPE);
+                    noteCurrentExceptionHandlingUsage();
+                }
                 yield heapType;
             }
             default -> {
@@ -3942,6 +4067,7 @@ public class BinaryParser extends BinaryStreamParser {
         readLongLimits(longOut, boolOut, MAX_MEMORY_DECLARATION_SIZE, MAX_MEMORY_64_DECLARATION_SIZE);
         final boolean is64Bit = boolOut[0];
         if (is64Bit) {
+            assertTrue(memory64, "64-bit indexed memory used without setting --wasm.Memory64", Failure.MALFORMED_LIMITS_FLAGS);
             assertUnsignedLongLessOrEqual(longOut[0], MAX_MEMORY_64_DECLARATION_SIZE, Failure.MEMORY_64_SIZE_LIMIT_EXCEEDED);
             assertUnsignedLongLessOrEqual(longOut[1], MAX_MEMORY_64_DECLARATION_SIZE, Failure.MEMORY_64_SIZE_LIMIT_EXCEEDED);
             assertUnsignedLongLessOrEqual(longOut[0], longOut[1], Failure.LIMIT_MINIMUM_GREATER_THAN_MAXIMUM);

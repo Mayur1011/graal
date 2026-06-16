@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+
+import org.graalvm.word.Pointer;
+import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.configure.UnresolvedAccessCondition;
 import com.oracle.svm.configure.config.ForeignConfiguration.ConfigurationFunctionDescriptor;
@@ -212,5 +215,10 @@ public class SubstrateForeignUtil {
     @NeverInline("inlining cut off")
     static void throwHeapSegmentNotAllowedException(MemorySegment segment) {
         throw new IllegalArgumentException("Heap segment not allowed: " + segment);
+    }
+
+    @AlwaysInline("direct upcall stub performance")
+    public static Object objectFromAddress(long addr) {
+        return ((Pointer) Word.unsigned(addr)).toObject();
     }
 }

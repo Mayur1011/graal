@@ -28,6 +28,8 @@ import static jdk.graal.compiler.core.common.spi.ForeignCallDescriptor.CallSideE
 
 import java.io.IOException;
 import java.lang.constant.DirectMethodHandleDesc;
+import java.lang.constant.DirectMethodHandleDesc.Kind;
+import java.lang.constant.MethodHandleDesc;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.MemorySegment.Scope;
@@ -37,9 +39,11 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
@@ -69,6 +73,7 @@ import com.oracle.svm.core.graal.code.SubstrateBackendWithAssembler;
 import com.oracle.svm.core.headers.LibC;
 import com.oracle.svm.core.headers.WindowsAPIs;
 import com.oracle.svm.core.image.DisallowedImageHeapObjects.DisallowedObjectReporter;
+import com.oracle.svm.core.methodhandles.Target_java_lang_invoke_BoundMethodHandle;
 import com.oracle.svm.core.snippets.SnippetRuntime;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
 import com.oracle.svm.core.util.ImageHeapMap;
@@ -109,6 +114,12 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     private final EconomicSet<ResolvedJavaType> neverAccessesSharedArenaTypes = EconomicSet.create();
     private final EconomicSet<ResolvedJavaMethod> neverAccessesSharedArenaMethods = EconomicSet.create();
 
+    @Platforms(Platform.HOSTED_ONLY.class) //
+    private final Function<NativeEntryPointInfo, CFunctionPointer> ensureDowncallStubCreated;
+
+    @Platforms(Platform.HOSTED_ONLY.class) //
+    private final Function<MethodType, CFunctionPointer> ensureDowncallStubInvokerCreated;
+
     /**
      * A thread-safe stack of currently performed link requests (i.e. creating a downcall handle or
      * an upcall stub). This stack is used to generate a helpful error message if the link request
@@ -124,9 +135,13 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     private BiConsumer<Long, DirectMethodHandleDesc> usingSpecializedUpcallListener;
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public ForeignFunctionsRuntime(AbiUtils abiUtils) {
+    public ForeignFunctionsRuntime(AbiUtils abiUtils,
+                    Function<NativeEntryPointInfo, CFunctionPointer> ensureDowncallStubCreated,
+                    Function<MethodType, CFunctionPointer> ensureDowncallStubInvokerCreated) {
         this.abiUtils = abiUtils;
         this.trampolineTemplate = new TrampolineTemplate(new byte[abiUtils.trampolineSize()]);
+        this.ensureDowncallStubCreated = ensureDowncallStubCreated;
+        this.ensureDowncallStubInvokerCreated = ensureDowncallStubInvokerCreated;
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
@@ -232,12 +247,22 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
         return holder.functionPointer;
     }
 
-    CFunctionPointer getDowncallStubInvokerPointer(MethodType methodType) {
+    @Platforms(Platform.HOSTED_ONLY.class)
+    CFunctionPointer ensureDowncallStubCreated(NativeEntryPointInfo nep) {
+        return ensureDowncallStubCreated.apply(nep);
+    }
+
+    public CFunctionPointer getDowncallStubInvokerPointer(MethodType methodType) {
         FunctionPointerHolder holder = downcallStubInvokers.get(methodType);
         if (holder == null) {
             throw reportMissingDowncall(methodType);
         }
         return holder.functionPointer;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    CFunctionPointer ensureDowncallStubInvokerCreated(MethodType methodType) {
+        return ensureDowncallStubInvokerCreated.apply(methodType);
     }
 
     CFunctionPointer getUpcallStubPointer(JavaEntryPointInfo jep) {
@@ -269,12 +294,40 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     /**
      * Updates the stub address in the upcall trampoline with the address of a direct upcall stub.
      * The trampoline is identified by the given native address and the direct upcall stub is
-     * identified by the method handle descriptor.
-     *
-     * @param trampolineAddress The address of the upcall trampoline.
-     * @param desc A direct method handle descriptor used to lookup the direct upcall stub.
+     * identified by the method handle descriptor and the original native callback descriptor.
+     * <p>
+     * Further, if the method handle is a bound method handle that binds a direct method handle to
+     * an object, it will also unwrap the direct method handle.
      */
-    void patchForDirectUpcall(long trampolineAddress, DirectMethodHandleDesc desc, FunctionDescriptor functionDescriptor, LinkerOptions options) {
+    void patchForDirectUpcall(long trampolineAddress, MethodHandle target, FunctionDescriptor functionDescriptor, LinkerOptions options) {
+        /*
+         * Unwrap bound method handles with two fields where the first field is again a method
+         * handle and the second field is some object. This is commonly the result when the receiver
+         * argument of a direct method handle has been bound.
+         */
+        MethodHandle crackableCandidate = target;
+        Object boundArgument = null;
+        if (Target_java_lang_invoke_BoundMethodHandle.class.isInstance(target)) {
+            Target_java_lang_invoke_BoundMethodHandle bmh = SubstrateUtil.cast(target, Target_java_lang_invoke_BoundMethodHandle.class);
+            if (bmh.fieldCount() == 2 && bmh.arg(0) instanceof MethodHandle dmh) {
+                crackableCandidate = dmh;
+                boundArgument = bmh.arg(1);
+            }
+        }
+
+        /*
+         * If the method handle is crackable, we can likely use a direct upcall stub. In case of a
+         * bound method handle, this is only possible for instance methods because only then the
+         * direct upcall stub knows that it needs to inject the receiver (i.e. the bound argument).
+         */
+        DirectMethodHandleDesc desc;
+        Optional<MethodHandleDesc> methodHandleDesc = crackableCandidate.describeConstable();
+        if (methodHandleDesc.isPresent() && methodHandleDesc.get() instanceof DirectMethodHandleDesc dmhd && isSupportedInvocationForDirectUpcall(dmhd.kind(), boundArgument)) {
+            desc = dmhd;
+        } else {
+            return;
+        }
+
         JavaEntryPointInfo jep = AbiUtils.singleton().makeJavaEntryPoint(functionDescriptor, options);
         FunctionPointerHolder functionPointerHolder = directUpcallStubs.get(Pair.create(desc, jep));
         if (functionPointerHolder == null) {
@@ -293,7 +346,7 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
          * allocating thread until it returns from the call. Also, the trampoline cannot be free'd
          * between allocation and patching because the associated arena is still on the stack.
          */
-        trampolineSet.patchTrampolineForDirectUpcall(trampolinePointer, functionPointerHolder.functionPointer);
+        trampolineSet.prepareTrampolineForDirectUpcall(trampolinePointer, functionPointerHolder.functionPointer, boundArgument);
         /*
          * If we reach this point, everything went fine and the trampoline was patched with the
          * specialized upcall stub's address. For testing, now report that the lookup and patching
@@ -304,6 +357,18 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
         }
     }
 
+    private static boolean isSupportedInvocationForDirectUpcall(Kind kind, Object boundArgument) {
+        return switch (kind) {
+            /*
+             * Only stubs for non-static direct upcalls are able to pass a bound argument. The stub
+             * does not know that it would need to pass the argument.
+             */
+            case STATIC -> boundArgument == null;
+            case VIRTUAL, SPECIAL -> boundArgument != null;
+            default -> false;
+        };
+    }
+
     public void setUsingSpecializedUpcallListener(BiConsumer<Long, DirectMethodHandleDesc> listener) {
         usingSpecializedUpcallListener = listener;
     }
@@ -312,7 +377,7 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
         synchronized (trampolines) {
             long base = TrampolineSet.getAllocationBase(Word.pointer(addr)).rawValue();
             TrampolineSet trampolineSet = trampolines.get(base);
-            if (trampolineSet.tryFree()) {
+            if (trampolineSet.freeTrampoline(Word.pointer(addr))) {
                 trampolines.remove(base);
             }
         }
@@ -456,7 +521,7 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
     }
 
     @Override
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+21/src/java.base/share/classes/java/lang/foreign/MemorySegment.java#L2708")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+21/src/java.base/share/classes/java/lang/foreign/MemorySegment.java#L2708")
     public void onScopeReachable(Object scopeObj, DisallowedObjectReporter reporter) {
         VMError.guarantee(scopeObj instanceof Scope);
 
@@ -505,7 +570,7 @@ public class ForeignFunctionsRuntime implements ForeignSupport, OptimizeSharedAr
      */
     @Uninterruptible(reason = "Interruptions might change call state.")
     @SubstrateForeignCallTarget(stubCallingConvention = false, fullyUninterruptible = true)
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+22/src/hotspot/share/prims/downcallLinker.cpp")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+22/src/hotspot/share/prims/downcallLinker.cpp")
     public static void captureCallState(int statesToCapture, CIntPointer captureBuffer) {
         assert statesToCapture != 0;
         assert captureBuffer.isNonNull();

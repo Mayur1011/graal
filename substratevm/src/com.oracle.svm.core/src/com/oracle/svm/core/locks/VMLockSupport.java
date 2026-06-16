@@ -26,6 +26,7 @@ package com.oracle.svm.core.locks;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.IsolateThread;
@@ -34,69 +35,68 @@ import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.core.SubstrateDiagnostics.DiagnosticThunk;
 import com.oracle.svm.core.SubstrateDiagnostics.ErrorContext;
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.util.ImageHeapList;
 import com.oracle.svm.shared.Uninterruptible;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
+import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
 
-@AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
-final class VMLockFeature implements InternalFeature {
-    @Override
-    public void duringSetup(DuringSetupAccess access) {
-        if (!ImageSingletons.contains(VMLockSupport.class)) {
-            /* The platform uses a VMThreads implementation that does not rely on VMLockSupport. */
-            return;
-        }
-        VMLockSupport support = ImageSingletons.lookup(VMLockSupport.class);
+/**
+ * Registry and lifecycle owner for VM-level locking primitives that are reachable in an image.
+ * <p>
+ * During image build, {@link VMMutex}, {@link VMCondition}, and {@link VMSemaphore} objects are
+ * created as hosted placeholders. Those placeholders are then replaced with runtime implementations
+ * that are backed by platform-specific state.
+ */
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
+public class VMLockSupport {
+    /** All mutexes, so that we can initialize them at run time when the VM starts. */
+    private final List<VMMutex> mutexes = ImageHeapList.create(VMMutex.class, Comparator.comparing(VMMutex::getName));
+    /** All conditions, so that we can initialize them at run time when the VM starts. */
+    private final List<VMCondition> conditions = ImageHeapList.create(VMCondition.class, Comparator.comparing(VMCondition::getName));
+    /** All semaphores, so that we can initialize them at run time when the VM starts. */
+    private final List<VMSemaphore> semaphores = ImageHeapList.create(VMSemaphore.class, Comparator.comparing(VMSemaphore::getName));
 
-        support.mutexReplacer = new ClassInstanceReplacer<>(VMMutex.class, support.mutexes, support::replaceVMMutex);
-        support.conditionReplacer = new ClassInstanceReplacer<>(VMCondition.class, support.conditions, support::replaceVMCondition);
-        support.semaphoreReplacer = new ClassInstanceReplacer<>(VMSemaphore.class, support.semaphores, support::replaceSemaphore);
-
-        access.registerObjectReplacer(support.mutexReplacer);
-        access.registerObjectReplacer(support.conditionReplacer);
-        access.registerObjectReplacer(support.semaphoreReplacer);
-    }
-}
-
-public abstract class VMLockSupport {
+    @Platforms(Platform.HOSTED_ONLY.class) //
+    private ClassInstanceReplacer<VMMutex, VMMutex> mutexReplacer;
 
     @Fold
     public static VMLockSupport singleton() {
         return ImageSingletons.lookup(VMLockSupport.class);
     }
 
-    /** All mutexes, so that we can initialize them at run time when the VM starts. */
-    protected final List<VMMutex> mutexes = ImageHeapList.create(VMMutex.class, Comparator.comparing(VMMutex::getName));
-    /** All conditions, so that we can initialize them at run time when the VM starts. */
-    protected final List<VMCondition> conditions = ImageHeapList.create(VMCondition.class, Comparator.comparing(VMCondition::getName));
-    /** All semaphores, so that we can initialize them at run time when the VM starts. */
-    protected final List<VMSemaphore> semaphores = ImageHeapList.create(VMSemaphore.class, Comparator.comparing(VMSemaphore::getName));
+    @Platforms(Platform.HOSTED_ONLY.class)
+    void registerObjectReplacers(InternalFeature.DuringSetupAccess access) {
+        mutexReplacer = new ClassInstanceReplacer<>(VMMutex.class, mutexes, this::replaceVMMutex);
 
-    @Platforms(Platform.HOSTED_ONLY.class) //
-    protected ClassInstanceReplacer<VMMutex, VMMutex> mutexReplacer;
-    @Platforms(Platform.HOSTED_ONLY.class) //
-    protected ClassInstanceReplacer<VMCondition, VMCondition> conditionReplacer;
-    @Platforms(Platform.HOSTED_ONLY.class) //
-    protected ClassInstanceReplacer<VMSemaphore, VMSemaphore> semaphoreReplacer;
+        access.registerObjectReplacer(mutexReplacer);
+        access.registerObjectReplacer(new ClassInstanceReplacer<>(VMCondition.class, conditions, this::replaceVMCondition));
+        access.registerObjectReplacer(new ClassInstanceReplacer<>(VMSemaphore.class, semaphores, this::replaceSemaphore));
+    }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    protected abstract VMMutex replaceVMMutex(VMMutex source);
+    private VMMutex replaceVMMutex(VMMutex source) {
+        return new RuntimeVMMutex(source.getName());
+    }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    protected abstract VMCondition replaceVMCondition(VMCondition source);
+    private VMCondition replaceVMCondition(VMCondition source) {
+        return new RuntimeVMCondition((RuntimeVMMutex) mutexReplacer.apply(source.getMutex()), source.getName());
+    }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    protected abstract VMSemaphore replaceSemaphore(VMSemaphore source);
+    private VMSemaphore replaceSemaphore(VMSemaphore source) {
+        return new RuntimeVMSemaphore(source.getName());
+    }
 
     /**
      * Initializes all {@link VMMutex}, {@link VMCondition}, and {@link VMSemaphore} objects.
@@ -173,6 +173,33 @@ public abstract class VMLockSupport {
             }
 
             log.indent(false);
+        }
+    }
+}
+
+@AutomaticallyRegisteredFeature
+final class VMLockFeature implements InternalFeature {
+    @Override
+    public void afterRegistration(AfterRegistrationAccess access) {
+        if (ImageLayerBuildingSupport.firstImageBuild()) {
+            ImageSingletons.add(VMLockSupport.class, new VMLockSupport());
+        }
+    }
+
+    @Override
+    public void duringSetup(DuringSetupAccess access) {
+        if (ImageLayerBuildingSupport.firstImageBuild()) {
+            /* Replace build-time with run-time objects. */
+            VMLockSupport support = ImageSingletons.lookup(VMLockSupport.class);
+            support.registerObjectReplacers(access);
+        } else {
+            /* Extension layers must not add any extra VMLockingPrimitives. */
+            Consumer<VMLockingPrimitive> disallowLockingPrimitives = (obj) -> {
+                Class<?> clazz = obj.getClass();
+                VMError.guarantee(clazz == RuntimeVMMutex.class || clazz == RuntimeVMCondition.class || clazz == RuntimeVMSemaphore.class,
+                                "A VMLockingPrimitive is added in an extension layer, which is unsupported: %s", obj);
+            };
+            access.registerObjectReachabilityHandler(disallowLockingPrimitives, VMLockingPrimitive.class);
         }
     }
 }
