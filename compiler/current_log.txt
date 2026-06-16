@@ -1,8 +1,8 @@
 CompileCommand: dontinline Point.add bool dontinline = true
-HotSpotGraalCompiler created with options: {CompilationFailureAction=Diagnose, Dump=:3, DumpOnError=true, DumpPath=/graal-dev/graal_IR/, MethodFilter=Test.main,Point.add, ObjdumpExecutables=objdump,gobjdump, PartialEscapeAnalysis=true, PrintGraph=File, ShowDumpFiles=true, TrackNodeSourcePosition=true}
+HotSpotGraalCompiler created with options: {CompilationFailureAction=Diagnose, Dump=:3, DumpOnError=true, DumpPath=/graal-dev/graal_IR/, MethodFilter=Test.main,Point.add, ObjdumpExecutables=objdump,gobjdump, PartialEscapeAnalysis=true, PrintGraph=Network, ShowDumpFiles=true, TrackNodeSourcePosition=true}
 [Use -Djdk.graal.LogFile=<path> to redirect Graal log output to a file.]
-Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-6101[Point.add(int,_int,_boolean)int].bgv'
-Dumping IGV graphs in /graal-dev/graal_IR
+Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-6016[Point.add(int,_int,_boolean)int].bgv'
+Could not connect to the IGV on 127.0.0.1:4445. Dumping IGV graphs in /graal-dev/graal_IR
 ==========================================================
 [PartialEscapePhase.java] Running on: Point.add(int, int, boolean)
 -------------------------------------------------
@@ -25,12 +25,12 @@ Dumping IGV graphs in /graal-dev/graal_IR
 [PartialEscapeClosure.java]: 13|StoreField#p at BCI: 17
 [PartialEscapeClosure.java]: Virtual object source position: at Point.add(Test.java:18) [bci: 0] at BCI: 0
 -------------------------------------------------
-Dumping debug output to '/graal-dev/graal_IR/HotSpotOSRCompilation-10192[Test.main(String[])void].bgv'
+Dumping debug output to '/graal-dev/graal_IR/HotSpotOSRCompilation-8489[Test.main(String[])void].bgv'
 ==========================================================
 [PartialEscapePhase.java] Running on: Test.main(String[])
 ==========================================================
 [PartialEscapePhase.java] Running on: Point.<init>(int, int)
-Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-11204[Point.add(int,_int,_boolean)int].bgv'
+Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-9976[Point.add(int,_int,_boolean)int].bgv'
 ==========================================================
 [PartialEscapePhase.java] Running on: Point.add(int, int, boolean)
 -------------------------------------------------
@@ -53,7 +53,7 @@ Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-11204[Point.add(
 [PartialEscapeClosure.java]: 15|StoreField#p at BCI: 17
 [PartialEscapeClosure.java]: Virtual object source position: at Point.add(Test.java:18) [bci: 0] at BCI: 0
 -------------------------------------------------
-Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-11667[Test.main(String[])void].bgv'
+Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-10353[Test.main(String[])void].bgv'
 ==========================================================
 [PartialEscapePhase.java] Running on: Test.main(String[])
 -------------------------------------------------
@@ -86,6 +86,6 @@ Dumping debug output to '/graal-dev/graal_IR/HotSpotCompilation-11667[Test.main(
 [PartialEscapeClosure.java]: 9|EndNode at BCI: 10
 [PartialEscapeClosure.java]: Virtual object source position: at Test.main(Test.java:30) [bci: 0] at BCI: 0
 -------------------------------------------------
-Dumping debug output to '/graal-dev/graal_IR/HotSpotOSRCompilation-12259[Test.main(String[])void].bgv'
+Dumping debug output to '/graal-dev/graal_IR/HotSpotOSRCompilation-10830[Test.main(String[])void].bgv'
 ==========================================================
 [PartialEscapePhase.java] Running on: Test.main(String[])

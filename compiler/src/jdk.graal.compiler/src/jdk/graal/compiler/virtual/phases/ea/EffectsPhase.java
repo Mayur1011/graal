@@ -62,7 +62,8 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
     }
 
     private final int maxIterations;
-    protected final CanonicalizerPhase canonicalizer;
+    protected final CanonicalizerPhase canonicalizer; // canonicalizer is used to clean up and simplify the graph after PEA has applied its changes. It is applied incrementally to only those nodes that changed.
+
     private final boolean unscheduled;
     private final SchedulePhase.SchedulingStrategy strategy;
 
@@ -105,13 +106,27 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
         // }
         // }
 
-        LoopUtility.removeObsoleteProxies(graph, context, canonicalizer);
+        LoopUtility.removeObsoleteProxies(graph, context, canonicalizer); // proxies are helper nodes
+
         assert unscheduled || strategy != null;
-        boolean changed = false;
         DebugContext debug = graph.getDebug();
+        /*
+            For PEA
+            1. walk the control-flow graph block by block,
+            2. let the PEA closure analyze virtual objects and record what should change
+            3. apply those changes to the graph only after the analysis pass,
+            4. run dead-code elimination and canonicalization,
+            5. repeat until nothing new happens or maxIterations is reached.
+        */
+
+
+        boolean changed = false;
         for (int iteration = 0; iteration < maxIterations; iteration++) {
             CompilationAlarm.checkProgress(graph);
             try (DebugContext.Scope s = debug.scope(debug.areScopesEnabled() ? "iteration " + iteration : null)) {
+
+                // Build the CFG for PEA
+
                 ScheduleResult schedule;
                 ControlFlowGraph cfg;
                 if (unscheduled) {
@@ -123,14 +138,17 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
                     schedule = graph.getLastSchedule();
                     cfg = schedule.getCFG();
                 }
+
                 boolean postTriggered = false;
                 try (DebugContext.Scope scheduleScope = debug.scope("EffectsPhaseWithSchedule", schedule)) {
+                    // closure is a object that contains all the logic and state needed while traversing the control-flow graph..
                     Closure<?> closure = createEffectsClosure(context, schedule, cfg, graph.getOptions());
-                    ReentrantBlockIterator.apply(closure, cfg.getStartBlock());
+
+                    ReentrantBlockIterator.apply(closure, cfg.getStartBlock()); // so the iterator just walk the CFG and call the closure for each block. the closure will record what should be changed in the graph, but it won't apply those changes yet.
 
                     if (closure.needsApplyEffects()) {
-                        // apply the effects collected during this iteration
-                        EconomicSetNodeEventListener listener = new EconomicSetNodeEventListener();
+                        EconomicSetNodeEventListener listener = new EconomicSetNodeEventListener(); // records which nodes changed. so canonicalizer can be applied incrementally to only those nodes that changed.
+
                         try (NodeEventScope nes = graph.trackNodeEvents(listener)) {
                             closure.applyEffects();
 
@@ -143,7 +161,7 @@ public abstract class EffectsPhase<CoreProvidersT extends CoreProviders> extends
                         LoopUtility.removeObsoleteProxies(graph, context, canonicalizer);
                         Graph.Mark before = graph.getMark();
                         postIteration(graph, context, listener.getNodes());
-                        postTriggered = !before.isCurrent();
+                        postTriggered = !before.isCurrent(); // becomes true if canonicalizer was applied and changed the graph.
                     }
 
                     if (closure.hasChanged() || postTriggered) {

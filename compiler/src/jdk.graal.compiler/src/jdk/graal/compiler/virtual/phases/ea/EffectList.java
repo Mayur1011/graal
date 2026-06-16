@@ -42,6 +42,7 @@ import jdk.graal.compiler.nodes.StructuredGraph;
  */
 public class EffectList implements Iterable<EffectList.Effect> {
 
+    // base class for every graph modification.
     public abstract static class Effect {
         private final String name;
 
@@ -57,6 +58,7 @@ public class EffectList implements Iterable<EffectList.Effect> {
             return false;
         }
 
+        // obsoleteNodes is a list of nodes that are no longer needed and can be removed from the graph. This is used to keep track of nodes that have been replaced or deleted during the application of effects.
         abstract void apply(StructuredGraph graph, ArrayList<Node> obsoleteNodes);
 
         @Override
@@ -119,6 +121,8 @@ public class EffectList implements Iterable<EffectList.Effect> {
         }
     }
 
+
+    // function to add a new effect to the list. The effect is an object that contains all the information needed to apply a change to the graph.
     public void add(SimpleEffect effect) {
         add((Effect) effect);
     }
@@ -214,6 +218,7 @@ public class EffectList implements Iterable<EffectList.Effect> {
         return size == 0;
     }
 
+    // main function which applies all the effects to the graph.
     public void apply(StructuredGraph graph, ArrayList<Node> obsoleteNodes, boolean cfgKills) {
         boolean message = false;
         for (int i = 0; i < size(); i++) {
