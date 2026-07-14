@@ -322,7 +322,7 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
         // System.out.println("Escaping object " + virtual + " with materialized value "
         // + representation);
 
-        // updating the state of this virtual object.
+        // updating the state of this virtual object from virtual to materialized representation
         escape(virtual.getObjectId(), representation);
         obj = getObjectState(virtual);
         PartialEscapeClosure.updateStatesForMaterialized(this, virtual, obj.getMaterializedValue());

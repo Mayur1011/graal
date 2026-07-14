@@ -443,8 +443,12 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
 
     @Override
     public boolean ensureMaterialized(VirtualObjectNode virtualObject) {
-        return closure.ensureMaterialized(state, virtualObject.getObjectId(), position, effects,
-                PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED);
+        return closure.ensureMaterialized(
+            state,
+            virtualObject.getObjectId(),
+            position,
+            effects,
+            PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED, "virtualizable-requested-materialization");
     }
 
     @Override

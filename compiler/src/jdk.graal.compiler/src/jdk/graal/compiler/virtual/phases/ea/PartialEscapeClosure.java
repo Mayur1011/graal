@@ -280,6 +280,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
             if (initialState.hasObjectState(i) &&
                     initialState.getObjectState(i).isVirtual()) {
                 VirtualObjectNode virtual = virtualObjects.get(i);
+                // This is the direct call to materializeBefore() that is the reason for the overflow exception. It is not a recursive call to ensureMaterialized() that would throw the exception.
+                printMaterializationLog(virtual, materializeBefore, "loop-overflow-retry");
                 initialState.materializeBefore(
                         materializeBefore,
                         virtual,
@@ -732,13 +734,83 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
     }
 
+    private static int bciOf(Node n) {
+        return (n != null && n.getNodeSourcePosition() != null) ? n.getNodeSourcePosition().getBCI() : -1;
+    }
+    private static String slashType(VirtualObjectNode virtual) {
+        if (virtual.type() == null) {
+            return "<unknown>";
+        }
+        String name = virtual.type().getName(); // e.g. Ljava/lang/StringBuilder;
+        if (name.startsWith("L") && name.endsWith(";")) {
+            return name.substring(1, name.length() - 1);
+        }
+        return name;
+    }
+
+    private static String methodString(FixedNode n) {
+        if (n == null || n.getNodeSourcePosition() == null) {
+            return "<unknown>";
+        }
+        var m = n.getNodeSourcePosition().getMethod();
+        return m.getDeclaringClass().toJavaName() + "." + m.getName() + "()";
+    }
+
+    private static String reasonOf(CounterKey counter) {
+        if (counter == COUNTER_MATERIALIZATIONS_UNHANDLED) return "non-virtualizable-input";
+        if (counter == COUNTER_MATERIALIZATIONS_MERGE) return "merge-incompatible-state";
+        if (counter == COUNTER_MATERIALIZATIONS_PHI) return "phi-incompatible-state";
+        if (counter == COUNTER_MATERIALIZATIONS_LOOP_EXIT) return "loop-exit-exception-bci";
+        if (counter == COUNTER_MATERIALIZATIONS) return "general/lock/materialize-all";
+        return counter.getName();
+    }
+
+    private static String safeNodeName(Node n) {
+        return n == null ? "<null>" : n.getClass().getSimpleName() + "@" + Integer.toHexString(n.hashCode());
+    }
+
+    private void printMaterializationLog(
+        VirtualObjectNode virtual,
+        FixedNode materializeBefore,
+        String reason) {
+        System.out.println("=========================================");
+        System.out.println("Virtual Object : #" + virtual.getObjectId());
+        System.out.println("Java Type      : " + slashType(virtual));
+        System.out.println("Method         : " + methodString(materializeBefore));
+        System.out.println("BCI            : " + bciOf(materializeBefore));
+        System.out.println();
+        System.out.println("Materialized At:");
+        System.out.println("    " + safeNodeName(materializeBefore));
+        System.out.println();
+        System.out.println("Reason:");
+        System.out.println("    " + reason);
+        System.out.println();
+        System.out.println("Current IR Node:");
+        System.out.println("    " + (materializeBefore == null ? "<null>" : materializeBefore));
+        System.out.println();
+        System.out.println("=========================================");
+    }
+
+    protected boolean ensureMaterialized(
+        PartialEscapeBlockState<?> state,
+        int object,
+        FixedNode materializeBefore,
+        GraphEffectList effects,
+        CounterKey counter) {
+        return ensureMaterialized(
+            state, object, materializeBefore, effects, counter,
+            reasonOf(counter)
+        );
+    }
+
     // TODO: Important function
     protected boolean ensureMaterialized(
             PartialEscapeBlockState<?> state,
             int object,
             FixedNode materializeBefore,
             GraphEffectList effects,
-            CounterKey counter) {
+            CounterKey counter,
+            String reason) {
         ObjectState objectState = state.getObjectState(object);
         if (objectState.isVirtual()) {
             if (currentMode == EffectsClosureMode.STOP_NEW_VIRTUALIZATIONS_LOOP_NEST) {
@@ -778,45 +850,48 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                     "%s is not virtual",
                     objectState);
 
-            // MY DEBUGGING CODE
-            if (materializeBefore != null &&
-                    materializeBefore.getNodeSourcePosition() != null) {
-                var method = materializeBefore
-                        .getNodeSourcePosition()
-                        .getMethod();
-                String className = method.getDeclaringClass().toJavaName();
-                String methodName = method.getName();
+            // ------------------------------------------------- MY DEBUGGING CODE --------------------------------------------//
 
-                if ("Test.java".equals(method.getDeclaringClass().getSourceFileName())) {
-                    int escapeBCI = materializeBefore.getNodeSourcePosition().getBCI();
-                    int virtualObjectBCI = virtual.getNodeSourcePosition() != null
-                            ? virtual.getNodeSourcePosition().getBCI()
-                            : -1;
-                    System.out.println("-------------------------------------------------");
-                    System.out.println(
-                            "[PartialEscapeClosure.java]: Materializing virtual object with id: "
-                                    + virtual.getObjectId()
-                                    + " in method: " + methodName
-                                    + " (class: " + className + ")");
-                    System.out.println(
-                            "[PartialEscapeClosure.java]: " + materializeBefore.toString() + " at BCI: " + escapeBCI);
-                    System.out.println("[PartialEscapeClosure.java]: Virtual object source position: "
-                            + virtual.getNodeSourcePosition()
-                            + " at BCI: " + virtualObjectBCI);
+            printMaterializationLog(virtual, materializeBefore, reason);
 
-                    System.out.println("-------------------------------------------------");
+            // if (materializeBefore != null &&
+            //         materializeBefore.getNodeSourcePosition() != null) {
+            //     var method = materializeBefore
+            //             .getNodeSourcePosition()
+            //             .getMethod();
+            //     String className = method.getDeclaringClass().toJavaName();
+            //     String methodName = method.getName();
 
-                    // System.out.printf(
-                    // "[PEA] MATERIALIZED class=%-10s method=%-15s bci=%-5d object=%s
-                    // triggerNode=%s%n",
-                    // className,
-                    // methodName,
-                    // escapeBCI,
-                    // virtual.toString(),
-                    // materializeBefore.toString());
-                }
-            }
+            //     if ("Test.java".equals(method.getDeclaringClass().getSourceFileName())) {
+            //         int escapeBCI = materializeBefore.getNodeSourcePosition().getBCI();
+            //         int virtualObjectBCI = virtual.getNodeSourcePosition() != null
+            //                 ? virtual.getNodeSourcePosition().getBCI()
+            //                 : -1;
+            //         System.out.println("-------------------------------------------------");
+            //         System.out.println(
+            //                 "[PartialEscapeClosure.java]: Materializing virtual object with id: "
+            //                         + virtual.getObjectId()
+            //                         + " in method: " + methodName
+            //                         + " (class: " + className + ")");
+            //         System.out.println(
+            //                 "[PartialEscapeClosure.java]: " + materializeBefore.toString() + " at BCI: " + escapeBCI);
+            //         System.out.println("[PartialEscapeClosure.java]: Virtual object source position: "
+            //                 + virtual.getNodeSourcePosition()
+            //                 + " at BCI: " + virtualObjectBCI);
 
+            //         System.out.println("-------------------------------------------------");
+
+            //         // System.out.printf(
+            //         // "[PEA] MATERIALIZED class=%-10s method=%-15s bci=%-5d object=%s
+            //         // triggerNode=%s%n",
+            //         // className,
+            //         // methodName,
+            //         // escapeBCI,
+            //         // virtual.toString(),
+            //         // materializeBefore.toString());
+            //     }
+            // }
+            // ------------------------------------------------- MY DEBUGGING CODE --------------------------------------------//
             state.materializeBefore(
                     materializeBefore,
                     virtual,
