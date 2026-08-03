@@ -418,7 +418,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                     id,
                                     materializeBefore,
                                     effects,
-                                    COUNTER_MATERIALIZATIONS);
+                                    COUNTER_MATERIALIZATIONS, "materialize-all-mode");
                         }
                     }
                 }
@@ -761,7 +761,6 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         if (counter == COUNTER_MATERIALIZATIONS_MERGE) return "merge-incompatible-state";
         if (counter == COUNTER_MATERIALIZATIONS_PHI) return "phi-incompatible-state";
         if (counter == COUNTER_MATERIALIZATIONS_LOOP_EXIT) return "loop-exit-exception-bci";
-        if (counter == COUNTER_MATERIALIZATIONS) return "general/lock/materialize-all";
         return counter.getName();
     }
 
@@ -803,7 +802,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         );
     }
 
-    // TODO: Important function
+    // TODO: Important function (materializeBefore → materializeWithCommit → escape(), which is the sole chain for virtual→materialized transitions)
     protected boolean ensureMaterialized(
             PartialEscapeBlockState<?> state,
             int object,
@@ -1007,7 +1006,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                             other.getObjectId(),
                             materializeBefore,
                             effects,
-                            counter);
+                            counter, "unstructured-lock-depth-" + lockDepth);
                 }
             }
         }
@@ -2278,3 +2277,19 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
     }
 }
+
+
+
+/**
+1	284	"loop-overflow-retry"	✅ Direct call with printMaterializationLog
+2	416-421	"materialize-all-mode"	✅ 6-param explicit
+3	593-598	"non-virtualizable-input"	✅ 5-param → reasonOf
+4	1004-1009	"unstructured-lock-depth-N"	✅ 6-param explicit
+5	1144-1149	"loop-exit-exception-bci"	✅ 5-param → reasonOf
+6	1469-1474	"merge-incompatible-state"	✅ 5-param → reasonOf
+7	1507-1512	"merge-incompatible-state"	✅ 5-param → reasonOf
+8	1529-1534	"merge-incompatible-state"	✅ 5-param → reasonOf
+9	1932-1937	"merge-incompatible-state"	✅ 5-param → reasonOf
+10	1978-1983	"merge-incompatible-state"	✅ 5-param → reasonOf
+11	2159-2164	"phi-incompatible-state"	✅ 5-param → reasonOf
+ */
