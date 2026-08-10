@@ -768,10 +768,18 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         return n == null ? "<null>" : n.getClass().getSimpleName() + "@" + Integer.toHexString(n.hashCode());
     }
 
+    private static boolean shouldLogMaterializations(VirtualObjectNode virtual, FixedNode materializeBefore) {
+        // TODO: add a filter to only print materialization logs for user defined classes and methods.
+    }
+
     private void printMaterializationLog(
         VirtualObjectNode virtual,
         FixedNode materializeBefore,
         String reason) {
+
+        // this is to print only needed info
+        if (not shouldLogMaterializations(virtual, materializeBefore)) return;
+
         System.out.println("=========================================");
         System.out.println("Virtual Object : #" + virtual.getObjectId());
         System.out.println("Java Type      : " + slashType(virtual));
@@ -2292,4 +2300,20 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
 9	1932-1937	"merge-incompatible-state"	✅ 5-param → reasonOf
 10	1978-1983	"merge-incompatible-state"	✅ 5-param → reasonOf
 11	2159-2164	"phi-incompatible-state"	✅ 5-param → reasonOf
+
+
+
+
+Semantic category	    Reason string	                            Mechanism
+Method call escape  	escape-via-method-call	                    non-virtualizable-input
+Return escape	        escape-via-return	                        non-virtualizable-input
+Thread/global escape	escape-via-static-field-store	            non-virtualizable-input
+Field store escape	    escape-via-instance-field-store	            non-virtualizable-input
+Array store escape	    escape-via-array-store	                    non-virtualizable-input
+Exception escape	    escape-via-exception	                    non-virtualizable-input
+Merge escape	        merge-incompatible-state	                merge
+Phi escape	            phi-incompatible-state	                    processPhi
+Lock escape	            unstructured-lock-depth-N	                materializeVirtualLocksBefore
+Exception BCI	        loop-exit-exception-bci	                    processLoopExit
+Loop overflow	        materialize-all-mode / loop-overflow-retry	mode switch
  */
