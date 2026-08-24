@@ -280,7 +280,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
             if (initialState.hasObjectState(i) &&
                     initialState.getObjectState(i).isVirtual()) {
                 VirtualObjectNode virtual = virtualObjects.get(i);
-                // This is the direct call to materializeBefore() that is the reason for the overflow exception. It is not a recursive call to ensureMaterialized() that would throw the exception.
+                // This is the direct call to materializeBefore() that is the reason for the
+                // overflow exception. It is not a recursive call to ensureMaterialized() that
+                // would throw the exception.
                 printMaterializationLog(virtual, materializeBefore, "loop-overflow-retry");
                 initialState.materializeBefore(
                         materializeBefore,
@@ -737,6 +739,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     private static int bciOf(Node n) {
         return (n != null && n.getNodeSourcePosition() != null) ? n.getNodeSourcePosition().getBCI() : -1;
     }
+
     private static String slashType(VirtualObjectNode virtual) {
         if (virtual.type() == null) {
             return "<unknown>";
@@ -757,10 +760,14 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     }
 
     private static String reasonOf(CounterKey counter) {
-        if (counter == COUNTER_MATERIALIZATIONS_UNHANDLED) return "non-virtualizable-input";
-        if (counter == COUNTER_MATERIALIZATIONS_MERGE) return "merge-incompatible-state";
-        if (counter == COUNTER_MATERIALIZATIONS_PHI) return "phi-incompatible-state";
-        if (counter == COUNTER_MATERIALIZATIONS_LOOP_EXIT) return "loop-exit-exception-bci";
+        if (counter == COUNTER_MATERIALIZATIONS_UNHANDLED)
+            return "non-virtualizable-input";
+        if (counter == COUNTER_MATERIALIZATIONS_MERGE)
+            return "merge-incompatible-state";
+        if (counter == COUNTER_MATERIALIZATIONS_PHI)
+            return "phi-incompatible-state";
+        if (counter == COUNTER_MATERIALIZATIONS_LOOP_EXIT)
+            return "loop-exit-exception-bci";
         return counter.getName();
     }
 
@@ -769,14 +776,15 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     }
 
     private static boolean shouldLogMaterializations(VirtualObjectNode virtual, FixedNode materializeBefore) {
-        // TODO: add a filter to only print materialization logs for user defined classes and methods.
+        // TODO: add a filter to only print materialization logs for user defined
+        // classes and methods.
         return true;
     }
 
     private void printMaterializationLog(
-        VirtualObjectNode virtual,
-        FixedNode materializeBefore,
-        String reason) {
+            VirtualObjectNode virtual,
+            FixedNode materializeBefore,
+            String reason) {
 
         // this is to print only needed info
         if (!shouldLogMaterializations(virtual, materializeBefore)) {
@@ -802,18 +810,18 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     }
 
     protected boolean ensureMaterialized(
-        PartialEscapeBlockState<?> state,
-        int object,
-        FixedNode materializeBefore,
-        GraphEffectList effects,
-        CounterKey counter) {
+            PartialEscapeBlockState<?> state,
+            int object,
+            FixedNode materializeBefore,
+            GraphEffectList effects,
+            CounterKey counter) {
         return ensureMaterialized(
-            state, object, materializeBefore, effects, counter,
-            reasonOf(counter)
-        );
+                state, object, materializeBefore, effects, counter,
+                reasonOf(counter));
     }
 
-    // TODO: Important function (materializeBefore → materializeWithCommit → escape(), which is the sole chain for virtual→materialized transitions)
+    // TODO: Important function (materializeBefore → materializeWithCommit →
+    // escape(), which is the sole chain for virtual→materialized transitions)
     protected boolean ensureMaterialized(
             PartialEscapeBlockState<?> state,
             int object,
@@ -860,48 +868,52 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                     "%s is not virtual",
                     objectState);
 
-            // ------------------------------------------------- MY DEBUGGING CODE --------------------------------------------//
+            // ------------------------------------------------- MY DEBUGGING CODE
+            // --------------------------------------------//
 
             printMaterializationLog(virtual, materializeBefore, reason);
 
             // if (materializeBefore != null &&
-            //         materializeBefore.getNodeSourcePosition() != null) {
-            //     var method = materializeBefore
-            //             .getNodeSourcePosition()
-            //             .getMethod();
-            //     String className = method.getDeclaringClass().toJavaName();
-            //     String methodName = method.getName();
+            // materializeBefore.getNodeSourcePosition() != null) {
+            // var method = materializeBefore
+            // .getNodeSourcePosition()
+            // .getMethod();
+            // String className = method.getDeclaringClass().toJavaName();
+            // String methodName = method.getName();
 
-            //     if ("Test.java".equals(method.getDeclaringClass().getSourceFileName())) {
-            //         int escapeBCI = materializeBefore.getNodeSourcePosition().getBCI();
-            //         int virtualObjectBCI = virtual.getNodeSourcePosition() != null
-            //                 ? virtual.getNodeSourcePosition().getBCI()
-            //                 : -1;
-            //         System.out.println("-------------------------------------------------");
-            //         System.out.println(
-            //                 "[PartialEscapeClosure.java]: Materializing virtual object with id: "
-            //                         + virtual.getObjectId()
-            //                         + " in method: " + methodName
-            //                         + " (class: " + className + ")");
-            //         System.out.println(
-            //                 "[PartialEscapeClosure.java]: " + materializeBefore.toString() + " at BCI: " + escapeBCI);
-            //         System.out.println("[PartialEscapeClosure.java]: Virtual object source position: "
-            //                 + virtual.getNodeSourcePosition()
-            //                 + " at BCI: " + virtualObjectBCI);
+            // if ("Test.java".equals(method.getDeclaringClass().getSourceFileName())) {
+            // int escapeBCI = materializeBefore.getNodeSourcePosition().getBCI();
+            // int virtualObjectBCI = virtual.getNodeSourcePosition() != null
+            // ? virtual.getNodeSourcePosition().getBCI()
+            // : -1;
+            // System.out.println("-------------------------------------------------");
+            // System.out.println(
+            // "[PartialEscapeClosure.java]: Materializing virtual object with id: "
+            // + virtual.getObjectId()
+            // + " in method: " + methodName
+            // + " (class: " + className + ")");
+            // System.out.println(
+            // "[PartialEscapeClosure.java]: " + materializeBefore.toString() + " at BCI: "
+            // + escapeBCI);
+            // System.out.println("[PartialEscapeClosure.java]: Virtual object source
+            // position: "
+            // + virtual.getNodeSourcePosition()
+            // + " at BCI: " + virtualObjectBCI);
 
-            //         System.out.println("-------------------------------------------------");
+            // System.out.println("-------------------------------------------------");
 
-            //         // System.out.printf(
-            //         // "[PEA] MATERIALIZED class=%-10s method=%-15s bci=%-5d object=%s
-            //         // triggerNode=%s%n",
-            //         // className,
-            //         // methodName,
-            //         // escapeBCI,
-            //         // virtual.toString(),
-            //         // materializeBefore.toString());
-            //     }
+            // // System.out.printf(
+            // // "[PEA] MATERIALIZED class=%-10s method=%-15s bci=%-5d object=%s
+            // // triggerNode=%s%n",
+            // // className,
+            // // methodName,
+            // // escapeBCI,
+            // // virtual.toString(),
+            // // materializeBefore.toString());
             // }
-            // ------------------------------------------------- MY DEBUGGING CODE --------------------------------------------//
+            // }
+            // ------------------------------------------------- MY DEBUGGING CODE
+            // --------------------------------------------//
             state.materializeBefore(
                     materializeBefore,
                     virtual,
@@ -1607,7 +1619,6 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
 
         /**
-<<<<<<< HEAD
          * Try to merge multiple virtual object states into a single object state. If
          * the incoming
          * object states are compatible, then this method will create PhiNodes for the
@@ -1618,19 +1629,10 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
          * Object states
          * can be incompatible if they contain {@code long} or {@code double} values
          * occupying two
-         * {@code int} slots in such a way that that their values cannot be merged using
+         * {@code int} slots in such a way that their values cannot be merged using
          * PhiNodes.
          * The states may also be incompatible if they contain escaped large writes to
          * byte arrays
-=======
-         * Try to merge multiple virtual object states into a single object state. If the incoming
-         * object states are compatible, then this method will create PhiNodes for the object's
-         * entries where needed. If they are incompatible, then all incoming virtual objects will be
-         * materialized, and a PhiNode for the materialized values will be created. Object states
-         * can be incompatible if they contain {@code long} or {@code double} values occupying two
-         * {@code int} slots in such a way that their values cannot be merged using PhiNodes.
-         * The states may also be incompatible if they contain escaped large writes to byte arrays
->>>>>>> upstream/master
          * in such a way that they cannot be merged using PhiNodes.
          *
          * @param states the predecessor block states of the merge
@@ -2299,34 +2301,32 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     }
 }
 
-
-
 /**
-1	284	"loop-overflow-retry"	✅ Direct call with printMaterializationLog
-2	416-421	"materialize-all-mode"	✅ 6-param explicit
-3	593-598	"non-virtualizable-input"	✅ 5-param → reasonOf
-4	1004-1009	"unstructured-lock-depth-N"	✅ 6-param explicit
-5	1144-1149	"loop-exit-exception-bci"	✅ 5-param → reasonOf
-6	1469-1474	"merge-incompatible-state"	✅ 5-param → reasonOf
-7	1507-1512	"merge-incompatible-state"	✅ 5-param → reasonOf
-8	1529-1534	"merge-incompatible-state"	✅ 5-param → reasonOf
-9	1932-1937	"merge-incompatible-state"	✅ 5-param → reasonOf
-10	1978-1983	"merge-incompatible-state"	✅ 5-param → reasonOf
-11	2159-2164	"phi-incompatible-state"	✅ 5-param → reasonOf
-
-
-
-
-Semantic category	    Reason string	                            Mechanism
-Method call escape  	escape-via-method-call	                    non-virtualizable-input
-Return escape	        escape-via-return	                        non-virtualizable-input
-Thread/global escape	escape-via-static-field-store	            non-virtualizable-input
-Field store escape	    escape-via-instance-field-store	            non-virtualizable-input
-Array store escape	    escape-via-array-store	                    non-virtualizable-input
-Exception escape	    escape-via-exception	                    non-virtualizable-input
-Merge escape	        merge-incompatible-state	                merge
-Phi escape	            phi-incompatible-state	                    processPhi
-Lock escape	            unstructured-lock-depth-N	                materializeVirtualLocksBefore
-Exception BCI	        loop-exit-exception-bci	                    processLoopExit
-Loop overflow	        materialize-all-mode / loop-overflow-retry	mode switch
+ * 1 284 "loop-overflow-retry" ✅ Direct call with printMaterializationLog
+ * 2 416-421 "materialize-all-mode" ✅ 6-param explicit
+ * 3 593-598 "non-virtualizable-input" ✅ 5-param → reasonOf
+ * 4 1004-1009 "unstructured-lock-depth-N" ✅ 6-param explicit
+ * 5 1144-1149 "loop-exit-exception-bci" ✅ 5-param → reasonOf
+ * 6 1469-1474 "merge-incompatible-state" ✅ 5-param → reasonOf
+ * 7 1507-1512 "merge-incompatible-state" ✅ 5-param → reasonOf
+ * 8 1529-1534 "merge-incompatible-state" ✅ 5-param → reasonOf
+ * 9 1932-1937 "merge-incompatible-state" ✅ 5-param → reasonOf
+ * 10 1978-1983 "merge-incompatible-state" ✅ 5-param → reasonOf
+ * 11 2159-2164 "phi-incompatible-state" ✅ 5-param → reasonOf
+ *
+ *
+ *
+ *
+ * Semantic category Reason string Mechanism
+ * Method call escape escape-via-method-call non-virtualizable-input
+ * Return escape escape-via-return non-virtualizable-input
+ * Thread/global escape escape-via-static-field-store non-virtualizable-input
+ * Field store escape escape-via-instance-field-store non-virtualizable-input
+ * Array store escape escape-via-array-store non-virtualizable-input
+ * Exception escape escape-via-exception non-virtualizable-input
+ * Merge escape merge-incompatible-state merge
+ * Phi escape phi-incompatible-state processPhi
+ * Lock escape unstructured-lock-depth-N materializeVirtualLocksBefore
+ * Exception BCI loop-exit-exception-bci processLoopExit
+ * Loop overflow materialize-all-mode / loop-overflow-retry mode switch
  */
