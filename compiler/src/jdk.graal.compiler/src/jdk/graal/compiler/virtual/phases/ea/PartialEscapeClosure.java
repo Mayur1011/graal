@@ -770,6 +770,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
 
     private static boolean shouldLogMaterializations(VirtualObjectNode virtual, FixedNode materializeBefore) {
         // TODO: add a filter to only print materialization logs for user defined classes and methods.
+        return true;
     }
 
     private void printMaterializationLog(
@@ -778,7 +779,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         String reason) {
 
         // this is to print only needed info
-        if (not shouldLogMaterializations(virtual, materializeBefore)) return;
+        if (!shouldLogMaterializations(virtual, materializeBefore)) {
+            return;
+        }
 
         System.out.println("=========================================");
         System.out.println("Virtual Object : #" + virtual.getObjectId());
