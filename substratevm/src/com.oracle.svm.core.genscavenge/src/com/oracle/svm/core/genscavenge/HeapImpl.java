@@ -37,15 +37,13 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.shared.AlwaysInline;
 import com.oracle.svm.core.MemoryWalker;
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.SubstrateDiagnostics;
 import com.oracle.svm.core.SubstrateDiagnostics.DiagnosticThunk;
 import com.oracle.svm.core.SubstrateDiagnostics.DiagnosticThunkRegistry;
 import com.oracle.svm.core.SubstrateDiagnostics.ErrorContext;
-import com.oracle.svm.core.SubstrateGCOptions;
-import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.genscavenge.AlignedHeapChunk.AlignedHeader;
@@ -62,7 +60,7 @@ import com.oracle.svm.core.heap.ObjectVisitor;
 import com.oracle.svm.core.heap.ReferenceHandler;
 import com.oracle.svm.core.heap.ReferenceHandlerThread;
 import com.oracle.svm.core.heap.ReferenceInternals;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.RuntimeCodeInfoGCSupport;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
@@ -70,20 +68,21 @@ import com.oracle.svm.core.jfr.JfrTicks;
 import com.oracle.svm.core.jfr.events.SystemGCEvent;
 import com.oracle.svm.core.locks.VMCondition;
 import com.oracle.svm.core.locks.VMMutex;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.metaspace.Metaspace;
 import com.oracle.svm.core.nodes.CFunctionEpilogueNode;
 import com.oracle.svm.core.nodes.CFunctionPrologueNode;
-import com.oracle.svm.core.option.NotifyGCRuntimeOptionKey;
-import com.oracle.svm.core.option.RuntimeOptionKey;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.option.NotifyGCRuntimeOptionKey;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.thread.PlatformThreads;
-import com.oracle.svm.core.thread.ThreadStatus;
+import com.oracle.svm.guest.staging.core.thread.ThreadStatus;
+import com.oracle.svm.core.thread.ThreadsLock;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
-import com.oracle.svm.core.util.UnsignedUtils;
-import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.shared.util.UnsignedUtils;
+import com.oracle.svm.shared.AlwaysInline;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
@@ -113,6 +112,7 @@ public final class HeapImpl extends Heap {
     private final RuntimeCodeInfoGCSupportImpl runtimeCodeInfoGcSupport;
     private final HeapAccounting accounting = new HeapAccounting();
     private final ImageHeapChunkLogger imageHeapChunkLogger = new ImageHeapChunkLogger();
+    private boolean initialized;
 
     /** Head of the linked list of currently pending (ready to be enqueued) {@link Reference}s. */
     private Reference<?> refPendingList;
@@ -433,7 +433,9 @@ public final class HeapImpl extends Heap {
     @Uninterruptible(reason = "Called during startup.")
     @Override
     public void attachThread(IsolateThread isolateThread) {
-        TlabSupport.startupInitialization();
+        if (!initialized) {
+            initialize();
+        }
         TlabSupport.initialize(isolateThread);
     }
 
@@ -443,17 +445,22 @@ public final class HeapImpl extends Heap {
         TlabSupport.disableAndFlushForThread(isolateThread);
     }
 
+    @Uninterruptible(reason = "Called during startup.")
+    private void initialize() {
+        assert ThreadsLock.hasWriteAccess() : "must hold the ThreadsLock";
+        assert !initialized : "only the first thread may initialize the heap";
+        initialized = true;
+
+        TlabSupport.startupInitialization();
+        gcImpl.updatePolicy();
+    }
+
     @Fold
     public static boolean usesImageHeapCardMarking() {
         Boolean enabled = SerialGCOptions.ImageHeapCardMarking.getValue();
         if (enabled == Boolean.FALSE || enabled == null && !SerialGCOptions.useRememberedSet()) {
             return false;
-        } else if (enabled == null) {
-            return isImageHeapAligned();
         }
-        UserError.guarantee(isImageHeapAligned(),
-                        "Enabling option %s requires a custom image heap alignment at runtime, which cannot be ensured with the current configuration (option %s might be disabled)",
-                        SerialGCOptions.ImageHeapCardMarking, SubstrateOptions.SpawnIsolates);
         return true;
     }
 
@@ -471,7 +478,6 @@ public final class HeapImpl extends Heap {
 
     @Fold
     static int getMetaspaceOffsetInAddressSpace() {
-        assert SubstrateOptions.SpawnIsolates.getValue();
         int result = SerialAndEpsilonGCOptions.getNullRegionSize();
         assert result % HeapParameters.getAlignedHeapChunkAlignment().rawValue() == 0 : "start of metaspace must be aligned";
         return result;
@@ -480,18 +486,9 @@ public final class HeapImpl extends Heap {
     @Fold
     @Override
     public int getImageHeapOffsetInAddressSpace() {
-        if (!SubstrateOptions.SpawnIsolates.getValue()) {
-            return 0;
-        }
-
         int result = SerialAndEpsilonGCOptions.getNullRegionSize() + SerialAndEpsilonGCOptions.getReservedMetaspaceSize();
         assert result % getImageHeapAlignment() == 0 : "start of image heap must be aligned";
         return result;
-    }
-
-    @Fold
-    public static boolean isImageHeapAligned() {
-        return SubstrateOptions.SpawnIsolates.getValue();
     }
 
     @Override
@@ -597,6 +594,10 @@ public final class HeapImpl extends Heap {
         assert ReferenceHandlerThread.isReferenceHandlerThread();
         long initialOffers = refListOfferCounter;
         long initialWakeUps = refListWaiterWakeUpCounter;
+        if (ReferenceHandlerThread.isStopping()) {
+            // Must re-check because initialWakeUps can already include the corresponding wakeup.
+            return;
+        }
         if (hasReferencePendingList()) {
             return;
         }
@@ -1035,7 +1036,7 @@ final class Target_java_lang_Runtime {
     private void gc() {
         if (!SubstrateGCOptions.DisableExplicitGC.getValue()) {
             long startTicks = JfrTicks.elapsedTicks();
-            GCImpl.getGCImpl().collectCompletely(GCCause.JavaLangSystemGC);
+            GCImpl.getGCImpl().collect(GCCause.JavaLangSystemGC);
             SystemGCEvent.emit(startTicks, false);
         }
     }

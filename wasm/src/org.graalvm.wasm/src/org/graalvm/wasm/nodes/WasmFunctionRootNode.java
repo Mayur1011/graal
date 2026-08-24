@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2024, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,6 @@
  */
 package org.graalvm.wasm.nodes;
 
-import static org.graalvm.wasm.nodes.WasmFrame.popDouble;
-import static org.graalvm.wasm.nodes.WasmFrame.popFloat;
-import static org.graalvm.wasm.nodes.WasmFrame.popInt;
-import static org.graalvm.wasm.nodes.WasmFrame.popLong;
-import static org.graalvm.wasm.nodes.WasmFrame.popReference;
-import static org.graalvm.wasm.nodes.WasmFrame.popVector128;
 import static org.graalvm.wasm.nodes.WasmFrame.pushDouble;
 import static org.graalvm.wasm.nodes.WasmFrame.pushFloat;
 import static org.graalvm.wasm.nodes.WasmFrame.pushInt;
@@ -58,17 +52,16 @@ import java.util.Set;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.wasm.WasmArguments;
 import org.graalvm.wasm.WasmCodeEntry;
-import org.graalvm.wasm.WasmConstant;
 import org.graalvm.wasm.WasmContext;
 import org.graalvm.wasm.WasmInstance;
 import org.graalvm.wasm.WasmLanguage;
 import org.graalvm.wasm.WasmModule;
 import org.graalvm.wasm.WasmType;
-import org.graalvm.wasm.vector.Vector128;
-import org.graalvm.wasm.vector.Vector128Ops;
 import org.graalvm.wasm.debugging.data.DebugFunction;
 import org.graalvm.wasm.exception.Failure;
 import org.graalvm.wasm.exception.WasmException;
+import org.graalvm.wasm.vector.Vector128;
+import org.graalvm.wasm.vector.Vector128Ops;
 
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
@@ -94,20 +87,12 @@ public class WasmFunctionRootNode extends WasmRootNode {
         this.codeEntry = codeEntry;
     }
 
-    int localCount() {
-        return codeEntry.localCount();
-    }
-
     int resultCount() {
         return codeEntry.resultCount();
     }
 
     void enterErrorBranch() {
         codeEntry.errorBranch();
-    }
-
-    int resultType(int index) {
-        return codeEntry.resultType(index);
     }
 
     int paramCount() {
@@ -131,13 +116,12 @@ public class WasmFunctionRootNode extends WasmRootNode {
         // The reason for this is that the operand stack cannot be passed
         // as an argument to the loop-node's execute method,
         // and must be restored at the beginning of the loop body.
-        final int localCount = localCount();
         moveArgumentsToLocals(frame);
 
         // WebAssembly rules dictate that a function's locals must be initialized to zero before
         // function invocation. For more information, check the specification:
         // https://webassembly.github.io/spec/core/exec/instructions.html#function-calls
-        initializeLocals(frame);
+        WasmFrame.initializeLocals(frame, paramCount(), codeEntry);
 
         final int resultCount = resultCount();
         CompilerAsserts.partialEvaluationConstant(resultCount);
@@ -146,53 +130,10 @@ public class WasmFunctionRootNode extends WasmRootNode {
         }
 
         try {
-            functionNode.execute(frame, instance);
+            return functionNode.execute(frame, instance);
         } catch (StackOverflowError e) {
             enterErrorBranch();
             throw WasmException.create(Failure.CALL_STACK_EXHAUSTED);
-        }
-        if (resultCount == 0) {
-            return WasmConstant.VOID;
-        } else if (resultCount == 1) {
-            final int resultType = resultType(0);
-            CompilerAsserts.partialEvaluationConstant(resultType);
-            return switch (resultType) {
-                case WasmType.I32_TYPE -> popInt(frame, localCount);
-                case WasmType.I64_TYPE -> popLong(frame, localCount);
-                case WasmType.F32_TYPE -> popFloat(frame, localCount);
-                case WasmType.F64_TYPE -> popDouble(frame, localCount);
-                case WasmType.V128_TYPE -> Vector128Ops.SINGLETON_IMPLEMENTATION.toVector128(popVector128(frame, localCount));
-                default -> {
-                    assert WasmType.isReferenceType(resultType);
-                    yield popReference(frame, localCount);
-                }
-            };
-        } else {
-            moveResultValuesToMultiValueStack(frame, resultCount, localCount);
-            return WasmConstant.MULTI_VALUE;
-        }
-    }
-
-    @ExplodeLoop
-    private void moveResultValuesToMultiValueStack(VirtualFrame frame, int resultCount, int localCount) {
-        CompilerAsserts.partialEvaluationConstant(resultCount);
-        final var multiValueStack = WasmLanguage.get(this).multiValueStack();
-        final long[] primitiveMultiValueStack = multiValueStack.primitiveStack();
-        final Object[] objectMultiValueStack = multiValueStack.objectStack();
-        for (int i = 0; i < resultCount; i++) {
-            final int resultType = resultType(i);
-            CompilerAsserts.partialEvaluationConstant(resultType);
-            switch (resultType) {
-                case WasmType.I32_TYPE -> primitiveMultiValueStack[i] = popInt(frame, localCount + i);
-                case WasmType.I64_TYPE -> primitiveMultiValueStack[i] = popLong(frame, localCount + i);
-                case WasmType.F32_TYPE -> primitiveMultiValueStack[i] = Float.floatToRawIntBits(popFloat(frame, localCount + i));
-                case WasmType.F64_TYPE -> primitiveMultiValueStack[i] = Double.doubleToRawLongBits(popDouble(frame, localCount + i));
-                case WasmType.V128_TYPE -> objectMultiValueStack[i] = Vector128Ops.SINGLETON_IMPLEMENTATION.toVector128(popVector128(frame, localCount + i));
-                default -> {
-                    assert WasmType.isReferenceType(resultType);
-                    objectMultiValueStack[i] = popReference(frame, localCount + i);
-                }
-            }
         }
     }
 
@@ -213,25 +154,6 @@ public class WasmFunctionRootNode extends WasmRootNode {
                 default -> {
                     assert WasmType.isReferenceType(type);
                     pushReference(frame, i, arg);
-                }
-            }
-        }
-    }
-
-    @ExplodeLoop
-    private void initializeLocals(VirtualFrame frame) {
-        int paramCount = paramCount();
-        for (int i = paramCount; i != localCount(); ++i) {
-            int type = localType(i);
-            switch (type) {
-                case WasmType.I32_TYPE -> pushInt(frame, i, 0);
-                case WasmType.I64_TYPE -> pushLong(frame, i, 0L);
-                case WasmType.F32_TYPE -> pushFloat(frame, i, 0F);
-                case WasmType.F64_TYPE -> pushDouble(frame, i, 0D);
-                case WasmType.V128_TYPE -> pushVector128(frame, i, Vector128Ops.SINGLETON_IMPLEMENTATION.fromVector128(Vector128.ZERO));
-                default -> {
-                    WasmType.isReferenceType(type);
-                    pushReference(frame, i, WasmConstant.NULL);
                 }
             }
         }
@@ -282,11 +204,9 @@ public class WasmFunctionRootNode extends WasmRootNode {
                 sourceSection = debugFunction.getSourceSection();
                 return;
             }
-            WasmContext context = WasmContext.get(this);
-            if (context != null) {
-                if (!context.getContextOptions().debugTestMode()) {
-                    sourceSection = debugFunction.loadSourceSection(context.environment());
-                }
+            WasmContext context = getContextOrNull();
+            if (context != null && !context.getContextOptions().debugTestMode()) {
+                sourceSection = debugFunction.loadSourceSection(context.environment());
             }
             if (sourceSection == null) {
                 sourceSection = debugFunction.createSourceSection(context == null ? null : context.environment());
@@ -307,7 +227,7 @@ public class WasmFunctionRootNode extends WasmRootNode {
                 sourceSection = debugFunction.getSourceSection();
                 return sourceSection;
             }
-            WasmContext context = WasmContext.get(this);
+            WasmContext context = getContextOrNull();
             sourceSection = debugFunction.createSourceSection(context == null ? null : context.environment());
         }
         return sourceSection;

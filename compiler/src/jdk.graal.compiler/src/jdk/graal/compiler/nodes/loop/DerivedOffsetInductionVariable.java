@@ -24,10 +24,13 @@
  */
 package jdk.graal.compiler.nodes.loop;
 
+import java.util.Collection;
+
 import jdk.graal.compiler.core.common.type.IntegerStamp;
 import jdk.graal.compiler.core.common.type.Stamp;
 import jdk.graal.compiler.debug.Assertions;
 import jdk.graal.compiler.debug.GraalError;
+import jdk.graal.compiler.nodes.LogicNode;
 import jdk.graal.compiler.nodes.NodeView;
 import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.calc.AddNode;
@@ -36,6 +39,9 @@ import jdk.graal.compiler.nodes.calc.IntegerConvertNode;
 import jdk.graal.compiler.nodes.calc.NegateNode;
 import jdk.graal.compiler.nodes.calc.SubNode;
 import jdk.graal.compiler.phases.common.util.LoopUtility;
+import jdk.graal.compiler.replacements.nodes.arithmetic.IntegerAddExactOverflowNode;
+import jdk.graal.compiler.replacements.nodes.arithmetic.IntegerSubExactOverflowNode;
+import jdk.vm.ci.code.CodeUtil;
 
 public class DerivedOffsetInductionVariable extends DerivedInductionVariable {
 
@@ -242,6 +248,38 @@ public class DerivedOffsetInductionVariable extends DerivedInductionVariable {
     }
 
     @Override
+    protected ValueNode collectLocalExtremumOverflowConditions(boolean assumeLoopEntered, Stamp stamp, ValueNode effectiveMaxTripCount, ValueNode baseExtremum,
+                    Collection<LogicNode> conditions) {
+        GraalError.guarantee(stamp instanceof IntegerStamp, "Expected integer stamp for %s but got %s", this, stamp);
+        GraalError.guarantee(baseExtremum != null, "Expected base extremum for %s", this);
+        ValueNode offsetValue = offset;
+        if (!offsetValue.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
+            offsetValue = IntegerConvertNode.convert(offsetValue, stamp, graph(), NodeView.DEFAULT);
+        }
+        if (value instanceof AddNode) {
+            LogicNode addOverflow = IntegerAddExactOverflowNode.create(baseExtremum, offsetValue);
+            if (!addOverflow.isContradiction()) {
+                conditions.add(graph().addOrUniqueWithInputs(addOverflow));
+            }
+        } else {
+            GraalError.guarantee(value instanceof SubNode, "Expected subtraction-based offset induction variable for %s but got %s", this, value);
+            SubNode sub = (SubNode) value;
+            if (base.valueNode() == sub.getX()) {
+                LogicNode subOverflow = IntegerSubExactOverflowNode.create(baseExtremum, offsetValue);
+                if (!subOverflow.isContradiction()) {
+                    conditions.add(graph().addOrUniqueWithInputs(subOverflow));
+                }
+            } else {
+                LogicNode subOverflow = IntegerSubExactOverflowNode.create(offsetValue, baseExtremum);
+                if (!subOverflow.isContradiction()) {
+                    conditions.add(graph().addOrUniqueWithInputs(subOverflow));
+                }
+            }
+        }
+        return op(baseExtremum, offsetValue);
+    }
+
+    @Override
     public ValueNode exitValueNode() {
         return op(base.exitValueNode(), offset);
     }
@@ -293,7 +331,16 @@ public class DerivedOffsetInductionVariable extends DerivedInductionVariable {
         if (this == ref) {
             return 1;
         }
-        return base.constantScale(ref) * (value instanceof SubNode && baseIsSubtrahend ? -1 : 1);
+        long baseScale = base.constantScale(ref);
+        if (value instanceof SubNode && baseIsSubtrahend) {
+            /*
+             * For `offset - base*scale`, the negated scale must be sign extended to the
+             * IV's arithmetic width to preserve the wrapping semantics (-Integer.MIN_VALUE == Integer.MIN_VALUE)
+             */
+            int bits = IntegerStamp.getBits(valueNode().stamp(NodeView.DEFAULT));
+            return CodeUtil.signExtend(-baseScale, bits);
+        }
+        return baseScale;
     }
 
     @Override
@@ -309,6 +356,10 @@ public class DerivedOffsetInductionVariable extends DerivedInductionVariable {
         assert !offsetIsZero(ref);
         if (!base.offsetIsZero(ref)) {
             return null;
+        }
+        // In the affine form iv = scale * ref + offset, base - offset contributes -offset.
+        if (value instanceof SubNode && !baseIsSubtrahend) {
+            return graph().addOrUniqueWithInputs(NegateNode.create(offset, NodeView.DEFAULT));
         }
         return offset;
     }

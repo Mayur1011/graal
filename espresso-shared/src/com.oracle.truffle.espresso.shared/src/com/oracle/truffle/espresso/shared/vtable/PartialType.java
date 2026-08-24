@@ -40,17 +40,17 @@ import com.oracle.truffle.espresso.shared.meta.TypeAccess;
 
 /**
  * A representation of a type in the process of being created, providing access to the data
- * necessary for building method tables. There should be no {@code null} entries in any of the
+ * necessary for building tables. There should be no {@code null} entries in any of the
  * {@link List} or {@link EconomicMap} returned by the methods of this interface.
  *
  * @param <C> The class providing access to the VM-side java {@link Class}.
  * @param <M> The class providing access to the VM-side java {@link java.lang.reflect.Method}.
  * @param <F> The class providing access to the VM-side java {@link java.lang.reflect.Field}.
  */
-public interface PartialType<C extends TypeAccess<C, M, F>, M extends MethodAccess<C, M, F>, F extends FieldAccess<C, M, F>> extends Named {
+public interface PartialType<C extends TypeAccess<C, M, F>, M extends MethodAccess<C, M, F>, F extends FieldAccess<C, M, F>> extends Named, ModifiersProvider {
     /**
      * The vtable of the declared superclass of this type, as would be constructed by a previous
-     * call to {@link VTable#create(PartialType, boolean, boolean, boolean)}.
+     * call to {@link VTable#create(PartialType)}.
      * <p>
      * If this type does not have a superclass, this method should return an empty list, and not
      * {@code null}.
@@ -70,7 +70,7 @@ public interface PartialType<C extends TypeAccess<C, M, F>, M extends MethodAcce
     /**
      * The list of methods this type declares.
      */
-    List<? extends PartialMethod<C, M, F>> getDeclaredMethodsList();
+    List<? extends TableEntry<C, M, F>> getDeclaredMethodsList();
 
     /**
      * Whether {@link PartialType this type} will share the same runtime package as the given
@@ -79,20 +79,18 @@ public interface PartialType<C extends TypeAccess<C, M, F>, M extends MethodAcce
     boolean sameRuntimePackage(C otherType);
 
     /**
-     * If the runtime allows selecting private methods for interface invokes (For java versions <=
-     * 8), this method should be implemented.
-     * <p>
-     * It can be left as unimplemented for runtimes that do not support this behavior.
-     * <p>
-     * <p>
      * This method searches for a declaration of an instance method with the given {@code name} and
      * {@code signature} starting with this type, and continuing with the direct superclass of that
      * class, and so forth, until a method is found or no further superclasses exist.
      * <p>
      * If a method is found, it is the selected method. This method may be
      * {@link ModifiersProvider#isPrivate() private}.
+     * <p>
+     * This method is needed for runtimes that do not use the default
+     * {@link VTable#create(PartialType)}
      */
-    default PartialMethod<C, M, F> lookupOverrideWithPrivate(@SuppressWarnings("unused") Symbol<Name> name, @SuppressWarnings("unused") Symbol<Signature> signature) {
+    default TableEntry<C, M, F> fallbackLookup(@SuppressWarnings("unused") Symbol<Name> name, @SuppressWarnings("unused") Symbol<Signature> signature,
+                    @SuppressWarnings("unused") boolean includePrivate) {
         return null;
     }
 }

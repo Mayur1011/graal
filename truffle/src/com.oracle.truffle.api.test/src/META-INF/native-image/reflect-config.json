@@ -163,7 +163,8 @@
   {
     "name": "com.oracle.truffle.polyglot.InternalResourceRoots",
     "methods": [
-      { "name": "getInstance", "parameterTypes": [] }
+      { "name": "getInstance", "parameterTypes": [] },
+      { "name": "setTestCacheRoot", "parameterTypes": ["java.nio.file.Path", "boolean"] }
     ]
   },
   {
@@ -205,6 +206,10 @@
   {
     "name": "com.oracle.truffle.api.test.polyglot.TruffleFileTest$TestRegisterOnDisposeHostSupport",
     "allPublicMethods": true
+  },
+  {
+    "name": "com.oracle.truffle.api.test.polyglot.TruffleFileTest$EmptyPathTestFs",
+    "allDeclaredMethods": true, "allPublicMethods": true
   },
   {
     "name": "jdk.internal.module.Modules",

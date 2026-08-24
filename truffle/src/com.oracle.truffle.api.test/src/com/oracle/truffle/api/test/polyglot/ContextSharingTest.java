@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -93,9 +93,19 @@ public class ContextSharingTest {
 
     @AfterClass
     public static void tearDown() {
-        if (context != null) {
-            context.close();
-            secondaryContext.close();
+        try {
+            if (context != null) {
+                context.close();
+            }
+        } finally {
+            try {
+                if (secondaryContext != null) {
+                    secondaryContext.close();
+                }
+            } finally {
+                context = null;
+                secondaryContext = null;
+            }
         }
     }
 
@@ -415,6 +425,20 @@ public class ContextSharingTest {
         });
 
         c1.close();
+    }
+
+    @Test
+    public void testTransitiveValueMigrationPreservesDelegateContext() {
+        try (Context c0 = createContext(true);
+                        Context c1 = createContext(true);
+                        Context c2 = createContext(true)) {
+            Value c0Value = c0.asValue(new IdentityExecutable(c0));
+            Value c1Value = c1.asValue(c0Value);
+            Value c2Value = c2.asValue(c1Value);
+
+            assertTrue(c2Value.canExecute());
+            assertEquals(42, c2Value.execute(42).asInt());
+        }
     }
 
     @Test

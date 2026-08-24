@@ -40,7 +40,7 @@ import org.graalvm.word.PointerBase;
 
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.objectfile.ObjectFile;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.graal.code.CGlobalDataInfo;
 import com.oracle.svm.core.imagelayer.BuildingImageLayerPredicate;
@@ -104,6 +104,10 @@ public class HostedDynamicLayerInfo extends DynamicImageLayerInfo {
         return (HostedDynamicLayerInfo) ImageSingletons.lookup(DynamicImageLayerInfo.class);
     }
 
+    public boolean isDelayedMethodSymbol(String symbolName) {
+        return symbolName != null && (previousLayerDelayedMethodSymbols.contains(symbolName) || (delayedMethodSymbols != null && delayedMethodSymbols.containsKey(symbolName)));
+    }
+
     private HostedDynamicLayerInfo(int layerNumber, String codeSectionStartSymbol, List<String> libNames,
                     Set<String> previousLayerDelayedMethodSymbols, Set<Integer> previousLayerDelayedMethodIds) {
         super(layerNumber);
@@ -149,7 +153,7 @@ public class HostedDynamicLayerInfo extends DynamicImageLayerInfo {
         if (aMethod.isInSharedLayer()) {
             var loader = HostedImageLayerBuildingSupport.singleton().getLoader();
             var methodData = loader.getHostedMethodData(aMethod);
-            return new MethodNameInfo(methodData.getHostedMethodName().toString(), methodData.getHostedMethodUniqueName().toString());
+            return new MethodNameInfo(methodData.getHostedMethodName(), methodData.getHostedMethodUniqueName());
         } else {
             return null;
         }
@@ -237,8 +241,8 @@ public class HostedDynamicLayerInfo extends DynamicImageLayerInfo {
                     /*
                      * First write out next layer number.
                      */
-                    var snapshotBuilder = ((SVMImageLayerWriter.ImageSingletonWriterImpl) writer).getSnapshotBuilder();
-                    snapshotBuilder.setNextLayerNumber(singleton.nextLayerNumber);
+                    var snapshotWriter = ((SVMImageSingletonWriter) writer).getSnapshotWriter();
+                    snapshotWriter.setNextLayerNumber(singleton.nextLayerNumber);
 
                     /*
                      * Next write the start of the code section
@@ -269,8 +273,8 @@ public class HostedDynamicLayerInfo extends DynamicImageLayerInfo {
     static class SingletonInstantiator implements SingletonLayeredCallbacks.LayeredSingletonInstantiator<HostedDynamicLayerInfo> {
         @Override
         public HostedDynamicLayerInfo createFromLoader(ImageSingletonLoader loader) {
-            var snapshotReader = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotReader();
-            int layerNumber = snapshotReader.getNextLayerNumber();
+            var snapshotLoader = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotLoader();
+            int layerNumber = snapshotLoader.getNextLayerNumber();
 
             String codeSectionStartSymbol = loader.readString("codeSectionStartSymbol");
 

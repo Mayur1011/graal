@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,11 @@
  */
 package org.graalvm.wasm;
 
+import org.graalvm.wasm.types.DefinedType;
+
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import org.graalvm.wasm.types.DefinedType;
 
 public final class WasmFunction {
     private final SymbolTable symbolTable;
@@ -55,6 +56,7 @@ public final class WasmFunction {
     @CompilationFinal private CallTarget callTarget;
     /** Interop call adapter for argument and return value validation and conversion. */
     @CompilationFinal private volatile CallTarget interopCallAdapter;
+    @CompilationFinal private boolean returnCalls;
 
     /**
      * Represents a WebAssembly function.
@@ -170,6 +172,14 @@ public final class WasmFunction {
         this.callTarget = callTarget;
     }
 
+    public void reportReturnCall() {
+        returnCalls = true;
+    }
+
+    public boolean containsReturnCalls() {
+        return returnCalls;
+    }
+
     public CallTarget getInteropCallAdapter() {
         return interopCallAdapter;
     }
@@ -179,7 +189,7 @@ public final class WasmFunction {
         CallTarget callAdapter = this.interopCallAdapter;
         if (callAdapter == null) {
             // Benign initialization race: The call target will be the same each time.
-            callAdapter = language.interopCallAdapterFor(type().asFunctionType());
+            callAdapter = language.interopCallAdapterFor(type());
             this.interopCallAdapter = callAdapter;
         }
         return callAdapter;

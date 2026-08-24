@@ -52,12 +52,13 @@ They are useful to users and language and tool implementers.
 - `--engine.BytecodeHistogramInterval` : Print and reset the opcode histogram at a fixed interval while BytecodeHistogram is enabled. Use 0 to disable periodic printing and print only once at shutdown. Examples: 250ms, 2s, 1m.
 - `--engine.BytecodeLanguageFilter` : Limit tracing and statistics to specific language IDs. Provide a comma-separated list of language IDs, for example: `js`, `python`. An empty value includes all languages. Applies to `--engine.TraceBytecode`, `--engine.TraceBytecodeTransition`, and `--engine.BytecodeHistogram`.
 - `--engine.BytecodeMethodFilter` : Limit tracing and statistics to selected methods. Matches against `RootNode.getQualifiedName()`. Provide a comma-separated list of includes, or excludes prefixed with `~`. An empty value means no restriction. Whitespace around commas is ignored. Applies to `--engine.TraceBytecode`, `--engine.TraceBytecodeTransition`, and `--engine.BytecodeHistogram`.
-- `--engine.HostCallStackHeadRoom=[1, inf)<B>|<KB>|<MB>|<GB>` : Stack space headroom for calls to the host.
+- `--engine.ForceStaticObjectSafetyChecks=true|false` : On property accesses, the Static Object Model always performs safety checks, overriding engine.RelaxStaticObjectSafetyChecks and builder-level safety check configuration.
+- `--engine.HostCallStackHeadRoom=[0, inf)<B>|<KB>|<MB>|<GB>` : Stack space headroom for calls to the host. A value of 0 disables this check.
 - `--engine.InterpreterCallStackHeadRoom=[0, inf)<B>|<KB>|<MB>|<GB>` : Stack space headroom for any interpreter call. Supported only in the AOT mode.
 - `--engine.IsolateMemoryProtection=true|false` : Enable memory protection for the isolate.
 - `--engine.IsolateOption.<key>=<value>` : Isolate VM options.
 - `--engine.PreinitializeContexts` : Preinitialize language contexts for given languages.
-- `--engine.RelaxStaticObjectSafetyChecks` : On property accesses, the Static Object Model does not perform shape checks and uses unsafe casts
+- `--engine.RelaxStaticObjectSafetyChecks=true|false` : On property accesses, the Static Object Model does not perform shape checks and uses unsafe casts
 - `--engine.SourceCacheStatisticDetails` : Print source cache statistics for an engine when the engine is closed. With the details enabled, statistics for all individual sources are printed.
 - `--engine.SourceCacheStatistics` : Print source cache statistics for an engine when the engine is closed.
 - `--engine.SynchronousThreadLocalActionMaxWait=[0, inf)` : How long to wait for other threads to reach a synchronous ThreadLocalAction before cancelling it, in seconds. 0 means no limit.
@@ -78,6 +79,7 @@ The accepted values are:
   Diagnose - Retry compilation with extra diagnostics enabled.
     ExitVM - Exit the VM process.
 - `--engine.CompilerIdleDelay=<ms>` : Set the time in milliseconds an idle Truffle compiler thread will wait for new tasks before terminating. New compiler threads will be started once new compilation tasks are submitted. Select '0' to never terminate the Truffle compiler thread. The option is not supported by all Truffle runtimes. On the runtime which doesn't support it the option has no effect. default: 10000
+- `--engine.CompilerThreadStackSize=[0, inf)B|KB|MB|GB` : Set the requested stack size of Truffle compiler threads. By default compiler threads use 640KB stack space. The requested size is rounded up to implementation-specific minima and page sizes as needed.
 - `--engine.CompilerThreads=[1, inf)` : Manually set the number of compiler threads. By default, the number of compiler threads is scaled with the number of available cores on the CPU.
 - `--engine.EncodedGraphCachePurgeDelay=<ms>` : Delay, in milliseconds, after which the encoded graph cache is dropped when a Truffle compiler thread becomes idle (default: 10000).
 - `--engine.FirstTierBackedgeCounts=true|false` : Whether to emit look-back-edge counters in the first-tier compilations. (default: true)
@@ -134,7 +136,7 @@ These are internal options for debugging language implementations and tools.
 - `--engine.TriggerUncaughtExceptionHandlerForCancel` : Propagates cancel execution exception into UncaughtExceptionHandler. For testing purposes only.
 - `--engine.UseConservativeContextReferences` : Enables conservative context references. This allows invalid sharing between contexts. For testing purposes only.
 - `--engine.UsePreInitializedContext=true|false` : Use pre-initialized context when it's available (default: true).
-- `--engine.DebugCacheCompile=none|compiled|hot|aot|executed` : Policy to use to to force compilation for executed call targets before persisting the engine. Possible values are:
+- `--engine.DebugCacheCompile=none|compiled|hot|aot|executed` : Policy to use to force compilation for executed call targets before persisting the engine. Possible values are:
   - 'none':     No compilations will be persisted and existing compilations will be invalidated.
   - 'compiled': No compilations will be forced but finished compilations will be persisted.
   - 'hot':      (default) All started compilations will be completed and then persisted.
@@ -151,8 +153,9 @@ These are internal options for debugging language implementations and tools.
 - `--engine.CompileImmediately` : Compile immediately to test Truffle compilation
 - `--engine.CompileOnly=<name>,<name>,...` : Restrict compilation to ','-separated list of includes (or excludes prefixed with '~'). No restriction by default.
 - `--engine.DynamicCompilationThresholds=true|false` : Reduce or increase the compilation threshold depending on the size of the compilation queue (default: true).
+- `--engine.DynamicCompilationThresholdsHighLoadSlope=[0.0, inf)` : The slope used to increase compilation thresholds when compilation queue load is above DynamicCompilationThresholdsMaxNormalLoad (default: 0.09).
 - `--engine.DynamicCompilationThresholdsMaxNormalLoad=[1, inf)` : The desired maximum compilation queue load. When the load rises above this value, the compilation thresholds are increased. The load is scaled by the number of compiler threads.  (default: 90)
-- `--engine.DynamicCompilationThresholdsMinNormalLoad=[1, inf)` : The desired minimum compilation queue load. When the load falls below this value, the compilation thresholds are decreased. The load is scaled by the number of compiler threads (default: 10).
+- `--engine.DynamicCompilationThresholdsMinNormalLoad=[0, inf)` : The desired minimum compilation queue load. When the load falls below this value, the compilation thresholds are decreased. The load is scaled by the number of compiler threads (default: 0).
 - `--engine.DynamicCompilationThresholdsMinScale=[0.0, inf)` : The minimal scale the compilation thresholds can be reduced to (default: 0.1).
 - `--engine.OSRCompilationThreshold=[1, inf)` : Number of loop iterations until on-stack-replacement compilation is triggered (default 100352).
 - `--engine.OSRMaxCompilationReAttempts=[0, inf)` : Number of compilation re-attempts before bailing out of OSR compilation for a given method (default 30). This number is an approximation of the acceptable number of deopts.

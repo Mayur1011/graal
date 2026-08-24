@@ -60,7 +60,6 @@ import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.SVMHost;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.code.CompileQueue;
-import com.oracle.svm.hosted.config.HybridLayoutSupport;
 import com.oracle.svm.hosted.image.NativeImageCodeCache;
 import com.oracle.svm.hosted.image.NativeImageCodeCacheFactory;
 import com.oracle.svm.hosted.image.NativeImageHeap;
@@ -91,7 +90,7 @@ import com.oracle.svm.hosted.webimage.wasmgc.WebImageWasmGCCompileQueue;
 import com.oracle.svm.hosted.webimage.wasmgc.codegen.WebImageWasmGCCodeGen;
 import com.oracle.svm.hosted.webimage.wasmgc.codegen.WebImageWasmGCProviders;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.webimage.object.ConstantIdentityMapping;
@@ -99,13 +98,14 @@ import com.oracle.svm.webimage.object.ConstantIdentityMapping;
 import jdk.graal.compiler.core.common.CompressEncoding;
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.options.OptionValues;
+import jdk.vm.ci.meta.JavaKind;
 
 /**
  * Default configuration for Web Image.
  *
  * It serves as an abstraction of important policies for Web Image.
  */
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 public class WebImageHostedConfiguration extends HostedConfiguration {
 
     public static void setDefaultIfEmpty() {
@@ -113,9 +113,8 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
             ImageSingletons.add(HostedConfiguration.class, new WebImageHostedConfiguration());
             CompressEncoding compressEncoding = new CompressEncoding(0, 0);
             ImageSingletons.add(CompressEncoding.class, compressEncoding);
-            ObjectLayout objectLayout = createObjectLayout(IdentityHashMode.OBJECT_HEADER);
+            ObjectLayout objectLayout = createObjectLayout(JavaKind.Object, IdentityHashMode.OBJECT_HEADER);
             ImageSingletons.add(ObjectLayout.class, objectLayout);
-            ImageSingletons.add(HybridLayoutSupport.class, new HybridLayoutSupport());
         }
     }
 
@@ -228,7 +227,7 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
         };
     }
 
-    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+    @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
     private static final class WebImageCodeCacheFactory extends NativeImageCodeCacheFactory {
         @Override
         public NativeImageCodeCache newCodeCache(CompileQueue compileQueue, NativeImageHeap heap, Platform targetPlatform, Path tempDir) {

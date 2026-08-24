@@ -10,7 +10,7 @@ redirect_from: /reference-manual/native-image/Agent/
 
 The Native Image tool relies on the static analysis of an application's reachable code at runtime. 
 However, the analysis cannot always completely predict all usages of the Java Native Interface (JNI), Foreign Function and Memory (FFM) API, Java Reflection, Dynamic Proxy objects, or class path resources. 
-Undetected usages of these dynamic features must be provided to the `native-image` tool in the form of [metadata](ReachabilityMetadata.md) (precomputed in code or as JSON configuration files). For a complete reference of JSON field configurations, see [Reachability Metadata JSON Format Reference](ReachabilityMetadata.md#reachability-metadata-json-format-reference).
+Undetected usages of these dynamic features must be provided to the `native-image` tool in the form of [metadata](ReachabilityMetadata.md) (precomputed in code or as JSON configuration files). For a complete reference of JSON field configurations, see [Metadata JSON Format Reference](ReachabilityMetadata.md#metadata-json-format-reference).
 
 Here you will find information how to automatically collect metadata for an application and write JSON configuration files.
 To learn how to compute dynamic feature calls in code, see [Reachability Metadata](ReachabilityMetadata.md#computing-metadata-in-code).
@@ -71,6 +71,56 @@ Conditional metadata is mainly aimed towards library maintainers with the goal o
 
 To collect conditional metadata with the agent, see [Conditional Metadata Collection](ExperimentalAgentOptions.md#generating-conditional-configuration-using-the-agent).
 
+### Dynamic Metadata Collection From a Native Image
+
+This workflow collects metadata dynamically by tracing an actual native image execution.
+The generated metadata is conditional because each traced access can be guarded by a `typeReached` condition derived from the run-time call stack.
+To generate conditional metadata this way, build the image with metadata tracing support:
+```shell
+native-image -H:+UnlockExperimentalVMOptions -H:+MetadataTracingSupport -H:-UnlockExperimentalVMOptions ...
+```
+
+#### Creating a Complete Image for Tracing
+
+Metadata tracing can only record metadata that was included in the native image at build time.
+For exploratory tracing, use `-H:Preserve` at build time to include the packages, modules, or class path entries whose metadata you want to observe during tracing.
+This intentionally expands the image for the discovery phase so the subsequent run can deduce which metadata is actually needed.
+For example, preserve a package and its subpackages while enabling tracing support:
+
+```shell
+native-image -H:+UnlockExperimentalVMOptions -H:+MetadataTracingSupport -H:-UnlockExperimentalVMOptions -H:Preserve=package=com.example.library.* ...
+```
+
+For broad exploratory runs, use `-H:Preserve=all`:
+
+```shell
+native-image -H:+UnlockExperimentalVMOptions -H:+MetadataTracingSupport -H:-UnlockExperimentalVMOptions -H:Preserve=all ...
+```
+
+`-H:Preserve=all` can require significantly more memory and produces larger executables.
+You can use it for one exploratory build with metadata tracing support to include as much metadata as possible, then use the traced run to deduce which metadata is actually needed.
+Regular follow-up builds can use the generated metadata without `-H:Preserve=all`.
+This combines broad discovery with smaller and less resource-intensive normal builds.
+If you still need preservation after exploration, prefer a specific selector such as `-H:Preserve=package=<package>` once you know which application or library packages need metadata.
+
+At run time, pass `-XX:TraceMetadata=path=<output-dir>` and `-XX:TraceMetadataConditionPackages=<package-1>,<package-2>`.
+This produces the most accurate conditional metadata because the traced accesses follow Native Image semantics.
+The package list uses package prefixes.
+When a traced access occurs, Native Image uses the first stack frame whose class is in one of those packages as the `typeReached` condition.
+Trace events without a matching stack frame are ignored.
+
+For example:
+```shell
+./application -XX:TraceMetadata=path=metadata-output -XX:TraceMetadataConditionPackages=com.example.application
+```
+
+Run the image with inputs that cover each code path that needs conditional metadata, writing each run to a separate output directory.
+Then merge the outputs:
+```shell
+native-image-utils generate --input-dir=metadata-output-1 --input-dir=metadata-output-2 --output-dir=merged-metadata
+```
+Alternatively, the image generation and aggregation steps can be repeated in a loop until the generated metadata converges.
+
 ## Agent Advanced Usage
 
 ### Caller-based Filters
@@ -128,8 +178,33 @@ Unlike the caller-based filters described above, which filter dynamic accesses b
 Therefore, access filters enable directly excluding packages and classes (and their members) from the generated configuration.
 
 By default, all accessed classes (which also pass the caller-based filters and the built-in filters) are included in the generated configuration.
-Using the `access-filter-file` option, a custom filter file that follows the file structure described above can be added.
-The option can be specified more than once to add multiple filter files and can be combined with the other filter options, for example, `-agentlib:access-filter-file=/path/to/access-filter-file,caller-filter-file=/path/to/caller-filter-file,config-output-dir=...`.
+Use the `access-filter-file` option to specify a custom access-filter file.
+The file can have any name; this guide uses _access-filter.json_.
+The access-filter file uses the same `rules` and optional `regexRules` structure as a [caller-based filter file](#caller-based-filters).
+For example, the following file excludes all classes in `com.example.internal` and its subpackages from generated metadata:
+
+```json
+{
+  "rules": [
+    {
+      "excludeClasses": "com.example.internal.**"
+    }
+  ]
+}
+```
+
+Specify the file when you start the tracing agent:
+
+```shell
+java -agentlib:native-image-agent=access-filter-file=/path/to/access-filter.json,config-output-dir=metadata-output ...
+```
+
+You can specify `access-filter-file` more than once to combine multiple files.
+You can also combine access filters with caller filters:
+
+```shell
+java -agentlib:native-image-agent=access-filter-file=/path/to/access-filter.json,caller-filter-file=/path/to/caller-filter.json,config-output-dir=metadata-output ...
+```
 
 ### Specify Configuration Files as Arguments
 

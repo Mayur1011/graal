@@ -1607,6 +1607,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
 
         /**
+<<<<<<< HEAD
          * Try to merge multiple virtual object states into a single object state. If
          * the incoming
          * object states are compatible, then this method will create PhiNodes for the
@@ -1621,6 +1622,15 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
          * PhiNodes.
          * The states may also be incompatible if they contain escaped large writes to
          * byte arrays
+=======
+         * Try to merge multiple virtual object states into a single object state. If the incoming
+         * object states are compatible, then this method will create PhiNodes for the object's
+         * entries where needed. If they are incompatible, then all incoming virtual objects will be
+         * materialized, and a PhiNode for the materialized values will be created. Object states
+         * can be incompatible if they contain {@code long} or {@code double} values occupying two
+         * {@code int} slots in such a way that their values cannot be merged using PhiNodes.
+         * The states may also be incompatible if they contain escaped large writes to byte arrays
+>>>>>>> upstream/master
          * in such a way that they cannot be merged using PhiNodes.
          *
          * @param states the predecessor block states of the merge

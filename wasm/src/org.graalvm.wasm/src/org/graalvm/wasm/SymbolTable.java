@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -63,12 +63,7 @@ import org.graalvm.wasm.memory.WasmMemoryFactory;
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.staticobject.DefaultStaticProperty;
-import com.oracle.truffle.api.staticobject.StaticProperty;
-import com.oracle.truffle.api.staticobject.StaticShape;
-import org.graalvm.wasm.struct.WasmStruct;
 import org.graalvm.wasm.struct.WasmStructAccess;
-import org.graalvm.wasm.struct.WasmStructFactory;
 import org.graalvm.wasm.types.AbstractHeapType;
 import org.graalvm.wasm.types.ArrayType;
 import org.graalvm.wasm.types.CompositeType;
@@ -122,13 +117,14 @@ public abstract class SymbolTable {
      *            <p>
      *            <em>Note:</em> this is the upper bound defined by the module. A table instance
      *            might have a lower internal max allowed size in practice.
+     * @param indexType64 If the table uses index type 64.
      * @param elemType The element type of the table.
      * @param initValue The initial value of the table's elements, can be {@code null} if no
      *            initializer present
      * @param initBytecode The bytecode of the table's initializer expression, can be {@code null}
      *            if no initializer present
      */
-    public record TableInfo(int initialSize, int maximumSize, int elemType, Object initValue, byte[] initBytecode) {
+    public record TableInfo(long initialSize, long maximumSize, boolean indexType64, int elemType, Object initValue, byte[] initBytecode) {
     }
 
     /**
@@ -636,30 +632,13 @@ public abstract class SymbolTable {
         return new ArrayType(fieldType);
     }
 
-    StructType finishStructType(int structTypeIdx, int recursiveTypeGroupStart, WasmLanguage language) {
-        StaticShape.Builder shapeBuilder = StaticShape.newBuilder(language);
+    StructType finishStructType(int structTypeIdx, int recursiveTypeGroupStart) {
         FieldType[] fieldTypes = new FieldType[structTypeFieldCount(structTypeIdx)];
-        StaticProperty[] properties = new StaticProperty[structTypeFieldCount(structTypeIdx)];
-        WasmStructAccess superTypeAccess = hasSuperType(structTypeIdx) && isStructType(superType(structTypeIdx)) ? structTypeAccess(superType(structTypeIdx)) : null;
-        int superFieldCount = superTypeAccess != null ? superTypeAccess.properties().length : 0;
         for (int i = 0; i < fieldTypes.length; i++) {
             StorageType storageType = closedStorageTypeOf(structTypeFieldTypeAt(structTypeIdx, i), recursiveTypeGroupStart);
             byte mutability = structTypeFieldMutabilityAt(structTypeIdx, i);
             fieldTypes[i] = new FieldType(storageType, mutability);
-            if (i < superFieldCount) {
-                properties[i] = superTypeAccess.properties()[i];
-            } else {
-                properties[i] = new DefaultStaticProperty(Integer.toString(i));
-                shapeBuilder.property(properties[i], fieldTypes[i].javaClass(), mutability == Mutability.CONSTANT);
-            }
         }
-        StaticShape<WasmStructFactory> shape;
-        if (superTypeAccess != null) {
-            shape = shapeBuilder.build(superTypeAccess.shape());
-        } else {
-            shape = shapeBuilder.build(WasmStruct.class, WasmStructFactory.class);
-        }
-        structAccesses[structTypeIdx] = new WasmStructAccess(shape, properties);
         return new StructType(fieldTypes);
     }
 
@@ -699,7 +678,7 @@ public abstract class SymbolTable {
         for (int typeIndex = recursiveTypeGroupStart; typeIndex < typeCount; typeIndex++) {
             CompositeType compositeType = switch (typeKind(typeIndex)) {
                 case ARRAY_KIND -> finishArrayType(typeIndex, recursiveTypeGroupStart);
-                case STRUCT_KIND -> finishStructType(typeIndex, recursiveTypeGroupStart, language);
+                case STRUCT_KIND -> finishStructType(typeIndex, recursiveTypeGroupStart);
                 case FUNCTION_KIND -> finishFunctionType(typeIndex, recursiveTypeGroupStart);
                 default -> throw CompilerDirectives.shouldNotReachHere();
             };
@@ -722,7 +701,10 @@ public abstract class SymbolTable {
             int equivalenceClass = language.equivalenceClassFor(type);
             type.setTypeEquivalenceClass(equivalenceClass);
             if (isStructType(typeIndex)) {
-                type.setStructAccess(structTypeAccess(typeIndex));
+                WasmStructAccess superTypeAccess = hasSuperType(typeIndex) && isStructType(superType(typeIndex)) ? structTypeAccess(superType(typeIndex)) : null;
+                WasmStructAccess structAccess = language.canonicalStructAccessFor(equivalenceClass, type.asStructType(), superTypeAccess);
+                structAccesses[typeIndex] = structAccess;
+                type.setStructAccess(structAccess);
             }
             closedTypes[typeIndex] = type;
         }
@@ -1347,21 +1329,22 @@ public abstract class SymbolTable {
         }
     }
 
-    public void declareTable(int index, int declaredMinSize, int declaredMaxSize, int elemType, byte[] initBytecode, Object initValue, boolean referenceTypes) {
+    public void declareTable(int index, long declaredMinSize, long declaredMaxSize, boolean indexType64, int elemType, byte[] initBytecode, Object initValue,
+                    boolean referenceTypes) {
         checkNotParsed();
-        addTable(index, declaredMinSize, declaredMaxSize, elemType, initValue, initBytecode, referenceTypes);
+        addTable(index, declaredMinSize, declaredMaxSize, indexType64, elemType, initValue, initBytecode, referenceTypes);
         ValueType elementValueType = closedTypeOf(elemType);
         assert elementValueType.isReferenceType();
         ReferenceType elementType = (ReferenceType) elementValueType;
         module().addLinkAction((context, store, instance, imports) -> {
-            final int maxAllowedSize = minUnsigned(declaredMaxSize, module().limits().tableInstanceSizeLimit());
+            final int maxAllowedSize = (int) minUnsigned(declaredMaxSize, module().limits().tableInstanceSizeLimit());
             module().limits().checkTableInstanceSize(declaredMinSize);
             final WasmTable wasmTable;
             if (context.getContextOptions().memoryOverheadMode()) {
                 // Initialize an empty table in memory overhead mode.
-                wasmTable = new WasmTable(0, 0, 0, elementType);
+                wasmTable = new WasmTable(0, 0, 0, elementType, indexType64);
             } else {
-                wasmTable = new WasmTable(declaredMinSize, declaredMaxSize, maxAllowedSize, elementType);
+                wasmTable = new WasmTable(declaredMinSize, declaredMaxSize, maxAllowedSize, elementType, indexType64);
             }
             instance.setTable(index, wasmTable);
 
@@ -1369,9 +1352,9 @@ public abstract class SymbolTable {
         });
     }
 
-    void importTable(String moduleName, String tableName, int index, int initSize, int maxSize, int elemType, boolean referenceTypes) {
+    void importTable(String moduleName, String tableName, int index, long initSize, long maxSize, boolean indexType64, int elemType, boolean referenceTypes) {
         checkNotParsed();
-        addTable(index, initSize, maxSize, elemType, null, null, referenceTypes);
+        addTable(index, initSize, maxSize, indexType64, elemType, null, null, referenceTypes);
         final ImportDescriptor importedTable = new ImportDescriptor(moduleName, tableName, ImportIdentifier.TABLE, index, numImportedSymbols());
         importedTables.put(index, importedTable);
         importSymbol(importedTable);
@@ -1380,17 +1363,17 @@ public abstract class SymbolTable {
         ReferenceType elementType = (ReferenceType) elementValueType;
         module().addLinkAction((context, store, instance, imports) -> {
             instance.setTable(index, null);
-            store.linker().resolveTableImport(store, instance, importedTable, index, initSize, maxSize, elementType, imports);
+            store.linker().resolveTableImport(store, instance, importedTable, index, initSize, maxSize, indexType64, elementType, imports);
         });
     }
 
-    void addTable(int index, int minSize, int maxSize, int elemType, Object initValue, byte[] initBytecode, boolean referenceTypes) {
+    void addTable(int index, long minSize, long maxSize, boolean indexType64, int elemType, Object initValue, byte[] initBytecode, boolean referenceTypes) {
         if (!referenceTypes) {
             assertTrue(importedTables.isEmpty(), "A table has already been imported in the module.", Failure.MULTIPLE_TABLES);
             assertTrue(tableCount == 0, "A table has already been declared in the module.", Failure.MULTIPLE_TABLES);
         }
         ensureTableCapacity(index);
-        final TableInfo table = new TableInfo(minSize, maxSize, elemType, initValue, initBytecode);
+        final TableInfo table = new TableInfo(minSize, maxSize, indexType64, elemType, initValue, initBytecode);
         tables[index] = table;
         tableCount++;
     }
@@ -1432,13 +1415,13 @@ public abstract class SymbolTable {
         return exportedTables;
     }
 
-    public int tableInitialSize(int index) {
+    public long tableInitialSize(int index) {
         final TableInfo table = tables[index];
         assert table != null;
         return table.initialSize;
     }
 
-    public int tableMaximumSize(int index) {
+    public long tableMaximumSize(int index) {
         final TableInfo table = tables[index];
         assert table != null;
         return table.maximumSize;
@@ -1448,6 +1431,12 @@ public abstract class SymbolTable {
         final TableInfo table = tables[index];
         assert table != null;
         return table.elemType;
+    }
+
+    public boolean tableHasIndexType64(int index) {
+        final TableInfo table = tables[index];
+        assert table != null;
+        return table.indexType64;
     }
 
     public Object tableInitialValue(int index) {

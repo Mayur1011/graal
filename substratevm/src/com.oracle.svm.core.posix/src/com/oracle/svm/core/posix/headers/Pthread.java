@@ -29,6 +29,7 @@ import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.CFunction.Transition;
 import org.graalvm.nativeimage.c.function.CLibrary;
+import org.graalvm.nativeimage.c.struct.AllowWideningCast;
 import org.graalvm.nativeimage.c.struct.CPointerTo;
 import org.graalvm.nativeimage.c.struct.CStruct;
 import org.graalvm.nativeimage.c.type.VoidPointer;
@@ -38,7 +39,7 @@ import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordBase;
 
 import com.oracle.svm.core.posix.headers.Time.timespec;
-import com.oracle.svm.core.thread.VMThreads.OSThreadHandle;
+import com.oracle.svm.guest.staging.core.thread.OSThreadHandle;
 
 // Checkstyle: stop
 
@@ -78,8 +79,9 @@ public class Pthread {
     public interface pthread_key_t extends UnsignedWord {
     }
 
-    @CPointerTo(nameOfCType = "size_t")
+    @CPointerTo(nameOfCType = "pthread_key_t")
     public interface pthread_key_tPointer extends PointerBase {
+        @AllowWideningCast
         pthread_key_t read();
     }
 

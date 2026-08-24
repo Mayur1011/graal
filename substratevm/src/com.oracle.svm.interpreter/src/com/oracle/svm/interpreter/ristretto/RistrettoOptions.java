@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,11 +24,18 @@
  */
 package com.oracle.svm.interpreter.ristretto;
 
-import com.oracle.svm.core.option.RuntimeOptionKey;
+import org.graalvm.nativeimage.Platform.HOSTED_ONLY;
+import org.graalvm.nativeimage.Platforms;
+
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.guest.staging.option.RuntimeOptionValidationSupport;
+import com.oracle.svm.guest.staging.option.RuntimeOptionValidationSupport.RuntimeOptionValidation;
+import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.shared.option.HostedOptionKey;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.options.Option;
+import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 public class RistrettoOptions {
 
@@ -38,8 +45,23 @@ public class RistrettoOptions {
     @Option(help = "Number of invocations before compilation is triggered on a method.")//
     public static final RuntimeOptionKey<Integer> JITCompilerInvocationThreshold = new RuntimeOptionKey<>(1000);
 
+    @Option(help = "Use on-stack replacement to enter runtime-compiled Ristretto code from interpreted loops.")//
+    public static final RuntimeOptionKey<Boolean> JITUseOnStackReplacement = new RuntimeOptionKey<>(true);
+
+    @Option(help = "Number of loop backedges before OSR compilation is triggered for a method and target BCI.")//
+    public static final RuntimeOptionKey<Integer> JITCompilerOSRBackedgeThreshold = new RuntimeOptionKey<>(30000, RistrettoOptions::validateOSRBackedgeThreshold);
+
+    @Option(help = "Disable invocation-entry Ristretto JIT compilations while leaving OSR compilations enabled.")//
+    public static final RuntimeOptionKey<Boolean> JITDisableRootCompiles = new RuntimeOptionKey<>(false);
+
+    @Option(help = "Comma-separated method-name filters that restrict which methods may be compiled by the Ristretto JIT.")//
+    public static final RuntimeOptionKey<String> JITCompileOnly = new RuntimeOptionKey<>("");
+
     @Option(help = "Number of threads to use for Graal JIT compilation.")//
     public static final RuntimeOptionKey<Integer> JITCompilerThreadCount = new RuntimeOptionKey<>(1);
+
+    @Option(help = "Report a diagnostic message for a Ristretto compilation that runs longer than this many seconds and prevent this watcher from exiting the VM (0 leaves the generic CompilationWatchDog configuration unchanged).")//
+    public static final RuntimeOptionKey<Integer> JITCompilationWatchdogTimeoutSeconds = new RuntimeOptionKey<>(0, RistrettoOptions::validateCompilationWatchdogTimeout);
 
     @Option(help = "Trace decisions about when to compile what.")//
     public static final RuntimeOptionKey<Boolean> JITTraceCompilationQueuing = new RuntimeOptionKey<>(false);
@@ -50,12 +72,73 @@ public class RistrettoOptions {
     @Option(help = "Trace compilation events.")//
     public static final RuntimeOptionKey<Boolean> JITTraceCompilation = new RuntimeOptionKey<>(false);
 
+    @Option(help = "Trace installed Ristretto JIT code address ranges.")//
+    public static final RuntimeOptionKey<Boolean> JITTraceCodeInstallations = new RuntimeOptionKey<>(false);
+
     @Option(help = "Print stack traces of compiler exceptions.")//
     public static final RuntimeOptionKey<Boolean> JITPrintExceptions = new RuntimeOptionKey<>(false);
+
+    @Option(help = "Periodically dump Ristretto compiler statistics to stdout.")//
+    public static final HostedOptionKey<Boolean> JITTraceCompilerStatistics = new HostedOptionKey<>(false);
+
+    @Option(help = "Period, in seconds, between Ristretto compiler statistics dumps.")//
+    public static final HostedOptionKey<Integer> JITTraceCompilerStatisticsPeriodSeconds = new HostedOptionKey<>(60, RistrettoOptions::validateCompilerStatisticsPeriod);
+
+    private static void validateCompilerStatisticsPeriod(HostedOptionKey<Integer> option) {
+        if (option.getValue() <= 0) {
+            throw UserError.invalidOptionValue(option, option.getValue(), "The value must be positive.");
+        }
+    }
+
+    public static int getJITCompilerOSRBackedgeThreshold() {
+        return JITCompilerOSRBackedgeThreshold.getValue();
+    }
+
+    @Platforms(HOSTED_ONLY.class)
+    public static void registerRuntimeOptionValidations() {
+        RuntimeOptionValidationSupport.singleton().register(new RuntimeOptionValidation<>(RistrettoOptions::validateOSRBackedgeThreshold, JITCompilerOSRBackedgeThreshold));
+        RuntimeOptionValidationSupport.singleton().register(new RuntimeOptionValidation<>(RistrettoOptions::validateCompilationWatchdogTimeout, JITCompilationWatchdogTimeoutSeconds));
+    }
+
+    private static void validateOSRBackedgeThreshold(RuntimeOptionKey<Integer> optionKey) {
+        validateOSRBackedgeThresholdValue(optionKey.getValue());
+    }
+
+    private static void validateOSRBackedgeThresholdValue(int threshold) {
+        if (threshold < 0) {
+            throw new IllegalArgumentException("Option '" + JITCompilerOSRBackedgeThreshold.getName() + "' must be greater than or equal to 0.");
+        }
+    }
+
+    private static void validateCompilationWatchdogTimeout(RuntimeOptionKey<Integer> optionKey) {
+        validateCompilationWatchdogTimeoutValue(optionKey.getValue());
+    }
+
+    static void validateCompilationWatchdogTimeoutValue(int value) {
+        if (value < 0) {
+            throw new IllegalArgumentException("Option '" + JITCompilationWatchdogTimeoutSeconds.getName() + "' must be greater than or equal to 0.");
+        }
+    }
 
     public static final class ConcealedOptions {
         @Option(help = "Use deoptimization for runtime compiled code optimizations.")//
         public static final HostedOptionKey<Boolean> JITUseDeoptimization = new HostedOptionKey<>(true);
+    }
+
+    public static boolean matchesJITCompileOnly(Object method) {
+        String compileOnly = JITCompileOnly.getValue();
+        if (compileOnly.isBlank()) {
+            return true;
+        }
+
+        String methodName = method instanceof ResolvedJavaMethod resolvedMethod ? resolvedMethod.format("%H.%n(%p)") : String.valueOf(method);
+        for (String filter : compileOnly.split(",")) {
+            String trimmedFilter = filter.trim();
+            if (!trimmedFilter.isEmpty() && methodName.contains(trimmedFilter)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Fold

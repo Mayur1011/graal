@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -43,17 +43,15 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.shared.AlwaysInline;
 import com.oracle.svm.core.Isolates;
-import com.oracle.svm.core.NeverInline;
-import com.oracle.svm.core.RuntimeAssertionsSupport;
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.core.AssertionsSupport;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoTable;
+import com.oracle.svm.core.code.RuntimeCodeInstallation;
 import com.oracle.svm.core.code.RuntimeCodeInfoAccess;
 import com.oracle.svm.core.code.RuntimeCodeInfoMemory;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
@@ -65,7 +63,6 @@ import com.oracle.svm.core.genscavenge.HeapChunk.Header;
 import com.oracle.svm.core.genscavenge.UnalignedHeapChunk.UnalignedHeader;
 import com.oracle.svm.core.genscavenge.metaspace.MetaspaceImpl;
 import com.oracle.svm.core.genscavenge.remset.RememberedSet;
-import com.oracle.svm.core.graal.RuntimeCompilation;
 import com.oracle.svm.core.heap.AbstractPinnedObjectSupport;
 import com.oracle.svm.core.heap.AbstractPinnedObjectSupport.PinnedObjectImpl;
 import com.oracle.svm.core.heap.CodeReferenceMapDecoder;
@@ -79,23 +76,21 @@ import com.oracle.svm.core.heap.PhysicalMemory;
 import com.oracle.svm.core.heap.ReferenceHandler;
 import com.oracle.svm.core.heap.ReferenceHandlerThread;
 import com.oracle.svm.core.heap.ReferenceMapIndex;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.RuntimeCodeCacheCleaner;
 import com.oracle.svm.core.heap.SuspendSerialGCMaxHeapSize;
 import com.oracle.svm.core.heap.UninterruptibleObjectReferenceVisitor;
 import com.oracle.svm.core.heap.UninterruptibleObjectVisitor;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.jdk.RuntimeSupport;
 import com.oracle.svm.core.jfr.JfrGCWhen;
 import com.oracle.svm.core.jfr.JfrTicks;
 import com.oracle.svm.core.jfr.events.AllocationRequiringGCEvent;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.metaspace.Metaspace;
-import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.os.ChunkBasedCommittedMemoryProvider;
 import com.oracle.svm.core.snippets.ImplicitExceptions;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaFrame;
 import com.oracle.svm.core.stack.JavaFrames;
 import com.oracle.svm.core.stack.JavaStackWalk;
@@ -107,13 +102,19 @@ import com.oracle.svm.core.thread.PlatformThreads;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.threadlocal.VMThreadLocalSupport;
-import com.oracle.svm.core.util.TimeUtils;
 import com.oracle.svm.core.util.Timer;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.jdk.RuntimeSupport;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.shared.AlwaysInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.SubstrateUtil;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
@@ -134,11 +135,12 @@ public final class GCImpl implements GC {
 
     private final GCAccounting accounting = new GCAccounting();
     private final Timers timers = new Timers();
+    private final CollectionPolicies policies = new CollectionPolicies();
 
     private final CollectionVMOperation collectOperation = new CollectionVMOperation();
     private final ChunkReleaser chunkReleaser = new ChunkReleaser();
 
-    private final CollectionPolicy policy;
+    private CollectionPolicy policy;
     private boolean completeCollection = false;
     private boolean outOfMemoryCollection = false;
     private UnsignedWord collectionEpoch = Word.zero();
@@ -146,10 +148,15 @@ public final class GCImpl implements GC {
 
     @Platforms(Platform.HOSTED_ONLY.class)
     GCImpl() {
-        this.policy = CollectionPolicy.getInitialPolicy();
         if (ImageLayerBuildingSupport.firstImageBuild()) {
-            RuntimeSupport.getRuntimeSupport().addShutdownHook(_ -> printGCSummary());
+            RuntimeSupport.getRuntimeSupport().addTearDownHook(_ -> printGCSummary());
         }
+    }
+
+    /** Updates the {@link CollectionPolicy}, according to the option value. */
+    @Uninterruptible(reason = "Called during startup.")
+    void updatePolicy() {
+        policy = policies.getSelectedPolicy();
     }
 
     @Uninterruptible(reason = "Tear-down in progress.")
@@ -174,7 +181,7 @@ public final class GCImpl implements GC {
 
     @Override
     public void collect(GCCause cause) {
-        collect(cause, false);
+        collect(cause, cause.collectsCompletely());
     }
 
     public void maybeCollectOnAllocation(UnsignedWord allocationSize) {
@@ -523,7 +530,7 @@ public final class GCImpl implements GC {
 
     @Fold
     static boolean runtimeAssertions() {
-        return RuntimeAssertionsSupport.singleton().desiredAssertionStatus(GCImpl.class);
+        return AssertionsSupport.singleton().desiredAssertionStatus(GCImpl.class);
     }
 
     @Fold
@@ -531,11 +538,6 @@ public final class GCImpl implements GC {
         GCImpl gcImpl = HeapImpl.getGCImpl();
         assert gcImpl != null;
         return gcImpl;
-    }
-
-    @Override
-    public void collectCompletely(GCCause cause) {
-        collect(cause, true);
     }
 
     @AlwaysInline("GC performance")
@@ -574,12 +576,17 @@ public final class GCImpl implements GC {
 
             boolean compacting = completeCollection && SerialGCOptions.useCompactingOldGen();
             if (compacting) {
-                /*
-                 * Sweep and compact the entire heap. This already adjusts all pointers in the
-                 * reference objects that we process below, so we can (and need to) do it first.
-                 */
-                var old = (CompactingOldGeneration) HeapImpl.getHeapImpl().getOldGeneration();
-                old.sweepAndCompact(timers, chunkReleaser);
+                startTicks = JfrGCEvents.startGCPhasePause();
+                try {
+                    /*
+                     * Sweep and compact the entire heap. This already adjusts all pointers in the
+                     * reference objects that we process below, so we can (and need to) do it first.
+                     */
+                    var old = (CompactingOldGeneration) HeapImpl.getHeapImpl().getOldGeneration();
+                    old.sweepAndCompact(timers, chunkReleaser);
+                } finally {
+                    JfrGCEvents.emitGCPhasePauseEvent(getCollectionEpoch(), "Sweep and Compact", startTicks);
+                }
             }
 
             Timer referenceObjectsTimer = timers.referenceObjects.start();
@@ -596,15 +603,20 @@ public final class GCImpl implements GC {
             }
 
             if (!compacting) {
-                /*
-                 * Sweep and promote chunks containing pinned objects. This does not adjust pointers
-                 * to them in reference objects elsewhere, so we must process those first above so
-                 * that we can observe moved and dead objects before they are swept here.
-                 */
-                sweepAndPromotePinnedChunks();
+                startTicks = JfrGCEvents.startGCPhasePause();
+                try {
+                    /*
+                     * Sweep and promote chunks containing pinned objects. This does not adjust pointers
+                     * to them in reference objects elsewhere, so we must process those first above so
+                     * that we can observe moved and dead objects before they are swept here.
+                     */
+                    sweepAndPromotePinnedChunks();
+                } finally {
+                    JfrGCEvents.emitGCPhasePauseEvent(getCollectionEpoch(), "Sweep and Promote Pinned Chunks", startTicks);
+                }
             }
 
-            if (RuntimeCompilation.isEnabled()) {
+            if (RuntimeCodeInstallation.isEnabled()) {
                 Timer cleanCodeCacheTimer = timers.cleanCodeCache.start();
                 try {
                     /*
@@ -657,8 +669,8 @@ public final class GCImpl implements GC {
     }
 
     /**
-     * Visit all the memory that is reserved for runtime compiled code. References from the runtime
-     * compiled code to the Java heap must be consider as either strong or weak references,
+     * Visit all memory reserved for runtime-installed code. References from runtime-installed code
+     * to the Java heap must be considered either strong or weak references,
      * depending on whether the code is currently on the execution stack.
      */
     @Uninterruptible(reason = Uninterruptible.CORE_GC_CODE)
@@ -741,11 +753,11 @@ public final class GCImpl implements GC {
             /* Visit all the Objects promoted since the snapshot. */
             scanGreyObjects();
 
-            if (RuntimeCompilation.isEnabled()) {
-                /* Visit the runtime compiled code, now that we know all the reachable objects. */
+            if (RuntimeCodeInstallation.isEnabled()) {
+                /* Visit the runtime-installed code, now that we know all the reachable objects. */
                 walkRuntimeCodeCache();
 
-                /* Visit all objects that became reachable because of the compiled code. */
+                /* Visit all objects that became reachable because of runtime-installed code. */
                 scanGreyObjects();
             }
         } finally {
@@ -769,7 +781,7 @@ public final class GCImpl implements GC {
              * Mark pinned objects in aligned chunks and leave these chunks in From spaces. In
              * copying collections, while scanning, we copy unmarked (non-pinned) live objects out
              * of them and then sweep the chunks (leaving only pinned objects and filler objects)
-             * and promote them to To spaces. In CompactingOldGen, the chunks are swept with other
+             * and promote them to the To spaces. In CompactingOldGen, the chunks are swept with other
              * non-pinned live objects remaining in them.
              *
              * Note that:
@@ -878,7 +890,7 @@ public final class GCImpl implements GC {
                 Pointer sp = frame.getSP();
                 CodeInfo codeInfo = CodeInfoAccess.unsafeConvert(frame.getIPCodeInfo());
 
-                if (JavaFrames.isInterpreterLeaveStub(frame)) {
+                if (JavaFrames.isInterpreterLeaveStub(frame) || JavaFrames.isInterpreterJNIDowncallStub(frame)) {
                     /* nothing to scan */
                 } else {
                     NonmovableArray<Byte> referenceMapEncoding = CodeInfoAccess.getStackReferenceMapEncoding(codeInfo);
@@ -889,9 +901,9 @@ public final class GCImpl implements GC {
 
                     CodeReferenceMapDecoder.walkOffsetsFromPointer(sp, referenceMapEncoding, referenceMapIndex, visitor, null);
 
-                    if (RuntimeCompilation.isEnabled() && visitRuntimeCodeInfo && !CodeInfoAccess.isAOTImageCode(codeInfo)) {
+                    if (RuntimeCodeInstallation.isEnabled() && visitRuntimeCodeInfo && !CodeInfoAccess.isAOTImageCode(codeInfo)) {
                         /*
-                         * Runtime-compiled code that is currently on the stack must be kept alive.
+                         * Runtime-installed code that is currently on the stack must be kept alive.
                          * So, we mark the tether as strongly reachable. The RuntimeCodeCacheWalker
                          * will handle all other object references later on.
                          */
@@ -1113,7 +1125,7 @@ public final class GCImpl implements GC {
         }
 
         if (!completeCollection && originalSpace.isOldSpace()) {
-            assert !originalSpace.isFromSpace() : "must have already moved to To space";
+            assert !originalSpace.isFromSpace() : "must have already moved to the To space";
             return; // object is in old gen, which we don't collect
         }
 
@@ -1208,12 +1220,13 @@ public final class GCImpl implements GC {
         return GCImpl.getGCImpl().accounting;
     }
 
-    @Fold
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static CollectionPolicy getPolicy() {
+        SubstrateUtil.guaranteeRuntimeOnly();
         return GCImpl.getGCImpl().policy;
     }
 
-    @Fold
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static boolean hasNeverCollectPolicy() {
         return getPolicy() instanceof NeverCollect;
     }

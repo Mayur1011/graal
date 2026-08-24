@@ -24,10 +24,12 @@
  */
 package com.oracle.svm.core.log;
 
-import static com.oracle.svm.core.jdk.UninterruptibleUtils.Integer.highestOneBit;
-import static com.oracle.svm.core.jdk.UninterruptibleUtils.Math.abs;
-import static com.oracle.svm.core.jdk.UninterruptibleUtils.Math.max;
-import static com.oracle.svm.core.jdk.UninterruptibleUtils.Math.min;
+import com.oracle.svm.guest.staging.log.Log;
+
+import static com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Integer.highestOneBit;
+import static com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Math.abs;
+import static com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Math.max;
+import static com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Math.min;
 import static com.oracle.svm.core.jdk.UninterruptibleUtils.String.charAt;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
@@ -42,7 +44,7 @@ import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.c.NonmovableArrays;
-import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.heap.Heap;
 import com.oracle.svm.core.jdk.JDKUtils;
 import com.oracle.svm.shared.Uninterruptible;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -405,9 +405,22 @@ public abstract class WasmFileSuite extends AbstractWasmSuite {
             if ("true".equals(multiMemoryOption)) {
                 options.add(WasmBinaryTools.WabtOption.MULTI_MEMORY);
             }
+            String gcOption = testCase.options().getProperty("wasm.GC");
+            if ("true".equals(gcOption)) {
+                options.add(WasmBinaryTools.WabtOption.GC);
+            }
             String exceptionsOption = testCase.options().getProperty("wasm.Exceptions");
-            if ("true".equals(exceptionsOption)) {
+            String legacyExceptionsOption = testCase.options().getProperty("wasm.LegacyExceptions");
+            if ("true".equals(exceptionsOption) || "true".equals(legacyExceptionsOption)) {
                 options.add(WasmBinaryTools.WabtOption.EXCEPTIONS);
+            }
+            String typedFunctionReferencesOption = testCase.options().getProperty("wasm.TypedFunctionReferences");
+            if ("true".equals(typedFunctionReferencesOption)) {
+                options.add(WasmBinaryTools.WabtOption.FUNCTION_REFERENCES);
+            }
+            String tailCallsOption = testCase.options().getProperty("wasm.TailCalls");
+            if ("true".equals(tailCallsOption)) {
+                options.add(WasmBinaryTools.WabtOption.TAIL_CALLS);
             }
             ArrayList<Source> sources = testCase.getSources(options);
 

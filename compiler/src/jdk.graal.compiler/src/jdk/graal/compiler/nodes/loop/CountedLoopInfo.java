@@ -56,9 +56,11 @@ import jdk.graal.compiler.nodes.util.IntegerHelper;
 import jdk.graal.compiler.nodes.util.SignedIntegerHelper;
 import jdk.graal.compiler.nodes.util.UnsignedIntegerHelper;
 import jdk.graal.compiler.phases.common.util.LoopUtility;
+import jdk.graal.compiler.serviceprovider.SpeculationReasonGroup;
 import jdk.vm.ci.meta.DeoptimizationAction;
 import jdk.vm.ci.meta.DeoptimizationReason;
 import jdk.vm.ci.meta.JavaKind;
+import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.SpeculationLog;
 
 /**
@@ -101,6 +103,15 @@ import jdk.vm.ci.meta.SpeculationLog;
  * to compute min/max and iteration ranges for the loops involved.
  */
 public class CountedLoopInfo {
+
+    public static final String LOOP_OVERFLOW_DEOPT_WITH_REASON_GROUP_NAME = "LoopOverflowDeoptWithReason";
+
+    /**
+     * Variant of {@link LoopBeginNode#LOOP_OVERFLOW_DEOPT} that additionally distinguishes callers
+     * by an extra deoptimization reason.
+     */
+    public static final SpeculationReasonGroup LOOP_OVERFLOW_DEOPT_WITH_REASON = new SpeculationReasonGroup(LOOP_OVERFLOW_DEOPT_WITH_REASON_GROUP_NAME, ResolvedJavaMethod.class, int.class,
+                    DeoptimizationReason.class);
 
     protected final Loop loop;
 
@@ -503,14 +514,14 @@ public class CountedLoopInfo {
             if (helper.compare(endValue, initValue) < 0) {
                 return 0;
             }
-            range = endValue - getLimitCheckedIV().constantInit();
+            range = endValue - initValue;
             absStride = getLimitCheckedIV().constantStride();
         } else {
             assert getLimitCheckedIV().direction() == Direction.Down : Assertions.errorMessage(getLimitCheckedIV());
             if (helper.compare(initValue, endValue) < 0) {
                 return 0;
             }
-            range = getLimitCheckedIV().constantInit() - endValue;
+            range = initValue - endValue;
             absStride = -getLimitCheckedIV().constantStride();
         }
         if (isLimitIncluded) {
@@ -560,7 +571,7 @@ public class CountedLoopInfo {
     public String toString() {
         return (isInverted() ? "Inverted " : "") + "iv=" + getLimitCheckedIV() + " until " + getTripCountLimit() +
                         (isLimitIncluded ? getLimitCheckedIV().direction() == InductionVariable.Direction.Up ? "+1" : "-1" : "") +
-                        " bodyIV=" + getLimitCheckedIV();
+                        " bodyIV=" + getBodyIV();
     }
 
     /**
@@ -726,24 +737,67 @@ public class CountedLoopInfo {
             return overflowGuard;
         }
         try (DebugCloseable position = loop.loopBegin().withNodeSourcePosition()) {
-            StructuredGraph graph = getLimitCheckedIV().valueNode().graph();
-            LogicNode cond = createOverflowGuardCondition();
-            SpeculationLog speculationLog = graph.getSpeculationLog();
-            SpeculationLog.Speculation speculation = SpeculationLog.NO_SPECULATION;
-            if (speculationLog != null) {
-                SpeculationLog.SpeculationReason speculationReason = LoopBeginNode.LOOP_OVERFLOW_DEOPT.createSpeculationReason(graph.method(), getLimitCheckedIV().loop.loopBegin().stateAfter().bci);
-                if (speculationLog.maySpeculate(speculationReason)) {
-                    speculation = speculationLog.speculate(speculationReason);
-                    LoopBeginNode.overflowSpeculationTaken.increment(graph.getDebug());
-                } else {
-                    GraalError.shouldNotReachHere("Must not create overflow guard for loop " + loop.loopBegin() + " where the speculation guard already failed, this can create deopt loops"); // ExcludeFromJacocoGeneratedReport
-                }
+            overflowGuard = createOverflowGuard(createOverflowGuardCondition(), null);
+            if (overflowGuard == null) {
+                GraalError.shouldNotReachHere("Must not create overflow guard for loop " + loop.loopBegin() + " where the speculation guard already failed, this can create deopt loops"); // ExcludeFromJacocoGeneratedReport
             }
-            assert graph.getGuardsStage().allowsFloatingGuards();
-            overflowGuard = graph.unique(new GuardNode(cond, AbstractBeginNode.prevBegin(loop.entryPoint()), DeoptimizationReason.LoopLimitCheck, DeoptimizationAction.InvalidateRecompile, true,
-                            speculation, null));
             loop.loopBegin().setOverflowGuard(overflowGuard);
             return overflowGuard;
+        }
+    }
+
+    /**
+     * Returns whether {@link #createOverflowGuard(LogicNode, DeoptimizationReason)} would be able
+     * to materialize a guard under the current speculation state. This is not a guarantee: A later
+     * call to {@link #createOverflowGuard(LogicNode, DeoptimizationReason)} might still fail the
+     * speculation and would then return {@code null}.
+     * <p>
+     * Without a speculation log, {@link #createOverflowGuard(LogicNode, DeoptimizationReason)}
+     * creates a non-speculative guard, so there is no failed speculation state that could block
+     * guard creation.
+     */
+    public boolean canCreateOverflowGuard(DeoptimizationReason additionalReason) {
+        StructuredGraph graph = getLimitCheckedIV().valueNode().graph();
+        SpeculationLog speculationLog = graph.getSpeculationLog();
+        if (speculationLog != null) {
+            SpeculationLog.SpeculationReason speculationReason = createOverflowGuardSpeculationReason(graph, additionalReason);
+            return speculationLog.maySpeculate(speculationReason);
+        }
+        return true;
+    }
+
+    /**
+     * Creates a loop overflow guard for an arbitrary overflow condition.
+     * <p>
+     * When {@code additionalReason} is present, it is added to the speculation reason and used as
+     * the resulting guard's deoptimization reason. The default deoptimization reason is
+     * {@link DeoptimizationReason#LoopLimitCheck}.
+     */
+    public GuardingNode createOverflowGuard(LogicNode condition, DeoptimizationReason additionalReason) {
+        StructuredGraph graph = getLimitCheckedIV().valueNode().graph();
+        SpeculationLog speculationLog = graph.getSpeculationLog();
+        SpeculationLog.Speculation speculation = SpeculationLog.NO_SPECULATION;
+        if (speculationLog != null) {
+            SpeculationLog.SpeculationReason speculationReason = createOverflowGuardSpeculationReason(graph, additionalReason);
+            if (speculationLog.maySpeculate(speculationReason)) {
+                speculation = speculationLog.speculate(speculationReason);
+                if (additionalReason == null) {
+                    LoopBeginNode.overflowSpeculationTaken.increment(graph.getDebug());
+                }
+            } else {
+                return null;
+            }
+        }
+        GraalError.guarantee(graph.getGuardsStage().allowsFloatingGuards(), "Expected floating guards to be allowed when creating loop overflow guards");
+        DeoptimizationReason guardReason = additionalReason != null ? additionalReason : DeoptimizationReason.LoopLimitCheck;
+        return graph.unique(new GuardNode(condition, AbstractBeginNode.prevBegin(loop.entryPoint()), guardReason, DeoptimizationAction.InvalidateRecompile, true, speculation, null));
+    }
+
+    private SpeculationLog.SpeculationReason createOverflowGuardSpeculationReason(StructuredGraph graph, DeoptimizationReason additionalReason) {
+        if (additionalReason == null) {
+            return LoopBeginNode.LOOP_OVERFLOW_DEOPT.createSpeculationReason(graph.method(), getLimitCheckedIV().loop.loopBegin().stateAfter().bci);
+        } else {
+            return LOOP_OVERFLOW_DEOPT_WITH_REASON.createSpeculationReason(graph.method(), getLimitCheckedIV().loop.loopBegin().stateAfter().bci, additionalReason);
         }
     }
 

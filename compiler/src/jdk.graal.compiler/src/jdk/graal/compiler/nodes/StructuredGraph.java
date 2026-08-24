@@ -954,6 +954,24 @@ public final class StructuredGraph extends Graph implements JavaMethodContext {
         }
     }
 
+    /**
+     * Like {@link #replaceFixedWithFixed(FixedWithNextNode, FixedWithNextNode)}, but skips replacement
+     * invariant checks while replacing usages.
+     *
+     * Use this only when the caller already checked or updated all usages that require those
+     * invariants.
+     */
+    public void replaceFixedWithFixedWithoutCheckingInvariants(FixedWithNextNode node, FixedWithNextNode replacement) {
+        assert node != null && replacement != null && node.isAlive() && replacement.isAlive() : "cannot replace " + node + " with " + replacement;
+        FixedNode next = node.next();
+        node.setNext(null);
+        replacement.setNext(next);
+        node.replaceAndDeleteWithoutCheckingInvariants(replacement);
+        if (node == start) {
+            setStart((StartNode) replacement);
+        }
+    }
+
     @SuppressWarnings("static-method")
     public void replaceFixedWithFloating(FixedWithNextNode node, ValueNode replacement) {
         assert node != null && replacement != null && node.isAlive() && replacement.isAlive() : "cannot replace " + node + " with " + replacement;
@@ -1072,16 +1090,9 @@ public final class StructuredGraph extends Graph implements JavaMethodContext {
 
     public void reduceDegenerateLoopBegin(LoopBeginNode begin, boolean forKillCFG) {
         assert begin.loopEnds().isEmpty() : "Loop begin still has backedges";
+        GraalError.guarantee(begin.forwardEndCount() == 1, "loop begin must have exactly one forward end: %s", begin);
         begin.removeSafepoints();
-        if (begin.forwardEndCount() == 1) { // bypass merge and remove
-            reduceTrivialMerge(begin, forKillCFG);
-        } else { // convert to merge
-            AbstractMergeNode merge = this.add(new MergeNode());
-            for (EndNode end : begin.forwardEnds()) {
-                merge.addForwardEnd(end);
-            }
-            this.replaceFixedWithFixed(begin, merge);
-        }
+        reduceTrivialMerge(begin, forKillCFG);
     }
 
     public void reduceTrivialMerge(AbstractMergeNode merge) {

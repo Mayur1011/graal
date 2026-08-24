@@ -37,13 +37,14 @@ import java.util.stream.Stream;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Equivalence;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.CalleeSavedRegisters;
 import com.oracle.svm.core.ReservedRegisters;
-import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.c.NonmovableObjectArray;
@@ -53,8 +54,7 @@ import com.oracle.svm.core.code.FrameInfoQueryResult.ValueType;
 import com.oracle.svm.core.config.ObjectLayout;
 import com.oracle.svm.core.deopt.DeoptEntryInfopoint;
 import com.oracle.svm.core.deopt.DeoptimizationSupport;
-import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
-import com.oracle.svm.core.graal.RuntimeCompilation;
+import com.oracle.svm.core.graal.code.SharedCompilationResult;
 import com.oracle.svm.core.heap.CodeReferenceMapDecoder;
 import com.oracle.svm.core.heap.CodeReferenceMapEncoder;
 import com.oracle.svm.core.heap.ObjectReferenceVisitor;
@@ -69,10 +69,12 @@ import com.oracle.svm.core.meta.SharedField;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.core.nmt.NmtCategory;
-import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.core.util.ByteArrayReader;
 import com.oracle.svm.core.util.Counter;
+import com.oracle.svm.espresso.classfile.Constants;
 import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.option.HostedOptionKey;
+import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.ImageSingletonLoader;
 import com.oracle.svm.shared.singletons.ImageSingletonWriter;
 import com.oracle.svm.shared.singletons.LayeredPersistFlags;
@@ -83,6 +85,7 @@ import com.oracle.svm.shared.singletons.traits.LayeredCallbacksSingletonTrait;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacksSupplier;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
@@ -135,11 +138,150 @@ public class CodeInfoEncoder {
         }
     }
 
+    /**
+     * Object-reference side tables used by encoded {@link CodeInfo}. These are copied through a
+     * {@link ReferenceAdjuster} when the encoded byte tables are installed.
+     */
     public record Encodings(
                     JavaConstant[] objectConstantsArray,
                     Class<?>[] classesArray,
                     String[] memberNamesArray,
                     String[] otherStringsArray) {
+    }
+
+    /** Heap-serializable runtime CodeInfo tables produced from a compilation result. */
+    public record EncodedCodeInfo(Encodings encodings,
+                    byte[] methodTable,
+                    int methodTableFirstId,
+                    int methodTableEntryCount,
+                    byte[] stackReferenceMapEncoding,
+                    byte[] frameInfoEncodings,
+                    byte[] codeInfoIndex,
+                    byte[] codeInfoEncodings,
+                    int codeInfoIndexEntriesPerBlock,
+                    byte[] codeInfoDefaultFrameInfoIndexes) {
+
+        /**
+         * Copies byte-only CodeInfo tables into nonmovable memory before the caller enters a more
+         * constrained publication phase. Object-reference arrays are still copied atomically during
+         * {@link PreparedEncodedCodeInfo#install}.
+         */
+        public PreparedEncodedCodeInfo prepareForInstall() {
+            NonmovableArray<Byte> preparedMethodTable = NonmovableArrays.nullArray();
+            NonmovableArray<Byte> preparedFrameInfoEncodings = NonmovableArrays.nullArray();
+            NonmovableArray<Byte> preparedCodeInfoIndex = NonmovableArrays.nullArray();
+            NonmovableArray<Byte> preparedCodeInfoEncodings = NonmovableArrays.nullArray();
+            NonmovableArray<Byte> preparedCodeInfoDefaultFrameInfoIndexes = NonmovableArrays.nullArray();
+            NonmovableArray<Byte> preparedStackReferenceMapEncoding = NonmovableArrays.nullArray();
+            try {
+                preparedMethodTable = NonmovableArrays.copyOfByteArray(methodTable, NmtCategory.Code);
+                preparedFrameInfoEncodings = NonmovableArrays.copyOfByteArray(frameInfoEncodings, NmtCategory.Code);
+                preparedCodeInfoIndex = NonmovableArrays.copyOfByteArray(codeInfoIndex, NmtCategory.Code);
+                preparedCodeInfoEncodings = NonmovableArrays.copyOfByteArray(codeInfoEncodings, NmtCategory.Code);
+                preparedCodeInfoDefaultFrameInfoIndexes = NonmovableArrays.copyOfByteArray(codeInfoDefaultFrameInfoIndexes, NmtCategory.Code);
+                preparedStackReferenceMapEncoding = NonmovableArrays.copyOfByteArray(stackReferenceMapEncoding, NmtCategory.Code);
+                return new PreparedEncodedCodeInfo(this, preparedMethodTable, preparedFrameInfoEncodings, preparedCodeInfoIndex, preparedCodeInfoEncodings,
+                                preparedCodeInfoDefaultFrameInfoIndexes, preparedStackReferenceMapEncoding);
+            } catch (RuntimeException | Error t) {
+                // The prepared tables are unmanaged memory until ownership transfers to PreparedEncodedCodeInfo.
+                NonmovableArrays.releaseUnmanagedArray(preparedMethodTable);
+                NonmovableArrays.releaseUnmanagedArray(preparedFrameInfoEncodings);
+                NonmovableArrays.releaseUnmanagedArray(preparedCodeInfoIndex);
+                NonmovableArrays.releaseUnmanagedArray(preparedCodeInfoEncodings);
+                NonmovableArrays.releaseUnmanagedArray(preparedCodeInfoDefaultFrameInfoIndexes);
+                NonmovableArrays.releaseUnmanagedArray(preparedStackReferenceMapEncoding);
+                throw t;
+            }
+        }
+    }
+
+    /**
+     * Prepared, single-use install view for {@link EncodedCodeInfo}. Byte tables are copied
+     * eagerly; object-reference side tables are adjusted and published by {@link #install}.
+     */
+    public static final class PreparedEncodedCodeInfo {
+        private final EncodedCodeInfo encodedCodeInfo;
+        private NonmovableArray<Byte> methodTableArray;
+        private NonmovableArray<Byte> frameInfoEncodingsArray;
+        private NonmovableArray<Byte> codeInfoIndexArray;
+        private NonmovableArray<Byte> codeInfoEncodingsArray;
+        private NonmovableArray<Byte> codeInfoDefaultFrameInfoIndexesArray;
+        private NonmovableArray<Byte> stackReferenceMapEncodingArray;
+        private boolean consumed;
+
+        private PreparedEncodedCodeInfo(EncodedCodeInfo encodedCodeInfo, NonmovableArray<Byte> methodTableArray, NonmovableArray<Byte> frameInfoEncodingsArray,
+                        NonmovableArray<Byte> codeInfoIndexArray, NonmovableArray<Byte> codeInfoEncodingsArray, NonmovableArray<Byte> codeInfoDefaultFrameInfoIndexesArray,
+                        NonmovableArray<Byte> stackReferenceMapEncodingArray) {
+            this.encodedCodeInfo = encodedCodeInfo;
+            this.methodTableArray = methodTableArray;
+            this.frameInfoEncodingsArray = frameInfoEncodingsArray;
+            this.codeInfoIndexArray = codeInfoIndexArray;
+            this.codeInfoEncodingsArray = codeInfoEncodingsArray;
+            this.codeInfoDefaultFrameInfoIndexesArray = codeInfoDefaultFrameInfoIndexesArray;
+            this.stackReferenceMapEncodingArray = stackReferenceMapEncodingArray;
+        }
+
+        /**
+         * Installs prepared byte tables and copies object-reference side tables into the target
+         * {@link CodeInfo}. References are written immediately; deferred adjustment is not
+         * supported by this prepared-install path.
+         */
+        @Uninterruptible(reason = "Nonmovable object arrays are not visible to GC until installed in target.")
+        public void install(CodeInfo target, InstantReferenceAdjuster adjuster) {
+            VMError.guarantee(!consumed, "Prepared CodeInfo metadata is already consumed");
+            consumed = true;
+            Encodings encodings = encodedCodeInfo.encodings;
+            NonmovableObjectArray<Object> objectConstants = NonmovableArrays.nullArray();
+            NonmovableObjectArray<Class<?>> classes = NonmovableArrays.nullArray();
+            NonmovableObjectArray<String> memberNames = NonmovableArrays.nullArray();
+            NonmovableObjectArray<String> otherStrings = NonmovableArrays.nullArray();
+            try {
+                objectConstants = adjuster.copyOfObjectConstantArray(encodings.objectConstantsArray, NmtCategory.Code);
+                classes = (encodings.classesArray != null) ? adjuster.copyOfObjectArray(encodings.classesArray, NmtCategory.Code) : NonmovableArrays.nullArray();
+                memberNames = (encodings.memberNamesArray != null) ? adjuster.copyOfObjectArray(encodings.memberNamesArray, NmtCategory.Code) : NonmovableArrays.nullArray();
+                otherStrings = (encodings.otherStringsArray != null) ? adjuster.copyOfObjectArray(encodings.otherStringsArray, NmtCategory.Code) : NonmovableArrays.nullArray();
+                CodeInfoAccess.setEncodings(target, objectConstants, classes, memberNames, otherStrings, methodTableArray, encodedCodeInfo.methodTableFirstId, encodedCodeInfo.methodTableEntryCount);
+            } catch (RuntimeException | Error t) {
+                // The object arrays are unmanaged memory until ownership transfers to CodeInfo.
+                NonmovableArrays.releaseUnmanagedArray(objectConstants);
+                NonmovableArrays.releaseUnmanagedArray(classes);
+                NonmovableArrays.releaseUnmanagedArray(memberNames);
+                NonmovableArrays.releaseUnmanagedArray(otherStrings);
+                throw t;
+            }
+
+            // setEncodings transfers ownership of the method table to target.
+            methodTableArray = NonmovableArrays.nullArray();
+            FrameInfoEncoder.install(target, frameInfoEncodingsArray);
+            // FrameInfoEncoder.install transfers ownership of its encoding table to target.
+            frameInfoEncodingsArray = NonmovableArrays.nullArray();
+            CodeInfoAccess.setCodeInfo(target, codeInfoIndexArray, codeInfoEncodingsArray, encodedCodeInfo.codeInfoIndexEntriesPerBlock, codeInfoDefaultFrameInfoIndexesArray,
+                            stackReferenceMapEncodingArray);
+            // setCodeInfo transfers ownership of all remaining prepared byte tables to target.
+            codeInfoIndexArray = NonmovableArrays.nullArray();
+            codeInfoEncodingsArray = NonmovableArrays.nullArray();
+            codeInfoDefaultFrameInfoIndexesArray = NonmovableArrays.nullArray();
+            stackReferenceMapEncodingArray = NonmovableArrays.nullArray();
+        }
+
+        /**
+         * Releases prepared byte tables before they transfer to a {@link CodeInfo}.
+         */
+        public void releaseUninstalled() {
+            consumed = true;
+            NonmovableArrays.releaseUnmanagedArray(methodTableArray);
+            methodTableArray = NonmovableArrays.nullArray();
+            NonmovableArrays.releaseUnmanagedArray(frameInfoEncodingsArray);
+            frameInfoEncodingsArray = NonmovableArrays.nullArray();
+            NonmovableArrays.releaseUnmanagedArray(codeInfoIndexArray);
+            codeInfoIndexArray = NonmovableArrays.nullArray();
+            NonmovableArrays.releaseUnmanagedArray(codeInfoEncodingsArray);
+            codeInfoEncodingsArray = NonmovableArrays.nullArray();
+            NonmovableArrays.releaseUnmanagedArray(codeInfoDefaultFrameInfoIndexesArray);
+            codeInfoDefaultFrameInfoIndexesArray = NonmovableArrays.nullArray();
+            NonmovableArrays.releaseUnmanagedArray(stackReferenceMapEncodingArray);
+            stackReferenceMapEncodingArray = NonmovableArrays.nullArray();
+        }
     }
 
     /**
@@ -149,10 +291,11 @@ public class CodeInfoEncoder {
     public static final class Encoders {
         static final Class<?> INVALID_CLASS = null;
         static final String INVALID_METHOD_NAME = "";
-        static final int INVALID_METHOD_MODIFIERS = -1;
+        // This can never be valid since it's not valid to be both PUBLIC and PRIVATE
+        static final int INVALID_METHOD_MODIFIERS = Constants.JVM_RECOGNIZED_METHOD_MODIFIERS;
         static final String INVALID_METHOD_SIGNATURE = null;
 
-        public record Member(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int modifiers) {
+        public record Member(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int flags) {
         }
 
         public final FrequencyEncoder<JavaConstant> objectConstants;
@@ -178,10 +321,11 @@ public class CodeInfoEncoder {
             this.objectConstants = FrequencyEncoder.createEqualityEncoder();
 
             /*
-             * Only image code and metadata needs to store this data. Runtime code info should
-             * reference only image methods via method ids.
+             * Only image code and metadata need to store this data. Runtime-installed code should
+             * reference image methods via method ids, even when hosted code prepares the runtime
+             * metadata for later installation.
              */
-            assert imageCode == SubstrateUtil.HOSTED;
+            assert SubstrateUtil.HOSTED || !imageCode : "Image code metadata can only be encoded during image building.";
             this.classes = imageCode ? FrequencyEncoder.createVerifyingEqualityEncoder(classVerifier) : null;
             this.memberNames = imageCode ? FrequencyEncoder.createEqualityEncoder() : null;
             this.methods = imageCode ? FrequencyEncoder.createEqualityEncoder() : null;
@@ -191,29 +335,29 @@ public class CodeInfoEncoder {
                 this.methods.addObject(null);
                 this.classes.addObject(INVALID_CLASS);
                 this.memberNames.addObject(INVALID_METHOD_NAME);
-                if (forceEncodeAllMethodMetadata || shouldEncodeAllMethodMetadata()) {
+                if (forceEncodeAllMethodMetadata || shouldEncodeMethodSignatureAndModifiers()) {
                     this.otherStrings.addObject(INVALID_METHOD_SIGNATURE);
                 }
             }
         }
 
-        public void addMethod(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int modifiers) {
+        public void addMethod(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int flags) {
             VMError.guarantee(SubstrateUtil.HOSTED, "Runtime code info must reference image methods by id");
 
-            Member member = new Member(Objects.requireNonNull(method), clazz, name, signature, modifiers);
+            Member member = new Member(Objects.requireNonNull(method), clazz, name, signature, flags);
             if (methods.addObject(member)) {
                 classes.addObject(clazz);
                 memberNames.addObject(name);
-                if (shouldEncodeAllMethodMetadata()) {
+                if (shouldEncodeMethodSignatureAndModifiers()) {
                     otherStrings.addObject(signature);
                 }
             }
         }
 
-        public int findMethodIndex(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int modifiers, boolean optional) {
+        public int findMethodIndex(ResolvedJavaMethod method, Class<?> clazz, String name, String signature, int flags, boolean optional) {
             VMError.guarantee(SubstrateUtil.HOSTED, "Runtime code info must obtain method ids from image code info");
 
-            Member member = new Member(Objects.requireNonNull(method), clazz, name, signature, modifiers);
+            Member member = new Member(Objects.requireNonNull(method), clazz, name, signature, flags);
             return optional ? methods.findIndex(member) : methods.getIndex(member);
         }
 
@@ -230,20 +374,31 @@ public class CodeInfoEncoder {
                             encodeArray(otherStrings, String[]::new));
         }
 
-        private void encodeAllAndInstall(CodeInfo target, ReferenceAdjuster adjuster) {
-            Encodings encodings = encodeAll();
+        private int methodTableEntryCount() {
+            /* Runtime code info references image methods by id and does not encode methods. */
+            return methods == null ? 0 : methods.getLength();
+        }
 
-            int methodTableFirstId;
+        private int nextMethodTableFirstId(int methodTableEntryCount) {
+            if (methods == null) {
+                return 0;
+            }
             if (ImageLayerBuildingSupport.buildingImageLayer()) {
                 var idTracker = MethodTableFirstIDTracker.singleton();
-                methodTableFirstId = idTracker.startingID;
-                idTracker.nextStartingId = methodTableFirstId + methods.getLength();
+                int methodTableFirstId = idTracker.startingID;
+                idTracker.nextStartingId = methodTableFirstId + methodTableEntryCount;
+                return methodTableFirstId;
             } else {
-                methodTableFirstId = 0;
+                return 0;
             }
-            NonmovableArray<Byte> methodTable = encodeMethodTable();
+        }
 
-            install(target, encodings, methodTable, methodTableFirstId, adjuster);
+        private void encodeAllAndInstall(CodeInfo target, ReferenceAdjuster adjuster) {
+            Encodings encodings = encodeAll();
+            int entryCount = methodTableEntryCount();
+            int methodTableFirstId = nextMethodTableFirstId(entryCount);
+            NonmovableArray<Byte> methodTable = encodeMethodTable();
+            install(target, encodings, methodTable, methodTableFirstId, adjuster, entryCount);
         }
 
         private static <T> T[] encodeArray(FrequencyEncoder<T> encoder, IntFunction<T[]> allocator) {
@@ -276,15 +431,42 @@ public class CodeInfoEncoder {
             assert encodedMethods[0] == null : "id 0 must mean invalid";
             encodeMethod(writer, INVALID_CLASS, INVALID_METHOD_NAME, INVALID_METHOD_SIGNATURE, INVALID_METHOD_MODIFIERS, shortClassIndexes, shortNameIndexes, shortSignatureIndexes);
             for (int id = 1; id < encodedMethods.length; id++) {
-                encodeMethod(writer, encodedMethods[id].clazz, encodedMethods[id].name, encodedMethods[id].signature, encodedMethods[id].modifiers, shortClassIndexes, shortNameIndexes,
+                encodeMethod(writer, encodedMethods[id].clazz, encodedMethods[id].name, encodedMethods[id].signature, encodedMethods[id].flags, shortClassIndexes, shortNameIndexes,
                                 shortSignatureIndexes);
+            }
+            if (!shouldEncodeMethodSignatureAndModifiers()) {
+                encodeMethodFlags(writer);
             }
             NonmovableArray<Byte> bytes = NonmovableArrays.createByteArray(NumUtil.safeToInt(writer.getBytesWritten()), NmtCategory.Code);
             writer.toByteBuffer(NonmovableArrays.asByteBuffer(bytes));
             return bytes;
         }
 
-        private void encodeMethod(UnsafeArrayTypeWriter writer, Class<?> clazz, String name, String signature, int modifiers, boolean shortClassIndexes, boolean shortNameIndexes,
+        private void encodeMethodFlags(UnsafeArrayTypeWriter writer) {
+            /*
+             * When full modifiers + flags are not encoded in method entries, store a compact bit
+             * array of extra flags. FrameSourceInfo.checkConstants ensures that each byte holds a
+             * whole number of flag slots.
+             */
+            int currentByte = 0;
+            int bitIndex = FrameSourceInfo.MethodFlags.EXTRA_FLAGS_BITS; // skip method id 0
+            for (int id = 1; id < encodedMethods.length; id++) {
+                int flags = encodedMethods[id].flags;
+                currentByte |= ((flags & FrameSourceInfo.MethodFlags.EXTRA_FLAGS_MASK) >> FrameSourceInfo.MethodFlags.EXTRA_FLAGS_POS) << bitIndex;
+                bitIndex += FrameSourceInfo.MethodFlags.EXTRA_FLAGS_BITS;
+                assert bitIndex <= Byte.SIZE;
+                if (bitIndex == Byte.SIZE) {
+                    writer.putU1(currentByte);
+                    bitIndex = 0;
+                    currentByte = 0;
+                }
+            }
+            if (bitIndex > 0) {
+                writer.putU1(currentByte);
+            }
+        }
+
+        private void encodeMethod(UnsafeArrayTypeWriter writer, Class<?> clazz, String name, String signature, int flags, boolean shortClassIndexes, boolean shortNameIndexes,
                         boolean shortSignatureIndexes) {
             int classIndex = classes.getIndex(clazz);
             if (shortClassIndexes) {
@@ -298,19 +480,20 @@ public class CodeInfoEncoder {
             } else {
                 writer.putU4(memberNamesIndex);
             }
-            if (shouldEncodeAllMethodMetadata()) {
+            if (shouldEncodeMethodSignatureAndModifiers()) {
                 int signatureNamesIndex = otherStrings.getIndex(signature);
                 if (shortSignatureIndexes) {
                     writer.putU2(signatureNamesIndex);
                 } else {
                     writer.putU4(signatureNamesIndex);
                 }
-                writer.putS2(modifiers);
+                assert TypeConversion.isU2(flags) || flags == INVALID_METHOD_MODIFIERS;
+                writer.putU2(flags & 0xffff);
             }
         }
 
         @Uninterruptible(reason = "Nonmovable object arrays are not visible to GC until installed in target.")
-        private static void install(CodeInfo target, Encodings encodings, NonmovableArray<Byte> methodTable, int methodTableFirstId, ReferenceAdjuster adjuster) {
+        private static void install(CodeInfo target, Encodings encodings, NonmovableArray<Byte> methodTable, int methodTableFirstId, ReferenceAdjuster adjuster, int methodTableEntryCount) {
 
             NonmovableObjectArray<Object> objectConstants = adjuster.copyOfObjectConstantArray(encodings.objectConstantsArray, NmtCategory.Code);
             NonmovableObjectArray<Class<?>> classes = (encodings.classesArray != null) ? adjuster.copyOfObjectArray(encodings.classesArray, NmtCategory.Code) : NonmovableArrays.nullArray();
@@ -318,7 +501,7 @@ public class CodeInfoEncoder {
             NonmovableObjectArray<String> otherStrings = (encodings.otherStringsArray != null) ? adjuster.copyOfObjectArray(encodings.otherStringsArray, NmtCategory.Code)
                             : NonmovableArrays.nullArray();
 
-            CodeInfoAccess.setEncodings(target, objectConstants, classes, memberNames, otherStrings, methodTable, methodTableFirstId);
+            CodeInfoAccess.setEncodings(target, objectConstants, classes, memberNames, otherStrings, methodTable, methodTableFirstId, methodTableEntryCount);
         }
     }
 
@@ -328,7 +511,9 @@ public class CodeInfoEncoder {
         protected int exceptionOffset;
         protected ReferenceMapEncoder.Input referenceMap;
         protected long referenceMapIndex;
+        protected int framePointerSaveAreaOffset = CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET;
         protected FrameInfoEncoder.FrameData frameData;
+        protected FrameInfoEncoder.FrameData defaultFrameData;
         protected IPData next;
         protected boolean deoptReturnValueIsObject;
     }
@@ -339,16 +524,35 @@ public class CodeInfoEncoder {
 
     private NonmovableArray<Byte> codeInfoIndex;
     private NonmovableArray<Byte> codeInfoEncodings;
+    private NonmovableArray<Byte> codeInfoDefaultFrameInfoIndexes;
     private NonmovableArray<Byte> referenceMapEncoding;
+    private int codeInfoIndexEntriesPerBlock = 1;
+    private final boolean useFinalImageCodeInfoEncoding;
 
     public CodeInfoEncoder(FrameInfoEncoder.Customization frameInfoCustomization, Encoders encoders) {
         this(frameInfoCustomization, encoders, FrameInfoDecoder.SubstrateConstantAccess);
     }
 
     public CodeInfoEncoder(FrameInfoEncoder.Customization frameInfoCustomization, Encoders encoders, ConstantAccess constantAccess) {
+        this(frameInfoCustomization, encoders, constantAccess, useFinalImageCodeInfoEncoding());
+    }
+
+    /**
+     * Creates an encoder with an explicit code-info layout choice.
+     *
+     * {@code useFinalImageCodeInfoEncoding} enables the final image-code side-table format used by
+     * {@link ImageCodeInfo}. Runtime-installed code should pass {@code false} so frame-info indexes
+     * remain self-contained in the encoded entries.
+     */
+    public CodeInfoEncoder(FrameInfoEncoder.Customization frameInfoCustomization, Encoders encoders, boolean useFinalImageCodeInfoEncoding) {
+        this(frameInfoCustomization, encoders, FrameInfoDecoder.SubstrateConstantAccess, useFinalImageCodeInfoEncoding);
+    }
+
+    private CodeInfoEncoder(FrameInfoEncoder.Customization frameInfoCustomization, Encoders encoders, ConstantAccess constantAccess, boolean useFinalImageCodeInfoEncoding) {
         this.entries = new TreeMap<>();
         this.encoders = encoders;
         this.frameInfoEncoder = new FrameInfoEncoder(frameInfoCustomization, encoders, constantAccess);
+        this.useFinalImageCodeInfoEncoding = useFinalImageCodeInfoEncoding;
     }
 
     public FrameInfoEncoder getFrameInfoEncoder() {
@@ -360,13 +564,12 @@ public class CodeInfoEncoder {
     }
 
     @Fold
-    public static boolean shouldEncodeAllMethodMetadata() {
+    public static boolean shouldEncodeMethodSignatureAndModifiers() {
         /*
-         * We don't support JFR stack traces if JIT compilation is enabled, so there's no need to
-         * include extra method metadata. Additionally, including extra metadata would increase the
-         * binary size.
+         * JFR stack traces need the method signature and modifiers. By default, we don't include
+         * this extra metadata as it increases the binary size.
          */
-        return HasJfrSupport.get() && !RuntimeCompilation.isEnabled();
+        return HasJfrSupport.get();
     }
 
     public static int getEntryOffset(Infopoint infopoint) {
@@ -385,19 +588,24 @@ public class CodeInfoEncoder {
         int totalFrameSize = compilation.getTotalFrameSize();
         boolean isEntryPoint = method.isEntryPoint();
         boolean hasCalleeSavedRegisters = method.hasCalleeSavedRegisters();
+        int framePointerSaveAreaOffset = getFramePointerSaveAreaOffset(compilation);
 
         /* Mark the method start and register the frame size. */
         IPData startEntry = makeEntry(compilationOffset);
         FrameInfoEncoder.FrameData defaultFrameData = frameInfoEncoder.addDefaultDebugInfo(method, totalFrameSize);
+        startEntry.defaultFrameData = defaultFrameData;
         startEntry.frameData = defaultFrameData;
         startEntry.frameSizeEncoding = encodeFrameSize(totalFrameSize, true, isEntryPoint, hasCalleeSavedRegisters);
+        startEntry.framePointerSaveAreaOffset = framePointerSaveAreaOffset;
 
         /* Register the frame size for all entries that are starting points for the index. */
         long entryIP = CodeInfoDecoder.lookupEntryIP(CodeInfoDecoder.indexGranularity() + compilationOffset);
         while (entryIP <= CodeInfoDecoder.lookupEntryIP(compilationSize + compilationOffset - 1)) {
             IPData entry = makeEntry(entryIP);
+            entry.defaultFrameData = defaultFrameData;
             entry.frameData = defaultFrameData;
             entry.frameSizeEncoding = encodeFrameSize(totalFrameSize, false, isEntryPoint, hasCalleeSavedRegisters);
+            entry.framePointerSaveAreaOffset = framePointerSaveAreaOffset;
             entryIP += CodeInfoDecoder.indexGranularity();
         }
 
@@ -409,6 +617,7 @@ public class CodeInfoEncoder {
             if (debugInfo != null) {
                 final int offset = getEntryOffset(infopoint);
                 if (offset >= 0) {
+                    VMError.guarantee(offset < compilationSize, "Code info entry offset is outside the method code range");
                     boolean added = infopointOffsets.add(offset);
                     if (!added) {
                         throw VMError.shouldNotReachHere("Encoding two infopoints at same offset. Conflicting infopoint: " + infopoint);
@@ -437,6 +646,7 @@ public class CodeInfoEncoder {
 
         /* Make entries for all exception handlers. */
         for (ExceptionHandler handler : compilation.getExceptionHandlers()) {
+            VMError.guarantee(handler.handlerPos != handler.pcOffset, "Exception handler must have a unique PC");
             final IPData entry = makeEntry(handler.pcOffset + compilationOffset);
             assert entry.exceptionOffset == 0 : entry;
             entry.exceptionOffset = handler.handlerPos - handler.pcOffset;
@@ -444,6 +654,13 @@ public class CodeInfoEncoder {
 
         ImageSingletons.lookup(Counters.class).methodCount.inc();
         ImageSingletons.lookup(Counters.class).codeSize.add(compilationSize);
+    }
+
+    private static int getFramePointerSaveAreaOffset(CompilationResult compilation) {
+        if (compilation instanceof SharedCompilationResult res && res.hasFramePointerSaveAreaOffset()) {
+            return res.getFramePointerSaveAreaOffset();
+        }
+        return CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET;
     }
 
     private IPData makeEntry(long ip) {
@@ -465,8 +682,35 @@ public class CodeInfoEncoder {
         install(target);
     }
 
+    /**
+     * Encodes all registered method metadata into heap byte arrays for later installation into a
+     * {@link CodeInfo}. Hosted code uses this to serialize runtime-code metadata before it is copied
+     * into nonmovable arrays at install time.
+     */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public EncodedCodeInfo encodeAll(Runnable recordActivity) {
+        Encodings encodings = encoders.encodeAll();
+        int methodTableEntryCount = encoders.methodTableEntryCount();
+        int methodTableFirstId = encoders.nextMethodTableFirstId(methodTableEntryCount);
+        NonmovableArray<Byte> methodTable = encoders.encodeMethodTable();
+        encodeReferenceMaps();
+        byte[] frameInfoEncodings = frameInfoEncoder.encodeAll(recordActivity);
+        encodeIPData();
+
+        return new EncodedCodeInfo(encodings,
+                        NonmovableArrays.heapCopyOfByteArray(methodTable),
+                        methodTableFirstId,
+                        methodTableEntryCount,
+                        NonmovableArrays.heapCopyOfByteArray(referenceMapEncoding),
+                        frameInfoEncodings,
+                        NonmovableArrays.heapCopyOfByteArray(codeInfoIndex),
+                        NonmovableArrays.heapCopyOfByteArray(codeInfoEncodings),
+                        codeInfoIndexEntriesPerBlock,
+                        NonmovableArrays.heapCopyOfByteArray(codeInfoDefaultFrameInfoIndexes));
+    }
+
     private void install(CodeInfo target) {
-        CodeInfoAccess.setCodeInfo(target, codeInfoIndex, codeInfoEncodings, referenceMapEncoding);
+        CodeInfoAccess.setCodeInfo(target, codeInfoIndex, codeInfoEncodings, codeInfoIndexEntriesPerBlock, codeInfoDefaultFrameInfoIndexes, referenceMapEncoding);
     }
 
     private void encodeReferenceMaps() {
@@ -512,13 +756,29 @@ public class CodeInfoEncoder {
             prev = cur;
         }
 
+        VMError.guarantee(prev != null, "Code info encoding requires at least one IP entry");
+        int indexEntryCount = NumUtil.safeToInt(Long.divideUnsigned(prev.ip, CodeInfoDecoder.indexGranularity()) + 1);
+        long[] indexOffsets = new long[indexEntryCount];
+        int[] defaultFrameInfoIndexes = useFinalImageCodeInfoEncoding ? new int[indexEntryCount] : null;
+        int nextIndexEntry = 0;
         long nextIndexIP = 0;
-        UnsafeArrayTypeWriter indexBuffer = UnsafeArrayTypeWriter.create(ByteArrayReader.supportsUnalignedMemoryAccess());
+        int currentDefaultFrameInfoIndex = -1;
+        int chunkDefaultFrameInfoIndex = -1;
+        int currentFramePointerSaveAreaOffset = CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET;
         UnsafeArrayTypeWriter encodingBuffer = UnsafeArrayTypeWriter.create(ByteArrayReader.supportsUnalignedMemoryAccess());
         for (IPData data = first; data != null; data = data.next) {
             assert data.ip <= nextIndexIP : data;
-            if (data.ip == nextIndexIP) {
-                indexBuffer.putU4(encodingBuffer.getBytesWritten());
+            if (useFinalImageCodeInfoEncoding && data.defaultFrameData != null) {
+                currentDefaultFrameInfoIndex = TypeConversion.asS4(data.defaultFrameData.encodedFrameInfoIndex);
+            }
+            boolean isIndexEntry = (data.ip == nextIndexIP);
+            if (isIndexEntry) {
+                indexOffsets[nextIndexEntry++] = encodingBuffer.getBytesWritten();
+                if (useFinalImageCodeInfoEncoding) {
+                    VMError.guarantee(currentDefaultFrameInfoIndex >= 0, "Image code index entry is missing default frame info");
+                    defaultFrameInfoIndexes[nextIndexEntry - 1] = currentDefaultFrameInfoIndex;
+                    chunkDefaultFrameInfoIndex = currentDefaultFrameInfoIndex;
+                }
                 nextIndexIP += CodeInfoDecoder.indexGranularity();
             }
 
@@ -527,14 +787,26 @@ public class CodeInfoEncoder {
             entryFlags = entryFlags | flagsForExceptionOffset(data) << CodeInfoDecoder.EX_SHIFT;
             entryFlags = entryFlags | flagsForReferenceMapIndex(data) << CodeInfoDecoder.RM_SHIFT;
             entryFlags = entryFlags | flagsForDeoptFrameInfo(data) << CodeInfoDecoder.FI_SHIFT;
+            if (shouldIncludeSavedFramePointerOffset(data, isIndexEntry, currentFramePointerSaveAreaOffset)) { // assumed rare
+                entryFlags = entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY_WITH_FRAME_POINTER_SAVE_AREA_OFFSET;
+                currentFramePointerSaveAreaOffset = data.framePointerSaveAreaOffset;
+            } else if (useFinalImageCodeInfoEncoding) {
+                entryFlags = encodeFinalImageExtendedEntryFlags(data, entryFlags, currentDefaultFrameInfoIndex, chunkDefaultFrameInfoIndex);
+            } else if (CodeInfoDecoder.isExtendedEntryMarker(CodeInfoDecoder.basicEntryFlags(entryFlags))) {
+                entryFlags = entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY;
+            }
 
-            encodingBuffer.putU1(entryFlags);
+            encodingBuffer.putU1(encodeFirstByte(entryFlags));
             encodingBuffer.putU1(data.next == null ? CodeInfoDecoder.DELTA_END_OF_TABLE : (data.next.ip - data.ip));
+            if (CodeInfoDecoder.isExtendedEntry(entryFlags)) {
+                writeExtendedEntryBasicFlags(encodingBuffer, entryFlags);
+            }
 
             writeSizeEncoding(encodingBuffer, data, entryFlags);
             writeExceptionOffset(encodingBuffer, data, entryFlags);
             writeReferenceMapIndex(encodingBuffer, data, entryFlags);
-            writeEncodedFrameInfo(encodingBuffer, data, entryFlags);
+            writeEncodedFrameInfo(encodingBuffer, data, entryFlags, chunkDefaultFrameInfoIndex);
+            writeFramePointerSaveAreaOffset(encodingBuffer, data, entryFlags);
 
             if (DeoptimizationSupport.enabled() && LazyDeoptimization.getValue() && data.frameData != null && data.frameData.frame.isDeoptEntry) {
                 /*
@@ -545,10 +817,107 @@ public class CodeInfoEncoder {
             }
         }
 
-        codeInfoIndex = NonmovableArrays.createByteArray(TypeConversion.asU4(indexBuffer.getBytesWritten()), NmtCategory.Code);
-        indexBuffer.toByteBuffer(NonmovableArrays.asByteBuffer(codeInfoIndex));
+        VMError.guarantee(nextIndexEntry == indexOffsets.length, "Mismatched code info index entry count");
+        codeInfoIndexEntriesPerBlock = selectCodeInfoIndexEntriesPerBlock(indexOffsets, useFinalImageCodeInfoEncoding);
+        byte[] encodedIndex = encodeCodeInfoIndex(indexOffsets, codeInfoIndexEntriesPerBlock);
+        codeInfoIndex = NonmovableArrays.createByteArray(encodedIndex.length, NmtCategory.Code);
+        NonmovableArrays.asByteBuffer(codeInfoIndex).put(encodedIndex);
+        if (useFinalImageCodeInfoEncoding) {
+            byte[] encodedDefaultFrameInfoIndexes = encodeImageCodeInfoDefaultFrameInfoIndexes(defaultFrameInfoIndexes);
+            codeInfoDefaultFrameInfoIndexes = NonmovableArrays.createByteArray(encodedDefaultFrameInfoIndexes.length, NmtCategory.Code);
+            NonmovableArrays.asByteBuffer(codeInfoDefaultFrameInfoIndexes).put(encodedDefaultFrameInfoIndexes);
+        } else {
+            codeInfoDefaultFrameInfoIndexes = NonmovableArrays.nullArray();
+        }
         codeInfoEncodings = NonmovableArrays.createByteArray(TypeConversion.asU4(encodingBuffer.getBytesWritten()), NmtCategory.Code);
         encodingBuffer.toByteBuffer(NonmovableArrays.asByteBuffer(codeInfoEncodings));
+    }
+
+    private static boolean shouldIncludeSavedFramePointerOffset(IPData data, boolean isIndexEntry, int currentFramePointerSaveAreaOffset) {
+        boolean isMethodStart = (data.frameSizeEncoding & CodeInfoDecoder.FRAME_SIZE_METHOD_START) != 0;
+        if (!isMethodStart && !isIndexEntry) {
+            assert data.framePointerSaveAreaOffset == CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET;
+            return false; // information not present for this IPData
+        }
+        if (isIndexEntry && data.framePointerSaveAreaOffset != CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET) {
+            return true; // index entries need to include the save area when there is one
+        }
+        if (currentFramePointerSaveAreaOffset != data.framePointerSaveAreaOffset) {
+            assert isMethodStart : "save area offset expected to change only at another methods start";
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean useFinalImageCodeInfoEncoding() {
+        /*
+         * The side table is part of the final runtime ImageCodeInfo layout. Non-final layered
+         * builds persist metadata for later image generation, so keep their intermediate encoding
+         * in the legacy self-contained format.
+         */
+        return SubstrateUtil.HOSTED && ImageLayerBuildingSupport.lastImageBuild();
+    }
+
+    private static int selectCodeInfoIndexEntriesPerBlock(long[] indexOffsets, boolean useFinalImageCodeInfoEncoding) {
+        if (useFinalImageCodeInfoEncoding && codeInfoIndexFits(indexOffsets, CodeInfoDecoder.CODE_INFO_INDEX_COMPRESSED_ENTRIES_PER_BLOCK)) {
+            return CodeInfoDecoder.CODE_INFO_INDEX_COMPRESSED_ENTRIES_PER_BLOCK;
+        }
+        return 1;
+    }
+
+    private static byte[] encodeCodeInfoIndex(long[] offsets, int entriesPerBlock) {
+        UnsafeArrayTypeWriter buffer = UnsafeArrayTypeWriter.create(ByteArrayReader.supportsUnalignedMemoryAccess());
+        if (entriesPerBlock == 1) {
+            for (long offset : offsets) {
+                buffer.putU4(offset);
+            }
+        } else {
+            VMError.guarantee(entriesPerBlock == CodeInfoDecoder.CODE_INFO_INDEX_COMPRESSED_ENTRIES_PER_BLOCK, "Unexpected code info index block size");
+            for (int blockStart = 0; blockStart < offsets.length; blockStart += entriesPerBlock) {
+                long base = offsets[blockStart];
+                buffer.putU4(base);
+                int blockEnd = Math.min(blockStart + entriesPerBlock, offsets.length);
+                for (int i = blockStart + 1; i < blockEnd; i++) {
+                    buffer.putU2(offsets[i] - base);
+                }
+            }
+        }
+        return buffer.toArray();
+    }
+
+    private static boolean codeInfoIndexFits(long[] offsets, int entriesPerBlock) {
+        if (entriesPerBlock == 1) {
+            for (long offset : offsets) {
+                if (!TypeConversion.isU4(offset)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        VMError.guarantee(entriesPerBlock == CodeInfoDecoder.CODE_INFO_INDEX_COMPRESSED_ENTRIES_PER_BLOCK, "Unexpected code info index block size");
+        for (int blockStart = 0; blockStart < offsets.length; blockStart += entriesPerBlock) {
+            long base = offsets[blockStart];
+            if (!TypeConversion.isU4(base)) {
+                return false;
+            }
+            int blockEnd = Math.min(blockStart + entriesPerBlock, offsets.length);
+            for (int i = blockStart + 1; i < blockEnd; i++) {
+                long residual = offsets[i] - base;
+                if (!TypeConversion.isU2(residual)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static byte[] encodeImageCodeInfoDefaultFrameInfoIndexes(int[] values) {
+        UnsafeArrayTypeWriter buffer = UnsafeArrayTypeWriter.create(ByteArrayReader.supportsUnalignedMemoryAccess());
+        for (int value : values) {
+            buffer.putS4(value);
+        }
+        return buffer.toArray();
     }
 
     /**
@@ -646,7 +1015,7 @@ public class CodeInfoEncoder {
      */
     private static int flagsForDeoptFrameInfo(IPData data) {
         if (data.frameData == null) {
-            return CodeInfoDecoder.FI_NO_DEOPT;
+            return CodeInfoDecoder.FI_NO_INFO;
         } else if (TypeConversion.isS4(data.frameData.encodedFrameInfoIndex)) {
             if (data.frameData.frame.isDeoptEntry) {
                 return CodeInfoDecoder.FI_DEOPT_ENTRY_INDEX_S4;
@@ -662,13 +1031,94 @@ public class CodeInfoEncoder {
         }
     }
 
-    private static void writeEncodedFrameInfo(UnsafeArrayTypeWriter writeBuffer, IPData data, int entryFlags) {
+    private static int encodeFirstByte(int entryFlags) {
+        if (!CodeInfoDecoder.isExtendedEntry(entryFlags)) {
+            return CodeInfoDecoder.basicEntryFlags(entryFlags);
+        }
+        return switch (CodeInfoDecoder.extendedEntryMode(entryFlags)) {
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY -> CodeInfoDecoder.FIRST_BYTE_MARKER_FOR_EXTENDED_ENTRY_LEGACY;
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY_WITH_FRAME_POINTER_SAVE_AREA_OFFSET -> CodeInfoDecoder.FIRST_BYTE_MARKER_FOR_EXTENDED_ENTRY_LEGACY_WITH_FRAME_POINTER_SAVE_AREA_OFFSET;
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_DEFAULT -> CodeInfoDecoder.FIRST_BYTE_MARKER_FOR_EXTENDED_ENTRY_FI_DEFAULT;
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S1 -> CodeInfoDecoder.FIRST_BYTE_MARKER_FOR_EXTENDED_ENTRY_FI_INFO_ONLY_S1;
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S2 -> CodeInfoDecoder.FIRST_BYTE_MARKER_FOR_EXTENDED_ENTRY_FI_INFO_ONLY_S2;
+            default -> throw shouldNotReachHereUnexpectedInput(entryFlags);
+        };
+    }
+
+    private static void writeExtendedEntryBasicFlags(UnsafeArrayTypeWriter writeBuffer, int entryFlags) {
+        assert CodeInfoDecoder.isExtendedEntry(entryFlags);
+        int basicFlags = CodeInfoDecoder.basicEntryFlags(entryFlags);
+        switch (CodeInfoDecoder.extendedEntryMode(entryFlags)) {
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY:
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY_WITH_FRAME_POINTER_SAVE_AREA_OFFSET:
+                writeBuffer.putU1(basicFlags);
+                break;
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_DEFAULT:
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S1:
+            case CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S2:
+                writeBuffer.putU1(basicFlags & ~CodeInfoDecoder.FI_MASK_IN_PLACE);
+                break;
+            default:
+                throw shouldNotReachHereUnexpectedInput(entryFlags);
+        }
+    }
+
+    private int encodeFinalImageExtendedEntryFlags(IPData data, int entryFlags, int currentDefaultFrameInfoIndex, int chunkDefaultFrameInfoIndex) {
+        assert useFinalImageCodeInfoEncoding;
+        boolean useChunkDefaultFrameInfo = currentDefaultFrameInfoIndex >= 0 && currentDefaultFrameInfoIndex == chunkDefaultFrameInfoIndex;
+        /*
+         * For image code, FI_DEFAULT can reuse the chunk side table entry and FI_INFO_ONLY can be
+         * encoded as a small delta to that same default when the frame infos stay close.
+         */
+        if (CodeInfoDecoder.extractFI(entryFlags) == CodeInfoDecoder.FI_DEFAULT_INFO_INDEX_S4 && useChunkDefaultFrameInfo) {
+            return entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_DEFAULT;
+        }
+        if (CodeInfoDecoder.extractFI(entryFlags) == CodeInfoDecoder.FI_INFO_ONLY_INDEX_S4 && useChunkDefaultFrameInfo) {
+            long delta = data.frameData.encodedFrameInfoIndex - chunkDefaultFrameInfoIndex;
+            if (TypeConversion.isS1(delta)) {
+                return entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S1;
+            } else if (TypeConversion.isS2(delta)) {
+                return entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_FI_INFO_ONLY_S2;
+            }
+        }
+        if (CodeInfoDecoder.isExtendedEntryMarker(CodeInfoDecoder.basicEntryFlags(entryFlags))) {
+            return entryFlags | CodeInfoDecoder.EXTENDED_ENTRY_FLAG | CodeInfoDecoder.EXTENDED_ENTRY_MODE_LEGACY;
+        }
+        return entryFlags;
+    }
+
+    private static int frameInfoDelta(IPData data, int chunkDefaultFrameInfoIndex) {
+        VMError.guarantee(chunkDefaultFrameInfoIndex >= 0, "Image code entry is missing chunk default frame info");
+        return NumUtil.safeToInt(data.frameData.encodedFrameInfoIndex - chunkDefaultFrameInfoIndex);
+    }
+
+    private void writeEncodedFrameInfo(UnsafeArrayTypeWriter writeBuffer, IPData data, int entryFlags, int chunkDefaultFrameInfoIndex) {
         switch (CodeInfoDecoder.extractFI(entryFlags)) {
             case CodeInfoDecoder.FI_DEFAULT_INFO_INDEX_S4:
-            case CodeInfoDecoder.FI_DEOPT_ENTRY_INDEX_S4:
-            case CodeInfoDecoder.FI_INFO_ONLY_INDEX_S4:
+                if (CodeInfoDecoder.isExtendedFIDefault(entryFlags)) {
+                    assert useFinalImageCodeInfoEncoding;
+                    break;
+                }
                 writeBuffer.putS4(data.frameData.encodedFrameInfoIndex);
                 break;
+            case CodeInfoDecoder.FI_DEOPT_ENTRY_INDEX_S4:
+                writeBuffer.putS4(data.frameData.encodedFrameInfoIndex);
+                break;
+            case CodeInfoDecoder.FI_INFO_ONLY_INDEX_S4:
+                if (CodeInfoDecoder.isExtendedFIInfoOnlyS1(entryFlags)) {
+                    writeBuffer.putS1(frameInfoDelta(data, chunkDefaultFrameInfoIndex));
+                } else if (CodeInfoDecoder.isExtendedFIInfoOnlyS2(entryFlags)) {
+                    writeBuffer.putS2(frameInfoDelta(data, chunkDefaultFrameInfoIndex));
+                } else {
+                    writeBuffer.putS4(data.frameData.encodedFrameInfoIndex);
+                }
+                break;
+        }
+    }
+
+    private static void writeFramePointerSaveAreaOffset(UnsafeArrayTypeWriter writeBuffer, IPData data, int entryFlags) {
+        if (CodeInfoDecoder.isExtendedWithFramePointerSaveAreaOffset(entryFlags)) {
+            writeBuffer.putS4(data.framePointerSaveAreaOffset);
         }
     }
 
@@ -693,6 +1143,14 @@ class CodeInfoVerifier {
 
     void verifyMethod(SharedMethod method, CompilationResult compilation, int compilationOffset, int compilationSize, CodeInfo info) {
         CodeInfoQueryResult queryResult = new CodeInfoQueryResult();
+        boolean verifyFrameInfoCursor = CodeInfoAccess.usesFinalImageCodeInfoEncoding(info);
+        int expectedRootMethodId = 0;
+        CodeInfoDecoder.FrameInfoCursor frameInfoCursor = null;
+        if (verifyFrameInfoCursor) {
+            CodeInfoAccess.lookupCodeInfo(info, compilationOffset, queryResult, constantAccess);
+            expectedRootMethodId = queryResult.getFrameInfo().getSourceMethodId();
+            frameInfoCursor = new CodeInfoDecoder.FrameInfoCursor();
+        }
         for (int relativeIP = 0; relativeIP < compilationSize; relativeIP++) {
             int totalIP = relativeIP + compilationOffset;
             CodeInfoAccess.lookupCodeInfo(info, totalIP, queryResult, constantAccess);
@@ -701,6 +1159,9 @@ class CodeInfoVerifier {
             assert queryResult.getTotalFrameSize() == compilation.getTotalFrameSize() : queryResult;
 
             assert CodeInfoAccess.lookupStackReferenceMapIndex(info, totalIP) == queryResult.getReferenceMapIndex() : queryResult;
+            if (verifyFrameInfoCursor && expectedRootMethodId != 0) {
+                verifyFrameInfoCursorRootMethod(info, totalIP, expectedRootMethodId, frameInfoCursor);
+            }
         }
 
         for (Infopoint infopoint : compilation.getInfopoints()) {
@@ -735,6 +1196,16 @@ class CodeInfoVerifier {
             assert expected != 0 : handler;
             assert expected == actual : handler;
         }
+    }
+
+    private static void verifyFrameInfoCursorRootMethod(CodeInfo info, int totalIP, int expectedRootMethodId, CodeInfoDecoder.FrameInfoCursor frameInfoCursor) {
+        frameInfoCursor.initialize(info, totalIP, false);
+        FrameInfoQueryResult rootFrame = null;
+        while (frameInfoCursor.advance()) {
+            rootFrame = frameInfoCursor.get();
+        }
+        assert rootFrame != null : "Missing frame info for IP " + totalIP;
+        assert rootFrame.getSourceMethodId() == expectedRootMethodId : rootFrame;
     }
 
     private void verifyFrame(CompilationResult compilation, BytecodeFrame expectedFrame, FrameInfoQueryResult actualFrame, BitSet visitedVirtualObjects) {
@@ -981,5 +1452,12 @@ class CollectingObjectReferenceVisitor implements ObjectReferenceVisitor {
     private void visitObjectReference(Pointer objRef, boolean compressed) {
         int offset = NumUtil.safeToInt(objRef.subtract(base).rawValue());
         result.markReferenceAtOffset(offset, compressed);
+    }
+
+    @Override
+    public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+        int baseOffset = NumUtil.safeToInt(baseObjRef.subtract(base).rawValue());
+        int derivedOffset = NumUtil.safeToInt(derivedObjRef.subtract(base).rawValue());
+        result.markReferenceAtOffset(derivedOffset, baseOffset, compressed);
     }
 }

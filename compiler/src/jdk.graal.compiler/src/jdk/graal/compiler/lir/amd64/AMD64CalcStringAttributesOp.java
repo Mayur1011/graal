@@ -33,9 +33,6 @@ import static jdk.graal.compiler.asm.amd64.AVXKind.AVXSize.DWORD;
 import static jdk.graal.compiler.asm.amd64.AVXKind.AVXSize.QWORD;
 import static jdk.graal.compiler.asm.amd64.AVXKind.AVXSize.XMM;
 import static jdk.graal.compiler.asm.amd64.AVXKind.AVXSize.YMM;
-import static jdk.vm.ci.amd64.AMD64.rcx;
-import static jdk.vm.ci.amd64.AMD64.rdx;
-import static jdk.vm.ci.amd64.AMD64.rsi;
 import static jdk.vm.ci.code.ValueUtil.asRegister;
 
 import java.util.Arrays;
@@ -60,7 +57,6 @@ import jdk.graal.compiler.lir.gen.LIRGeneratorTool.CalcStringAttributesEncoding;
 import jdk.vm.ci.amd64.AMD64.CPUFeature;
 import jdk.vm.ci.amd64.AMD64Kind;
 import jdk.vm.ci.code.Register;
-import jdk.vm.ci.code.RegisterValue;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.Value;
 
@@ -75,10 +71,6 @@ import jdk.vm.ci.meta.Value;
 public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
     public static final LIRInstructionClass<AMD64CalcStringAttributesOp> TYPE = LIRInstructionClass.create(AMD64CalcStringAttributesOp.class);
 
-    private static final Register REG_ARRAY = rsi;
-    private static final Register REG_OFFSET = rcx;
-    private static final Register REG_LENGTH = rdx;
-
     private final CalcStringAttributesEncoding encoding;
 
     private final Stride stride;
@@ -89,42 +81,12 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
     private final boolean assumeValid;
 
     @Def({OperandFlag.REG}) private Value result;
-    @Use({OperandFlag.REG}) private Value array;
-    @Use({OperandFlag.REG}) private Value offset;
-    @Use({OperandFlag.REG}) private Value length;
-
-    @Temp({OperandFlag.REG}) private Value arrayTmp;
-    @Temp({OperandFlag.REG}) private Value offsetTmp;
-    @Temp({OperandFlag.REG}) private Value lengthTmp;
+    @UseKill({OperandFlag.REG}) private Value array;
+    @UseKill({OperandFlag.REG}) private Value offset;
+    @UseKill({OperandFlag.REG}) private Value length;
 
     @Temp({OperandFlag.REG}) private Value[] temp;
     @Temp({OperandFlag.REG}) private Value[] vectorTemp;
-
-    private AMD64CalcStringAttributesOp(LIRGeneratorTool tool, CalcStringAttributesEncoding encoding, EnumSet<CPUFeature> runtimeCheckedCPUFeatures, Value array, Value offset,
-                    Value length, Value result, boolean assumeValid) {
-        super(TYPE, tool, runtimeCheckedCPUFeatures, YMM);
-        this.encoding = encoding;
-        this.assumeValid = assumeValid;
-
-        GraalError.guarantee(supports(tool.target(), runtimeCheckedCPUFeatures, CPUFeature.SSE4_1), "needs at least SSE4.1 support");
-
-        this.stride = encoding.stride;
-        this.vectorLength = vectorSize.getBytes() / encoding.stride.value;
-
-        this.arrayTmp = this.array = array;
-        this.offsetTmp = this.offset = offset;
-        this.lengthTmp = this.length = length;
-        this.result = result;
-
-        this.temp = new Value[getNumberOfTempRegisters(encoding, assumeValid)];
-        for (int i = 0; i < temp.length; i++) {
-            temp[i] = tool.newVariable(LIRKind.value(AMD64Kind.QWORD));
-        }
-        this.vectorTemp = new Value[getNumberOfRequiredVectorRegisters(encoding, supports(tool.target(), runtimeCheckedCPUFeatures, CPUFeature.AVX), assumeValid)];
-        for (int i = 0; i < vectorTemp.length; i++) {
-            vectorTemp[i] = tool.newVariable(LIRKind.value(getVectorKind(JavaKind.Byte)));
-        }
-    }
 
     private static int getNumberOfTempRegisters(CalcStringAttributesEncoding encoding, boolean assumeValid) {
         switch (encoding) {
@@ -170,22 +132,35 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
      * @param encoding operation to run.
      * @param runtimeCheckedCPUFeatures
      * @param array arbitrary array.
-     * @param byteOffset byteOffset to start from. Must include array base byteOffset!
+     * @param offset byteOffset to start from. Must include array base byteOffset!
      * @param length length of the array region to consider, scaled to
      *            {@link CalcStringAttributesEncoding#stride}.
      * @param assumeValid assume that the string is encoded correctly.
      */
-    public static AMD64CalcStringAttributesOp movParamsAndCreate(LIRGeneratorTool tool, CalcStringAttributesEncoding encoding, EnumSet<CPUFeature> runtimeCheckedCPUFeatures,
-                    Value array, Value byteOffset,
-                    Value length, Value result,
-                    boolean assumeValid) {
-        RegisterValue regArray = REG_ARRAY.asValue(array.getValueKind());
-        RegisterValue regOffset = REG_OFFSET.asValue(byteOffset.getValueKind());
-        RegisterValue regLength = REG_LENGTH.asValue(length.getValueKind());
-        tool.emitConvertNullToZero(regArray, array);
-        tool.emitMove(regOffset, byteOffset);
-        tool.emitMove(regLength, length);
-        return new AMD64CalcStringAttributesOp(tool, encoding, runtimeCheckedCPUFeatures, regArray, regOffset, regLength, result, assumeValid);
+    public AMD64CalcStringAttributesOp(LIRGeneratorTool tool, CalcStringAttributesEncoding encoding, EnumSet<CPUFeature> runtimeCheckedCPUFeatures, Value array, Value offset,
+                    Value length, Value result, boolean assumeValid) {
+        super(TYPE, tool, runtimeCheckedCPUFeatures, YMM);
+        this.encoding = encoding;
+        this.assumeValid = assumeValid;
+
+        GraalError.guarantee(supports(tool.target(), runtimeCheckedCPUFeatures, CPUFeature.SSE4_1), "needs at least SSE4.1 support");
+
+        this.stride = encoding.stride;
+        this.vectorLength = vectorSize.getBytes() / encoding.stride.value;
+
+        this.array = array;
+        this.offset = offset;
+        this.length = length;
+        this.result = result;
+
+        this.temp = new Value[getNumberOfTempRegisters(encoding, assumeValid)];
+        for (int i = 0; i < temp.length; i++) {
+            temp[i] = tool.newVariable(LIRKind.value(AMD64Kind.QWORD));
+        }
+        this.vectorTemp = new Value[getNumberOfRequiredVectorRegisters(encoding, supports(tool.target(), runtimeCheckedCPUFeatures, CPUFeature.AVX), assumeValid)];
+        for (int i = 0; i < vectorTemp.length; i++) {
+            vectorTemp[i] = tool.newVariable(LIRKind.value(getVectorKind(JavaKind.Byte)));
+        }
     }
 
     @Override
@@ -273,7 +248,7 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
         // tail for 0 - 1 bytes
         asm.testlAndJcc(lengthTail, lengthTail, Zero, returnAscii, true);
         asm.movzbq(len, new AMD64Address(arr));
-        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0x80, NotZero, returnLatin1, true);
+        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0x80, NotZero, returnLatin1, false);
         asm.jmpb(returnAscii);
 
         emitExitAtEnd(asm, ret, returnAscii, end, CalcStringAttributesEncoding.CR_7BIT);
@@ -386,7 +361,7 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
         // create bmp mask 0xff00
         asm.psllw(vectorSize, vecMaskBMP, vecMaskAscii, 1);
 
-        vectorLoopPrologue(asm, arr, len, lengthTail, tailLessThan32, tailLessThan16, true);
+        vectorLoopPrologue(asm, arr, len, lengthTail, tailLessThan32, tailLessThan16, false);
 
         // ascii loop: check if all chars are |<| 0x80 with PTEST mask 0xff80
         emitPTestLoop(crb, asm, arr, len, vecArray, vecMaskAscii, latin1Entry);
@@ -402,9 +377,9 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
             bmpTail(asm, arr, lengthTail, vecArray, vecMaskAscii, vecMaskBMP, tailLessThan32, tailLessThan16, returnBMP, returnLatin1, returnAscii);
         }
 
-        emitExit(asm, ret, returnAscii, end, CalcStringAttributesEncoding.CR_7BIT);
-        emitExit(asm, ret, returnLatin1, end, CalcStringAttributesEncoding.CR_8BIT);
-        emitExit(asm, ret, returnBMP, end, CalcStringAttributesEncoding.CR_16BIT);
+        emitExit(asm, ret, returnAscii, end, CalcStringAttributesEncoding.CR_7BIT, false);
+        emitExit(asm, ret, returnLatin1, end, CalcStringAttributesEncoding.CR_8BIT, false);
+        emitExit(asm, ret, returnBMP, end, CalcStringAttributesEncoding.CR_16BIT, false);
 
         asm.bind(tailLessThan16);
         // move masks into general purpose registers for regular TEST instructions
@@ -418,11 +393,11 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
         asm.bind(tailLessThan4);
         // tail for 0 - 3 bytes
         // since we're on a 2-byte stride, the only possible lengths are 0 and 2 bytes
-        asm.testlAndJcc(lengthTail, lengthTail, Zero, returnAscii, true);
+        asm.testlAndJcc(lengthTail, lengthTail, Zero, returnAscii, false);
         asm.movzwq(len, new AMD64Address(arr));
-        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0xff80, Zero, returnAscii, true);
-        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0xff00, Zero, returnLatin1, true);
-        asm.jmpb(returnBMP);
+        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0xff80, Zero, returnAscii, false);
+        asm.testAndJcc(AMD64BaseAssembler.OperandSize.QWORD, len, 0xff00, Zero, returnLatin1, false);
+        asm.jmp(returnBMP);
 
         asm.bind(end);
     }
@@ -454,11 +429,12 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
 
         // ascii
         emitTestCurr(asm, size, arr, maskAscii, null, latin1Cur);
-        emitTestTail(asm, size, arr, lengthTail, maskAscii, null, latin1Tail, returnAscii);
+        emitTestTail(asm, size, arr, lengthTail, maskAscii, null, latin1Tail, returnAscii, true, size != AMD64BaseAssembler.OperandSize.DWORD);
 
         // latin1
         emitTestCurr(asm, size, arr, maskBMP, latin1Cur, returnBMP);
-        emitTestTail(asm, size, arr, lengthTail, maskBMP, latin1Tail, returnBMP, returnLatin1);
+        emitTestTail(asm, size, arr, lengthTail, maskBMP, latin1Tail, returnBMP, returnLatin1, size != AMD64BaseAssembler.OperandSize.DWORD,
+                        size != AMD64BaseAssembler.OperandSize.DWORD);
     }
 
     private static void emitTestCurr(AMD64MacroAssembler asm, AMD64BaseAssembler.OperandSize size, Register arr, Register mask, Label entry, Label match) {
@@ -466,12 +442,13 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
         asm.testAndJcc(size, mask, new AMD64Address(arr), NotZero, match, true);
     }
 
-    private void emitTestTail(AMD64MacroAssembler asm, AMD64BaseAssembler.OperandSize size, Register arr, Register lengthTail, Register mask, Label entry, Label match, Label noMatch) {
+    private void emitTestTail(AMD64MacroAssembler asm, AMD64BaseAssembler.OperandSize size, Register arr, Register lengthTail, Register mask, Label entry, Label match, Label noMatch,
+                    boolean isShortMatchJmp, boolean isShortNoMatchJmp) {
         // tail: align the last vector load to the end of the array, overlapping with the
         // main loop's last load
         bind(asm, entry);
-        asm.testAndJcc(size, mask, new AMD64Address(arr, lengthTail, stride, -size.getBytes()), NotZero, match, true);
-        asm.jmpb(noMatch);
+        asm.testAndJcc(size, mask, new AMD64Address(arr, lengthTail, stride, -size.getBytes()), NotZero, match, isShortMatchJmp);
+        asm.jmp(noMatch, isShortNoMatchJmp);
     }
 
     private static final byte TOO_SHORT = 1 << 0;
@@ -771,7 +748,7 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
             if (supportsAVX2AndYMM()) {
                 asm.cmplAndJcc(lengthTail, 16, Less, tailLessThan16, true);
                 loadLessThan32IntoYMMOrdered(crb, asm, stride, xmmTailShuffleMask, arr, lengthTail, tmp, vecArray, vecTmp1, vecTmp2);
-                asm.jmp(tailSingleVector);
+                asm.jmpb(tailSingleVector);
                 asm.bind(tailLessThan16);
             }
             asm.cmplAndJcc(lengthTail, 8, Less, tailLessThan8, true);
@@ -1507,7 +1484,7 @@ public final class AMD64CalcStringAttributesOp extends AMD64ComplexVectorOp {
         asm.bind(entry);
         asm.shlq(ret, 32);
         asm.orq(ret, returnValue);
-        asm.jmpb(end);
+        asm.jmp(end);
     }
 
     private static void emitExitMultiByteAtEnd(AMD64MacroAssembler asm, Register ret, Label entry, Label end, int returnValue) {

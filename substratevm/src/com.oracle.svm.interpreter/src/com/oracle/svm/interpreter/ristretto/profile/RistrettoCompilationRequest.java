@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,8 +29,10 @@ import java.util.concurrent.Callable;
 import com.oracle.svm.graal.meta.SubstrateInstalledCodeImpl;
 import com.oracle.svm.interpreter.ristretto.RistrettoOptions;
 import com.oracle.svm.interpreter.ristretto.RistrettoUtils;
+import com.oracle.svm.interpreter.ristretto.compile.RistrettoInstalledCode;
 import com.oracle.svm.interpreter.ristretto.meta.RistrettoMethod;
 
+import jdk.vm.ci.code.BailoutException;
 import jdk.vm.ci.code.InstalledCode;
 
 public class RistrettoCompilationRequest implements Comparable<RistrettoCompilationRequest>, Callable<InstalledCode> {
@@ -39,12 +41,62 @@ public class RistrettoCompilationRequest implements Comparable<RistrettoCompilat
      */
     public static final int DEFAULT_TOP_TIER_COMPILATION_PRIORITY = 100;
 
+    /**
+     * Default priority for OSR compilations. OSR requests come from already-hot loops, so they should
+     * run ahead of ordinary invocation-triggered top-tier requests in the compilation queue.
+     */
+    public static final int DEFAULT_OSR_COMPILATION_PRIORITY = 50;
+
+    /**
+     * Ristretto method whose bytecodes or OSR entry graph will be compiled.
+     */
     private final RistrettoMethod rMethod;
+
+    /**
+     * Queue ordering key; lower values are consumed first by the compilation manager.
+     */
     private final int priority;
 
+    /**
+     * Entry BCI for this compilation.
+     *
+     * {@link RistrettoUtils#INVOCATION_ENTRY_BCI} denotes an ordinary invocation compile. Any other
+     * value denotes an OSR compile that parses from that bytecode index and installs code in the
+     * per-backedge OSR state for the same BCI.
+     */
+    private final int entryBCI;
+
+    /**
+     * OSR request id that owns this compilation callback, or
+     * {@link RistrettoMethod#NO_OSR_COMPILATION_REQUEST} for invocation-entry compiles and tests that
+     * only inspect queue ordering.
+     */
+    private final int osrCompilationRequestId;
+
+    /// Monotonic time at which this request entered the compilation manager.
+    private volatile long submittedAtNanos;
+
+    /// Compilation requests are one-shot queue entries.
+    private boolean submitted;
+
+    /// Intrusive links used only while this request is tracked for watchdog diagnostics.
+    RistrettoCompilationRequest previousQueuedRequestToReport;
+    RistrettoCompilationRequest nextQueuedRequestToReport;
+    boolean sampledForCompilationWatchdog;
+
     public RistrettoCompilationRequest(RistrettoMethod rMethod, int priority) {
+        this(rMethod, priority, RistrettoUtils.INVOCATION_ENTRY_BCI, RistrettoMethod.NO_OSR_COMPILATION_REQUEST);
+    }
+
+    public RistrettoCompilationRequest(RistrettoMethod rMethod, int priority, int entryBCI) {
+        this(rMethod, priority, entryBCI, RistrettoMethod.NO_OSR_COMPILATION_REQUEST);
+    }
+
+    public RistrettoCompilationRequest(RistrettoMethod rMethod, int priority, int entryBCI, int osrCompilationRequestId) {
         this.rMethod = rMethod;
         this.priority = priority;
+        this.entryBCI = entryBCI;
+        this.osrCompilationRequestId = osrCompilationRequestId;
     }
 
     @Override
@@ -55,7 +107,11 @@ public class RistrettoCompilationRequest implements Comparable<RistrettoCompilat
     @Override
     public InstalledCode call() throws Exception {
         try {
-            SubstrateInstalledCodeImpl code = RistrettoUtils.compileAndInstall(rMethod);
+            SubstrateInstalledCodeImpl code = compileAndInstall();
+            if (code == null) {
+                onCompilationFailure();
+                return null;
+            }
             RistrettoProfileSupport.trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Finished compiling %s%n", rMethod);
 
             /*
@@ -64,17 +120,52 @@ public class RistrettoCompilationRequest implements Comparable<RistrettoCompilat
              * dropped when a class is unloaded and the interpreter jvmci objects are collected.
              */
             boolean installCode = RistrettoCompilationManager.TestingBackdoor.installCode();
-            rMethod.onCompilationSuccess(code, installCode);
+            boolean published = publishCompiledCode(code, installCode);
+            if (!published) {
+                if (code.isValid()) {
+                    code.invalidate();
+                }
+                onCompilationFailure();
+                return null;
+            }
             return code;
+        } catch (BailoutException e) {
+            if (!e.isPermanent()) {
+                onCompilationFailure();
+                throw e;
+            }
+            onPermanentBailout();
+            RistrettoProfileSupport.trace(RistrettoOptions.JITTraceCompilation, "[Ristretto Compiler]Permanent bailout compiling %s: %s%n", this, e.getMessage());
+            return null;
         } catch (Throwable t) {
-            rMethod.onCompilationFailure();
+            onCompilationFailure();
             throw t;
         }
     }
 
+    protected SubstrateInstalledCodeImpl compileAndInstall() {
+        return RistrettoUtils.compileAndInstallForPublication(rMethod, entryBCI);
+    }
+
+    /** Publishes {@code code}, atomically with hierarchy validation when it carries such assumptions. */
+    private boolean publishCompiledCode(SubstrateInstalledCodeImpl code, boolean installCode) {
+        if (code instanceof RistrettoInstalledCode ristrettoCode) {
+            return ristrettoCode.registerHierarchyAssumptionsAndPublish(() -> publishCompiledCodeAfterHierarchyValidation(code, installCode));
+        }
+        return publishCompiledCodeAfterHierarchyValidation(code, installCode);
+    }
+
+    /** Performs the method-state publication step after hierarchy validation. */
+    protected boolean publishCompiledCodeAfterHierarchyValidation(SubstrateInstalledCodeImpl code, boolean installCode) {
+        if (isOSR()) {
+            return rMethod.onOSRCompilationSuccessAfterHierarchyValidation(entryBCI, osrCompilationRequestId, code, installCode);
+        }
+        return rMethod.onCompilationSuccess(code, installCode);
+    }
+
     @Override
     public String toString() {
-        return "CompilationRequest <" + rMethod + ", priority=" + priority + ">";
+        return "CompilationRequest <" + rMethod + ", priority=" + priority + ", entryBCI=" + entryBCI + ">";
     }
 
     public int getPriority() {
@@ -83,5 +174,51 @@ public class RistrettoCompilationRequest implements Comparable<RistrettoCompilat
 
     public RistrettoMethod getRMethod() {
         return rMethod;
+    }
+
+    public boolean isOSR() {
+        return entryBCI != RistrettoUtils.INVOCATION_ENTRY_BCI;
+    }
+
+    /**
+     * Records the monotonic time at which this request entered the compilation queue.
+     *
+     * @param nowNanos submission time obtained from {@link System#nanoTime()}
+     */
+    synchronized void markSubmitted(long nowNanos) {
+        if (submitted) {
+            throw new IllegalStateException("A Ristretto compilation request can only be submitted once.");
+        }
+        submitted = true;
+        submittedAtNanos = nowNanos;
+    }
+
+    /**
+     * Returns the monotonic time at which this request entered the compilation queue.
+     */
+    long getSubmittedAtNanos() {
+        return submittedAtNanos;
+    }
+
+    /**
+     * Records a Graal bailout that declared this request non-retryable.
+     */
+    private void onPermanentBailout() {
+        if (isOSR()) {
+            rMethod.onOSRPermanentCompilationFailure(entryBCI, osrCompilationRequestId);
+        } else {
+            rMethod.onInvocationEntryPermanentBailout();
+        }
+    }
+
+    /**
+     * Records a retryable compilation failure for this request.
+     */
+    private void onCompilationFailure() {
+        if (isOSR()) {
+            rMethod.onOSRCompilationFailure(entryBCI, osrCompilationRequestId);
+        } else {
+            rMethod.onCompilationFailure();
+        }
     }
 }

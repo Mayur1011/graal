@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -46,6 +46,7 @@ import com.oracle.truffle.compiler.TruffleCompilable;
 import jdk.graal.compiler.core.common.CompilationIdentifier;
 import jdk.graal.compiler.truffle.TruffleCompilerImpl;
 import jdk.vm.ci.code.InstalledCode;
+import jdk.vm.ci.meta.DeoptimizationReason;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
@@ -55,12 +56,23 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
  * {@link SubstrateInstalledCode}).
  */
 public class SubstrateOptimizedCallTargetInstalledCode extends InstalledCode implements SubstrateInstalledCode, OptimizedAssumptionDependency {
-    protected final WeakReference<SubstrateOptimizedCallTarget> callTargetRef;
+    protected final WeakCallTargetRef<SubstrateOptimizedCallTarget> callTargetRef;
     private String nameSuffix = "";
+
+    /**
+     * Final subclass to ensure <code>{@link #callTargetRef}.get()</code> can be statically bound in
+     * open type world. This also works around the native image build breaking with allocating
+     * implementations of {@link java.lang.ref.Reference#get()}.
+     */
+    protected static final class WeakCallTargetRef<T> extends WeakReference<T> {
+        protected WeakCallTargetRef(T referent) {
+            super(referent);
+        }
+    }
 
     protected SubstrateOptimizedCallTargetInstalledCode(SubstrateOptimizedCallTarget callTarget) {
         super(null);
-        this.callTargetRef = new WeakReference<>(callTarget);
+        this.callTargetRef = new WeakCallTargetRef<>(callTarget);
     }
 
     @Override
@@ -134,6 +146,12 @@ public class SubstrateOptimizedCallTargetInstalledCode extends InstalledCode imp
     @Override
     public void reprofile() {
         // Not used for encoded graph based runtime compilation
+    }
+
+    @Override
+    public void recordDeoptimization(DeoptimizationReason reason) {
+        // Truffle installed code tracks invalidation and profiling through its call target and
+        // speculation log rather than through Substrate ProfilingInfo deoptimization counters.
     }
 
     @Override

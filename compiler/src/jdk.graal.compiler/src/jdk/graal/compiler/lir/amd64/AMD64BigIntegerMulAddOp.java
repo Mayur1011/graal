@@ -59,9 +59,9 @@ import jdk.vm.ci.meta.Value;
 // @formatter:off
 @SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/x86/stubGenerator_x86_64.cpp#L3378-L3431",
           sha1 = "fab3e655909df456c2fc5a065f98aa62aac0bc08")
-@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L6931-L6965",
+@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/58853f39377ea6168c4570327347294899d51f95/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L6943-L6977",
           sha1 = "e68b8c7bdb37d4bd1350c7e1219fdcb419d2618a")
-@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L7183-L7360",
+@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/58853f39377ea6168c4570327347294899d51f95/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L7195-L7372",
           sha1 = "d89ad721deb560178359f86e8c6c96ffc6530878")
 // @formatter:on
 public final class AMD64BigIntegerMulAddOp extends AMD64LIRInstruction {
@@ -70,11 +70,11 @@ public final class AMD64BigIntegerMulAddOp extends AMD64LIRInstruction {
 
     @Def({OperandFlag.REG}) private Value result;
 
-    @Use({OperandFlag.REG}) private Value outValue;
-    @Use({OperandFlag.REG}) private Value inValue;
-    @Use({OperandFlag.REG}) private Value offsetValue;
-    @Use({OperandFlag.REG}) private Value lenValue;
-    @Use({OperandFlag.REG}) private Value kValue;
+    @Alive({OperandFlag.REG}) private Value outValue;
+    @Alive({OperandFlag.REG}) private Value inValue;
+    @UseKill({OperandFlag.REG}) private Value offsetValue;
+    @UseKill({OperandFlag.REG}) private Value lenValue;
+    @Alive({OperandFlag.REG}) private Value kValue;
 
     @Temp({OperandFlag.REG}) private Value tmp1Value;
     @Temp({OperandFlag.REG}) private Value[] tmpValues;
@@ -90,8 +90,8 @@ public final class AMD64BigIntegerMulAddOp extends AMD64LIRInstruction {
                     Value kValue) {
         super(TYPE);
 
-        // Due to lack of allocatable registers, we use fixed registers and mark them as @Use+@Temp.
-        // This allows the fixed registers to be reused for hosting temporary values
+        // This stub uses fixed registers. offset/len are killed in the body while out/in/k remain
+        // live for the duration of the instruction.
         GraalError.guarantee(asRegister(outValue).equals(rdi), "expect outValue at rdi, but was %s", outValue);
         GraalError.guarantee(asRegister(inValue).equals(rsi), "expect inValue at rsi, but was %s", inValue);
         GraalError.guarantee(asRegister(offsetValue).equals(r11), "expect outValue at r11, but was %s", offsetValue);
@@ -114,16 +114,10 @@ public final class AMD64BigIntegerMulAddOp extends AMD64LIRInstruction {
         this.spillR13 = tool.isReservedRegister(r13);
 
         this.tmpValues = new Value[]{
-                        rax.asValue(),
-                        rcx.asValue(),
                         rdx.asValue(),
                         rbx.asValue(),
-                        rsi.asValue(),
-                        rdi.asValue(),
-                        r8.asValue(),
                         r9.asValue(),
                         r10.asValue(),
-                        r11.asValue(),
                         r13.asValue(),
         };
     }

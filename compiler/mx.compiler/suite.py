@@ -1,11 +1,11 @@
 suite = {
-  "mxversion": "7.68.4",
+  "mxversion": "7.83.0",
   "name" : "compiler",
   "sourceinprojectwhitelist" : [],
 
   "groupId" : "org.graalvm.compiler",
-  "version" : "25.1.0",
-  "release" : False,
+  "version_from" : "sdk",
+  "release_from" : "sdk",
   "url" : "http://www.graalvm.org/",
   "developer" : {
     "name" : "GraalVM Development",
@@ -33,7 +33,7 @@ suite = {
       {
         "name": "barista",
         "subdir": False,
-        "version": "0.6.5",
+        "version": "0.7.9",
         "foreign": True, # barista is not an mx suite
         "dynamic": True,
         "urls": [
@@ -198,7 +198,8 @@ suite = {
         "jdk.graal.compiler.truffle.substitutions.GraphBuilderInvocationPluginProvider",
         "jdk.graal.compiler.truffle.phases.inlining.InliningPolicyProvider",
         "jdk.graal.compiler.truffle.host.TruffleHostEnvironment.Lookup",
-        "jdk.graal.compiler.truffle.substitutions.GraphDecoderInvocationPluginProvider"
+        "jdk.graal.compiler.truffle.substitutions.GraphDecoderInvocationPluginProvider",
+        "jdk.graal.compiler.phases.common.priorityinline.PolicyFactory"
       ],
       "annotationProcessors" : [
         "GRAAL_PROCESSOR"
@@ -361,6 +362,7 @@ suite = {
         ],
         "java.base": [
           "jdk.internal.module",
+          "sun.reflect.annotation",
         ],
       },
       "javaCompliance": "21+",
@@ -745,12 +747,16 @@ suite = {
           "jdk.graal.compiler.vmaccess",
         ],
         "requiresConcealed": {
+          "java.base": [
+            "sun.reflect.annotation",
+          ],
           "jdk.internal.vm.ci": [
             "jdk.vm.ci.meta",
             "jdk.vm.ci.meta.annotation",
             "jdk.vm.ci.code",
           ],
           "jdk.graal.compiler": [
+            "jdk.graal.compiler.annotation",
             "jdk.graal.compiler.phases.util",
           ]
         },
@@ -790,7 +796,7 @@ suite = {
             "jdk.internal.access",
             "jdk.internal.loader",
             "jdk.internal.module",
-            "jdk.internal.misc"
+            "jdk.internal.misc",
           ],
           "jdk.internal.vm.ci": [
             "jdk.vm.ci.meta",
@@ -799,6 +805,7 @@ suite = {
           "jdk.graal.compiler": [
             "jdk.graal.compiler.api.replacements",
             "jdk.graal.compiler.api.runtime",
+            "jdk.graal.compiler.annotation",
             "jdk.graal.compiler.core.target",
             "jdk.graal.compiler.phases.util",
             "jdk.graal.compiler.runtime",

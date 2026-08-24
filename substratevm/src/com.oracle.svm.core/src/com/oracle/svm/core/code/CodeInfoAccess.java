@@ -29,24 +29,24 @@ import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_
 import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.nativeimage.c.struct.SizeOf;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.NeverInline;
-import com.oracle.svm.core.RuntimeAssertionsSupport;
-import com.oracle.svm.shared.util.SubstrateUtil;
-import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.NeverInline;
+import com.oracle.svm.core.AssertionsSupport;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.c.NonmovableObjectArray;
 import com.oracle.svm.core.code.FrameInfoDecoder.ConstantAccess;
 import com.oracle.svm.core.deopt.SubstrateInstalledCode;
-import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.heap.Heap;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.thread.VMOperation;
+import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
-import org.graalvm.word.impl.Word;
 
 /**
  * Provides functionality to query information about a unit of compiled code from a {@link CodeInfo}
@@ -85,7 +85,7 @@ public final class CodeInfoAccess {
 
     @Fold
     static boolean haveAssertions() {
-        return RuntimeAssertionsSupport.singleton().desiredAssertionStatus(CodeInfoAccess.class);
+        return AssertionsSupport.singleton().desiredAssertionStatus(CodeInfoAccess.class);
     }
 
     @Uninterruptible(reason = "The handle should only be accessed from uninterruptible code to prevent that the GC frees the CodeInfo.", callerMustBe = true)
@@ -180,6 +180,16 @@ public final class CodeInfoAccess {
         return state == CodeInfo.STATE_CODE_CONSTANTS_LIVE || state == CodeInfo.STATE_NON_ENTRANT;
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean hasLiveCodeConstants(CodeInfo info) {
+        return isLiveCodeConstantsState(cast(info).getState());
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean isLiveCodeConstantsState(int state) {
+        return isAliveState(state) || state == CodeInfo.STATE_REMOVED_FROM_CODE_CACHE;
+    }
+
     /** @see CodeInfoImpl#getCodeStart */
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static CodePointer getCodeStart(CodeInfo info) {
@@ -237,6 +247,7 @@ public final class CodeInfoAccess {
             size = size.add(NonmovableArrays.byteSizeOf(impl.getObjectFields()))
                             .add(NonmovableArrays.byteSizeOf(impl.getCodeInfoIndex()))
                             .add(NonmovableArrays.byteSizeOf(impl.getCodeInfoEncodings()))
+                            .add(NonmovableArrays.byteSizeOf(impl.getCodeInfoDefaultFrameInfoIndexes()))
                             .add(NonmovableArrays.byteSizeOf(impl.getStackReferenceMapEncoding()))
                             .add(NonmovableArrays.byteSizeOf(impl.getFrameInfoEncodings()))
                             .add(NonmovableArrays.byteSizeOf(impl.getObjectConstants()))
@@ -266,8 +277,33 @@ public final class CodeInfoAccess {
         return baseOffset.add(impl.getRelativeIPOffset()).rawValue();
     }
 
+    /**
+     * Converts a build-time relative IP used by code info encodings back to a runtime code pointer.
+     * This is the inverse of {@link #relativeIP(CodeInfo, CodePointer)}.
+     */
     public static CodePointer absoluteIP(CodeInfo info, long relativeIP) {
-        return (CodePointer) ((UnsignedWord) cast(info).getCodeStart()).add(Word.unsigned(relativeIP));
+        CodeInfoImpl impl = cast(info);
+        UnsignedWord relativeIPWord = Word.unsigned(relativeIP);
+        UnsignedWord offset = relativeIPWord.subtract(impl.getRelativeIPOffset());
+        assert relativeIP >= 0 && relativeIPWord.aboveOrEqual(impl.getRelativeIPOffset()) && offset.belowThan(impl.getCodeSize()) : "relativeIP=" + relativeIP + ", relativeIPOffset=" +
+                        impl.getRelativeIPOffset().rawValue() + ", codeSize=" + impl.getCodeSize().rawValue();
+        return absoluteIPFromCodeStartOffset(impl, offset);
+    }
+
+    /**
+     * Converts an offset measured directly from {@link CodeInfoImpl#getCodeStart()} into a runtime
+     * code pointer. Use this for code-section coordinates that are not encoded relative IPs and
+     * therefore must not be adjusted by {@link CodeInfoImpl#getRelativeIPOffset()}.
+     */
+    public static CodePointer absoluteIPFromCodeStartOffset(CodeInfo info, long codeStartOffset) {
+        CodeInfoImpl impl = cast(info);
+        UnsignedWord offset = Word.unsigned(codeStartOffset);
+        assert codeStartOffset >= 0 && offset.belowThan(impl.getCodeSize()) : "codeStartOffset=" + codeStartOffset + ", codeSize=" + impl.getCodeSize().rawValue();
+        return absoluteIPFromCodeStartOffset(impl, offset);
+    }
+
+    private static CodePointer absoluteIPFromCodeStartOffset(CodeInfoImpl impl, UnsignedWord codeStartOffset) {
+        return (CodePointer) ((UnsignedWord) impl.getCodeStart()).add(codeStartOffset);
     }
 
     @SuppressWarnings("unchecked")
@@ -342,16 +378,20 @@ public final class CodeInfoAccess {
         impl.setFrameInfoEncodings(encodings);
     }
 
-    public static void setCodeInfo(CodeInfo info, NonmovableArray<Byte> index, NonmovableArray<Byte> encodings, NonmovableArray<Byte> referenceMapEncoding) {
+    @Uninterruptible(reason = "Nonmovable arrays are not visible to GC until installed.")
+    public static void setCodeInfo(CodeInfo info, NonmovableArray<Byte> index, NonmovableArray<Byte> encodings, int indexEntriesPerBlock,
+                    NonmovableArray<Byte> defaultFrameInfoIndexes, NonmovableArray<Byte> referenceMapEncoding) {
         CodeInfoImpl impl = cast(info);
         impl.setCodeInfoIndex(index);
         impl.setCodeInfoEncodings(encodings);
+        impl.setCodeInfoIndexEntriesPerBlock(indexEntriesPerBlock);
+        impl.setCodeInfoDefaultFrameInfoIndexes(defaultFrameInfoIndexes);
         impl.setStackReferenceMapEncoding(referenceMapEncoding);
     }
 
     @Uninterruptible(reason = "Nonmovable object arrays are not visible to GC until installed.")
     public static void setEncodings(CodeInfo info, NonmovableObjectArray<Object> objectConstants, NonmovableObjectArray<Class<?>> classes,
-                    NonmovableObjectArray<String> memberNames, NonmovableObjectArray<String> otherStrings, NonmovableArray<Byte> methodTable, int methodTableFirstId) {
+                    NonmovableObjectArray<String> memberNames, NonmovableObjectArray<String> otherStrings, NonmovableArray<Byte> methodTable, int methodTableFirstId, int methodTableEntryCount) {
         CodeInfoImpl impl = cast(info);
         impl.setObjectConstants(objectConstants);
         impl.setClasses(classes);
@@ -359,6 +399,7 @@ public final class CodeInfoAccess {
         impl.setOtherStrings(otherStrings);
         impl.setMethodTable(methodTable);
         impl.setMethodTableFirstId(methodTableFirstId);
+        impl.setMethodCount(methodTableEntryCount);
         if (!SubstrateUtil.HOSTED) {
             // notify the GC about the frame metadata that is now live
             Heap.getHeap().getRuntimeCodeInfoGCSupport().registerFrameMetadata(impl);
@@ -399,6 +440,21 @@ public final class CodeInfoAccess {
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static int getCodeInfoIndexEntriesPerBlock(CodeInfo info) {
+        return cast(info).getCodeInfoIndexEntriesPerBlock();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static NonmovableArray<Byte> getCodeInfoDefaultFrameInfoIndexes(CodeInfo info) {
+        return cast(info).getCodeInfoDefaultFrameInfoIndexes();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean usesFinalImageCodeInfoEncoding(CodeInfo info) {
+        return cast(info).getCodeInfoDefaultFrameInfoIndexes().isNonNull();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static NonmovableArray<Byte> getFrameInfoEncodings(CodeInfo info) {
         return cast(info).getFrameInfoEncodings();
     }
@@ -431,6 +487,11 @@ public final class CodeInfoAccess {
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static int getMethodTableFirstId(CodeInfo info) {
         return cast(info).getMethodTableFirstId();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static int getMethodCount(CodeInfo info) {
+        return cast(info).getMethodCount();
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)

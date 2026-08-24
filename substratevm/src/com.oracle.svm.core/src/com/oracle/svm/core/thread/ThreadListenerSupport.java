@@ -31,6 +31,7 @@ import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
+import com.oracle.svm.guest.staging.core.thread.ThreadListener;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
@@ -66,9 +67,9 @@ public class ThreadListenerSupport {
     }
 
     @Uninterruptible(reason = "Force that all listeners are uninterruptible.")
-    public void beforeThreadStart(IsolateThread isolateThread, Thread javaThread) {
+    public void afterThreadStart(IsolateThread isolateThread, Thread javaThread) {
         for (ThreadListener listener : listeners) {
-            listener.beforeThreadStart(isolateThread, javaThread);
+            listener.afterThreadStart(isolateThread, javaThread);
         }
     }
 

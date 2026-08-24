@@ -36,9 +36,9 @@ import org.graalvm.word.WordBase;
 
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.guest.staging.c.function.CEntryPointOptions;
-import com.oracle.svm.core.handles.ThreadLocalHandles;
-import com.oracle.svm.core.threadlocal.FastThreadLocalFactory;
-import com.oracle.svm.core.threadlocal.FastThreadLocalObject;
+import com.oracle.svm.guest.staging.core.handles.ThreadLocalHandles;
+import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalFactory;
+import com.oracle.svm.guest.staging.core.threadlocal.FastThreadLocalObject;
 
 /**
  * Thread-local context object in a client isolate thread, that is, the isolate that has initiated a

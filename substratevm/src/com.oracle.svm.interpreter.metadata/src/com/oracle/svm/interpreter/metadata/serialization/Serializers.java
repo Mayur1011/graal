@@ -24,6 +24,9 @@
  */
 package com.oracle.svm.interpreter.metadata.serialization;
 
+import java.io.DataInput;
+import java.io.DataOutput;
+import java.io.IOException;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
@@ -41,9 +44,11 @@ import com.oracle.svm.core.MethodRefHolder;
 import com.oracle.svm.core.graal.code.PreparedSignature;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.registry.SymbolsSupport;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.espresso.classfile.ParserConstantPool;
+import com.oracle.svm.espresso.classfile.descriptors.ByteSequence;
 import com.oracle.svm.espresso.classfile.descriptors.ModifiedUTF8;
+import com.oracle.svm.espresso.classfile.descriptors.Name;
 import com.oracle.svm.espresso.classfile.descriptors.Symbol;
 import com.oracle.svm.interpreter.metadata.InterpreterConstantPool;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaField;
@@ -592,12 +597,14 @@ public final class Serializers {
                         ReferenceConstant<Class<?>> clazzConstant = context.readReference(in);
                         boolean isWordType = in.readBoolean();
                         String sourceFileName = context.readReference(in);
+                        Symbol<Name>[] permittedSubclassNames = readSymbolicNames(in);
                         if (clazzConstant.isOpaque()) {
-                            return InterpreterResolvedObjectType.createWithOpaqueClass(name, modifiers, componentType, superclass, interfaces, constantPool, clazzConstant, isWordType, sourceFileName);
+                            return InterpreterResolvedObjectType.createWithOpaqueClass(name, modifiers, componentType, superclass, interfaces, constantPool, clazzConstant, isWordType, sourceFileName,
+                                            permittedSubclassNames);
                         } else {
                             Class<?> clazz = clazzConstant.getReferent();
                             InterpreterResolvedObjectType forInterpreter = InterpreterResolvedObjectType.createForInterpreter(name, modifiers, componentType, superclass, interfaces, constantPool,
-                                            clazz, isWordType);
+                                            clazz, isWordType, permittedSubclassNames);
                             DynamicHub.fromClass(clazz).setInterpreterType(forInterpreter);
                             return forInterpreter;
                         }
@@ -628,19 +635,47 @@ public final class Serializers {
                         context.writeReference(out, clazzConstant);
                         out.writeBoolean(value.isWordType());
                         context.writeReference(out, value.getSourceFileName());
+                        writeSymbolicNames(out, value.getPermittedSubclassNames());
                     });
+
+    private static Symbol<Name>[] readSymbolicNames(DataInput in) throws IOException {
+        int length = LEB128.readSignedInt(in);
+        if (length < 0) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        Symbol<Name>[] result = (Symbol<Name>[]) new Symbol<?>[length];
+        for (int i = 0; i < length; i++) {
+            result[i] = SymbolsSupport.getNames().getOrCreate(ByteSequence.create(STRING.getReader().read(null, in)));
+        }
+        return result;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    private static void writeSymbolicNames(DataOutput out, Symbol<Name>[] names) throws IOException {
+        if (names == null) {
+            LEB128.writeSignedInt(out, -1);
+            return;
+        }
+        LEB128.writeSignedInt(out, names.length);
+        for (Symbol<Name> name : names) {
+            STRING.getWriter().write(null, out, name.toString());
+        }
+    }
 
     static final ValueSerializer<InterpreterResolvedObjectType.VTableHolder> VTABLE_HOLDER = createSerializer(
                     (context, in) -> {
                         InterpreterResolvedObjectType holder = context.readReference(in);
                         InterpreterResolvedJavaMethod[] vtable = context.readerFor(InterpreterResolvedJavaMethod[].class).read(context, in);
                         int classVtableLength = LEB128.readUnsignedInt(in);
-                        return new InterpreterResolvedObjectType.VTableHolder(holder, vtable, classVtableLength);
+                        int mirandaMethodsStart = LEB128.readUnsignedInt(in);
+                        return new InterpreterResolvedObjectType.VTableHolder(holder, vtable, classVtableLength, mirandaMethodsStart);
                     },
                     (context, out, value) -> {
                         context.writeReference(out, value.holder);
                         context.writerFor(InterpreterResolvedJavaMethod[].class).write(context, out, value.vtable);
                         LEB128.writeUnsignedInt(out, value.classVtableLength);
+                        LEB128.writeUnsignedInt(out, value.mirandaMethodsStart);
                     });
 
     static final ValueSerializer<PreparedSignature> PREPARED_SIGNATURE = createSerializer(
@@ -699,7 +734,7 @@ public final class Serializers {
 
                         ReferenceConstant<MethodRefHolder> nativeEntryPointHolder = value.getNativeEntryPointHolderConstant();
                         int vtableIndex = value.getVTableIndex();
-                        int gotOffset = value.getGotOffset();
+                        int gotOffset = value.getGOTOffset();
                         int enterStubOffset = value.getEnterStubOffset();
                         int methodId = value.getMethodId();
 

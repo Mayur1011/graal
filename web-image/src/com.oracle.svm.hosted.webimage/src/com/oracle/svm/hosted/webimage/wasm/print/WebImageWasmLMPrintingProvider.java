@@ -33,11 +33,11 @@ import org.graalvm.word.impl.Word;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmPrintNode;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.VMError;
@@ -53,12 +53,12 @@ import com.oracle.svm.webimage.print.WebImagePrintingProvider;
  */
 @AutomaticallyRegisteredImageSingleton(WebImagePrintingProvider.class)
 @Platforms(WebImageWasmLMPlatform.class)
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 public class WebImageWasmLMPrintingProvider extends WebImagePrintingProvider {
     @Override
     @Uninterruptible(reason = "Handles untracked pointers.")
     public void print(Descriptor fd, char[] chars) {
-        DynamicHub hub = KnownIntrinsics.readHub(chars);
+        DynamicHub hub = DynamicHubIntrinsics.readHub(chars);
         UnsignedWord baseOffset = LayoutEncoding.getArrayBaseOffset(hub.getLayoutEncoding());
         CShortPointer dataPtr = (CShortPointer) Word.objectToUntrackedPointer(chars).add(baseOffset);
         WasmPrintNode.print(fd.num, 2, dataPtr, Word.unsigned(chars.length));

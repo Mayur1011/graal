@@ -100,10 +100,6 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
-import com.oracle.truffle.api.test.OSUtils;
-import com.oracle.truffle.api.test.ReflectionUtils;
-import com.oracle.truffle.api.test.TestAPIAccessor;
-import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import org.graalvm.nativebridge.Isolate;
 import org.graalvm.nativebridge.IsolateThread;
 import org.graalvm.nativebridge.ProcessIsolate;
@@ -133,9 +129,13 @@ import com.oracle.truffle.api.interop.ArityException;
 import com.oracle.truffle.api.interop.InteropException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.test.GCUtils;
+import com.oracle.truffle.api.test.OSUtils;
+import com.oracle.truffle.api.test.ReflectionUtils;
 import com.oracle.truffle.api.test.SubprocessTestUtils;
+import com.oracle.truffle.api.test.TestAPIAccessor;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
 import com.oracle.truffle.api.test.polyglot.PolyglotCachingTest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 import com.oracle.truffle.tck.tests.ValueAssert;
 import com.oracle.truffle.tck.tests.ValueAssert.Trait;
 
@@ -456,6 +456,18 @@ public class PolyglotIsolateTest {
         context = Context.newBuilder().engine(engine).build();
         context.close(true);
         engine.close(true);
+    }
+
+    @Test
+    public void testToStringAfterClose() {
+        Engine engine = Engine.newBuilder().allowExperimentalOptions(true).option("engine.SpawnIsolate", "true").build();
+        Context context = Context.newBuilder().engine(engine).build();
+        assertNotNull(engine.toString());
+        assertNotNull(context.toString());
+        context.close();
+        assertNotNull(context.toString());
+        engine.close();
+        assertNotNull(engine.toString());
     }
 
     @Test
@@ -1511,24 +1523,26 @@ public class PolyglotIsolateTest {
                 future = executorService.submit(() -> {
                     try {
                         callback.running.await();
+                        context.close(true);
                     } catch (InterruptedException ie) {
                         throw new RuntimeException(ie);
+                    } finally {
+                        callback.done.countDown();
                     }
-                    context.close(true);
                 });
-                AbstractPolyglotTest.assertFails(() -> context.eval("triste", "hostObjectCall(sleep(1)," + Integer.MAX_VALUE + ")"), PolyglotException.class,
+                AbstractPolyglotTest.assertFails(() -> context.eval("triste", "hostObjectCall(awaitDone(10)," + Integer.MAX_VALUE + ")"), PolyglotException.class,
                                 (pe) -> {
                                     assertFalse(pe.isInternalError());
                                     assertTrue(pe.isCancelled());
                                     assertFalse(pe.isResourceExhausted());
                                     assertNotNull(pe.getMessage());
                                 });
+                future.get();
             } catch (PolyglotException pe) {
                 if (!pe.isCancelled()) {
                     throw pe;
                 }
             }
-            future.get();
         } finally {
             executorService.shutdownNow();
             executorService.awaitTermination(100, TimeUnit.SECONDS);
@@ -2256,6 +2270,51 @@ public class PolyglotIsolateTest {
         }
     }
 
+    @Test
+    public void testNoMethodScopingWarningWithoutIsolation() throws Exception {
+        testScopingWarningImpl(false, HostAccess.ALL, false, false);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForNoHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.NONE, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningForUnscopedHostAccess() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, false, true);
+    }
+
+    @Test
+    public void testNoMethodScopingWarningForScopedHostAccess() throws Exception {
+        HostAccess scopedHostAccess = HostAccess.newBuilder(HostAccess.ALL).methodScoping(true).build();
+        testScopingWarningImpl(true, scopedHostAccess, false, false);
+    }
+
+    @Test
+    public void testMethodScopingWarningDisabled() throws Exception {
+        testScopingWarningImpl(true, HostAccess.ALL, true, false);
+    }
+
+    private static void testScopingWarningImpl(boolean spawnIsolate, HostAccess hostAccess, boolean disableWarning, boolean expectWarning) throws Exception {
+        assumeFalse(ImageInfo.inImageRuntimeCode());
+        SubprocessTestUtils.Builder builder = SubprocessTestUtils.newBuilder(PolyglotIsolateTest.class, () -> {
+            Context context = Context.newBuilder("triste").allowHostAccess(hostAccess).spawnIsolate(spawnIsolate).build();
+            context.close();
+        });
+        // Remove engine.SpawnIsolate option passed by gates, the test controls spawn isolate itself
+        builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.SpawnIsolate=true")));
+        if (disableWarning) {
+            builder.prefixVmOption("-Dpolyglot.engine.WarnMethodScoping=false");
+        } else {
+            builder.prefixVmOption(SubprocessTestUtils.markForRemoval(("-Dpolyglot.engine.WarnMethodScoping=false")));
+        }
+        builder.onExit((p) -> {
+            assertEquals(expectWarning, p.output.stream().anyMatch((l) -> l.contains("An isolated polyglot context uses host access without host method scoping.")));
+        });
+        builder.run();
+    }
+
     @HostReflection
     public static final class HostObjectFactory {
 
@@ -2292,12 +2351,14 @@ public class PolyglotIsolateTest {
 
         private final Context context;
         private final CountDownLatch running;
+        private final CountDownLatch done;
         final List<String> storedParameters = new ArrayList<>();
         String value;
 
         CancelCallBack(Context context) {
             this.context = context;
             this.running = new CountDownLatch(1);
+            this.done = new CountDownLatch(1);
         }
 
         public String cancel(String arg) {
@@ -2321,10 +2382,12 @@ public class PolyglotIsolateTest {
             return value;
         }
 
-        public void sleep(String millisString) {
+        public void awaitDone(String maxSeconds) {
             enter();
             try {
-                Thread.sleep(Long.parseLong(millisString));
+                if (!done.await(Long.parseLong(maxSeconds), TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timeout " + maxSeconds + " seconds");
+                }
             } catch (InterruptedException ie) {
             }
         }

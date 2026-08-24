@@ -38,10 +38,8 @@ import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.word.impl.Word;
 
+import com.oracle.graal.pointsto.meta.AnalysisMetaAccessExtensionProvider;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
-import com.oracle.svm.core.BuildPhaseProvider.AfterCompilation;
-import com.oracle.svm.core.BuildPhaseProvider.AfterHeapLayout;
-import com.oracle.svm.core.BuildPhaseProvider.ReadyForCompilation;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.UninterruptibleAnnotationUtils;
 import com.oracle.svm.core.code.CodeInfo;
@@ -52,14 +50,17 @@ import com.oracle.svm.core.graal.code.StubCallingConvention;
 import com.oracle.svm.core.graal.code.SubstrateCallingConventionKind;
 import com.oracle.svm.core.graal.meta.SharedRuntimeMethod;
 import com.oracle.svm.core.graal.phases.SubstrateSafepointInsertionPhase;
-import com.oracle.svm.core.heap.UnknownObjectField;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
 import com.oracle.svm.core.util.HostedStringDeduplication;
-import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterCompilation;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterHeapLayout;
+import com.oracle.svm.shared.BuildPhaseProvider.ReadyForCompilation;
 import com.oracle.svm.shared.Uninterruptible;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.api.replacements.Snippet;
 import jdk.graal.compiler.core.common.util.TypeConversion;
@@ -89,6 +90,7 @@ public class SubstrateMethod implements SharedRuntimeMethod {
     private static final int FLAG_BIT_CALLING_CONVENTION_KIND = 7;
     private static final int NUM_BITS_CALLING_CONVENTION_KIND = 2;
     private static final int FLAG_BIT_CALLEE_SAVED_REGISTERS = 9;
+    private static final int FLAG_BIT_LAMBDA_FORM_COMPILED = 10;
 
     protected final int flags;
     protected final byte[] encodedLineNumberTable;
@@ -130,7 +132,7 @@ public class SubstrateMethod implements SharedRuntimeMethod {
         imageCodeInfo = codeInfo;
         encodedLineNumberTable = EncodedLineNumberTable.encode(original.getLineNumberTable());
 
-        assert AnnotationUtil.getAnnotation(original, CEntryPoint.class) == null : "Can't compile entry point method";
+        assert GuestAnnotationAccess.getAnnotation(original, CEntryPoint.class) == null : "Can't compile entry point method";
 
         modifiers = original.getModifiers();
         name = stringTable.deduplicate(original.getName(), true);
@@ -146,15 +148,17 @@ public class SubstrateMethod implements SharedRuntimeMethod {
         encodedGraphStartOffset = -1;
 
         SubstrateCallingConventionKind callingConventionKind = ExplicitCallingConvention.Util.getCallingConventionKind(original, original.isNativeEntryPoint());
+        boolean isLambdaFormCompiled = AnalysisMetaAccessExtensionProvider.isLambdaFormCompiledMethod(original);
         flags = makeFlag(original.isBridge(), FLAG_BIT_BRIDGE) |
                         makeFlag(original.hasNeverInlineDirective(), FLAG_BIT_NEVER_INLINE) |
                         makeFlag(UninterruptibleAnnotationUtils.isUninterruptible(original), FLAG_BIT_UNINTERRUPTIBLE) |
                         makeFlag(SubstrateSafepointInsertionPhase.needSafepointCheck(original), FLAG_BIT_NEEDS_SAFEPOINT_CHECK) |
                         makeFlag(original.isNativeEntryPoint(), FLAG_BIT_ENTRY_POINT) |
-                        makeFlag(AnnotationUtil.isAnnotationPresent(original, Snippet.class), FLAG_BIT_SNIPPET) |
-                        makeFlag(AnnotationUtil.isAnnotationPresent(original, SubstrateForeignCallTarget.class), FLAG_BIT_FOREIGN_CALL_TARGET) |
+                        makeFlag(GuestAnnotationAccess.isAnnotationPresent(original, Snippet.class), FLAG_BIT_SNIPPET) |
+                        makeFlag(GuestAnnotationAccess.isAnnotationPresent(original, SubstrateForeignCallTarget.class), FLAG_BIT_FOREIGN_CALL_TARGET) |
                         makeFlag(callingConventionKind.ordinal(), FLAG_BIT_CALLING_CONVENTION_KIND, NUM_BITS_CALLING_CONVENTION_KIND) |
-                        makeFlag(StubCallingConvention.Utils.hasStubCallingConvention(original), FLAG_BIT_CALLEE_SAVED_REGISTERS);
+                        makeFlag(StubCallingConvention.Utils.hasStubCallingConvention(original), FLAG_BIT_CALLEE_SAVED_REGISTERS) |
+                        makeFlag(isLambdaFormCompiled, FLAG_BIT_LAMBDA_FORM_COMPILED);
     }
 
     /**
@@ -306,6 +310,11 @@ public class SubstrateMethod implements SharedRuntimeMethod {
     @Override
     public boolean needSafepointCheck() {
         return getFlag(FLAG_BIT_NEEDS_SAFEPOINT_CHECK);
+    }
+
+    @Override
+    public boolean isLambdaFormCompiled() {
+        return getFlag(FLAG_BIT_LAMBDA_FORM_COMPILED);
     }
 
     @Override

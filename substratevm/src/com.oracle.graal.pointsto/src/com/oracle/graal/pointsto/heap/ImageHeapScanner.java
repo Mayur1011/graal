@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.MapCursor;
@@ -44,6 +45,7 @@ import com.oracle.graal.pointsto.ObjectScanningObserver;
 import com.oracle.graal.pointsto.api.HostVM;
 import com.oracle.graal.pointsto.api.ImageLayerLoader;
 import com.oracle.graal.pointsto.constraints.UnsupportedFeatureException;
+import com.oracle.graal.pointsto.constraints.UnsupportedPlatformException;
 import com.oracle.graal.pointsto.heap.HeapSnapshotVerifier.ScanningObserver;
 import com.oracle.graal.pointsto.heap.value.ValueSupplier;
 import com.oracle.graal.pointsto.meta.AnalysisField;
@@ -331,7 +333,16 @@ public abstract class ImageHeapScanner {
          * Access the constant type after the replacement. Some constants may have types that should
          * not be reachable at run time and thus are replaced.
          */
-        AnalysisType type = universe.lookup(GuestAccess.get().getProviders().getMetaAccess().lookupJavaType(constant));
+        AnalysisType type;
+        try {
+            type = universe.lookup(GuestAccess.get().getProviders().getMetaAccess().lookupJavaType(constant));
+        } catch (UnsupportedPlatformException ex) {
+            StringBuilder backtrace = new StringBuilder();
+            ObjectScanner.buildObjectBacktrace(bb, reason, backtrace);
+            UnsupportedPlatformException diagnosticException = new UnsupportedPlatformException(ex.getMessage() + System.lineSeparator() + backtrace);
+            diagnosticException.initCause(ex);
+            throw diagnosticException;
+        }
 
         if (type.isArray()) {
             Integer length = hostedValuesProvider.readArrayLength(constant);
@@ -352,7 +363,7 @@ public abstract class ImageHeapScanner {
             checkSealed(reason, "Trying to materialize an ImageHeapObjectArray for %s after the ImageHeapScanner is sealed.", constant);
             markTypeReachable(type, reason);
             ScanReason arrayReason = new ArrayScan(type, array, reason);
-            Object[] elementValues = new Object[length];
+            Object[] elementValues = ImageHeapObjectArray.createElementValues(length);
             for (int idx = 0; idx < length; idx++) {
                 final JavaConstant rawElementValue = hostedValuesProvider.readArrayElement(constant, idx);
                 int finalIdx = idx;
@@ -397,7 +408,7 @@ public abstract class ImageHeapScanner {
             /* We are about to query the type's fields, the type must be marked as reachable. */
             markTypeReachable(type, reason);
             ResolvedJavaField[] instanceFields = type.getInstanceFields(true);
-            Object[] hostedFieldValues = new Object[instanceFields.length];
+            Object[] hostedFieldValues = ImageHeapInstance.createFieldValues(instanceFields.length);
             for (ResolvedJavaField javaField : instanceFields) {
                 AnalysisField field = (AnalysisField) javaField;
                 ValueSupplier<JavaConstant> rawFieldValue;
@@ -866,10 +877,18 @@ public abstract class ImageHeapScanner {
      * Returns true if the provided {@code object} was seen as reachable by the static analysis.
      */
     public boolean isObjectReachable(Object object) {
+        return checkObject(object, ImageHeapConstant::isReachable);
+    }
+
+    public boolean isObjectInSharedLayer(Object object) {
+        return checkObject(object, ImageHeapConstant::isInSharedLayer);
+    }
+
+    public boolean checkObject(Object object, Predicate<ImageHeapConstant> predicate) {
         var javaConstant = asConstant(Objects.requireNonNull(object));
         Object existingTask = imageHeap.getSnapshot(javaConstant);
         if (existingTask instanceof ImageHeapConstant imageHeapConstant) {
-            return imageHeapConstant.isReachable();
+            return predicate.test(imageHeapConstant);
         }
         return false;
     }

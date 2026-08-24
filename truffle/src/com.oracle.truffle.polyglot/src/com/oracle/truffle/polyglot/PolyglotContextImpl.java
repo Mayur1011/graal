@@ -1720,6 +1720,7 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
         // guaranteed by migrateValue
         assert value instanceof TruffleObject;
         if (value instanceof OtherContextGuestObject) {
+            // Same logic as in migrateException()
             OtherContextGuestObject otherValue = (OtherContextGuestObject) value;
             if (otherValue.receiverContext == this && otherValue.delegateContext == valueContext) {
                 // reuse wrapper it is already wrapped
@@ -1728,7 +1729,8 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
                 // unpack foreign value it belongs to that context
                 return otherValue.delegate;
             } else {
-                return new OtherContextGuestObject(this, otherValue.delegate, valueContext);
+                // Preserve original context of the delegate when forwarding through third context
+                return new OtherContextGuestObject(this, otherValue.delegate, otherValue.delegateContext);
             }
         }
         assert value instanceof TruffleObject;
@@ -2815,7 +2817,7 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
                         assert cachedThreadInfo == PolyglotThreadInfo.NULL;
                         /*
                          * When cancelling or exiting, we have to wait for all other threads to
-                         * complete - even for the the default close, otherwise the default close
+                         * complete - even for the default close, otherwise the default close
                          * executed prematurely as the result of leaving the context on the main
                          * thread due to cancel exception could fail because of other threads still
                          * being active. The correct behavior is that the normal close finishes
@@ -4028,6 +4030,57 @@ final class PolyglotContextImpl implements com.oracle.truffle.polyglot.PolyglotI
             closeables = Collections.newSetFromMap(new WeakHashMap<>());
         }
         closeables.add(Objects.requireNonNull(closeable));
+    }
+
+    String toEmbedderString(int identityHash, String isolate) {
+        StringBuilder b = new StringBuilder("Context[id=");
+        b.append(Integer.toHexString(identityHash));
+        b.append(", isolate=");
+        b.append(isolate);
+        b.append(", state=");
+        State localState = state;
+        b.append(localState == State.DEFAULT ? "OPEN" : localState.name());
+        if (!localState.isClosed()) {
+            b.append(", ");
+            if (isActive()) {
+                b.append("active");
+            } else {
+                b.append("inactive");
+            }
+        }
+        b.append(", ");
+        if (singleThreaded) {
+            b.append("single-threaded");
+        } else {
+            b.append("multi-threaded");
+        }
+        b.append(", sharingPolicy=");
+        b.append(layer.isClaimed() ? layer.getContextPolicy() : "UNCLAIMED");
+        b.append(", initializedLanguages=[");
+        String sep = "";
+        for (PolyglotLanguageContext languageContext : contexts) {
+            if (languageContext.isInitialized()) {
+                b.append(sep);
+                b.append(languageContext.language.getId());
+                sep = ", ";
+            }
+        }
+        b.append("]");
+        if (!localState.isClosed()) {
+            b.append(", options={");
+            String separator = PolyglotEngineImpl.appendSetOptions(b, engine.engineOptionValues, "");
+            for (PolyglotLanguage language : engine.idToLanguage.values()) {
+                if (language.getOptionValuesIfExists() != null) {
+                    separator = PolyglotEngineImpl.appendSetOptions(b, config.getLanguageOptionValues(language), separator);
+                }
+            }
+            for (PolyglotInstrument instrument : engine.idToInstrument.values()) {
+                separator = PolyglotEngineImpl.appendSetOptions(b, config.getInstrumentOptionValuesIfExists(instrument), separator);
+            }
+            b.append('}');
+        }
+        b.append(']');
+        return b.toString();
     }
 
     @Override

@@ -39,7 +39,10 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.MalformedURLException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -57,6 +60,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -67,14 +71,12 @@ import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.hosted.FieldValueTransformer;
 
 import com.oracle.graal.pointsto.meta.AnalysisType;
-import com.oracle.svm.core.BuildPhaseProvider;
 import com.oracle.svm.core.NativeImageClassLoaderOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.encoder.SymbolEncoder;
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.fieldvaluetransformer.JavaConstantWrapper;
-import com.oracle.svm.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.jdk.LayeredModuleSingleton;
@@ -87,18 +89,20 @@ import com.oracle.svm.hosted.FeatureImpl.AnalysisAccessBase;
 import com.oracle.svm.hosted.FeatureImpl.BeforeAnalysisAccessImpl;
 import com.oracle.svm.hosted.imagelayer.CrossLayerConstantRegistryFeature;
 import com.oracle.svm.hosted.reflect.proxy.ProxyRenamingSubstitutionProcessor;
+import com.oracle.svm.shared.BuildPhaseProvider;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.LogUtils;
 import com.oracle.svm.shared.util.ModuleSupport;
 import com.oracle.svm.shared.util.ReflectionUtil;
-import com.oracle.svm.shared.util.StringUtil;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.util.HostedModuleSupport;
 
+import jdk.internal.loader.BuiltinClassLoader;
 import jdk.internal.loader.ClassLoaderValue;
+import jdk.internal.loader.ClassLoaders;
 import jdk.internal.module.DefaultRoots;
 import jdk.internal.module.ModuleBootstrap;
 import jdk.internal.module.ModuleReferenceImpl;
@@ -144,7 +148,6 @@ import jdk.internal.module.SystemModuleFinders;
  * </p>
  */
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = PartiallyLayerAware.class)
 @SuppressWarnings("unused")
 public class ModuleLayerFeature implements InternalFeature {
     private ModuleLayerFeatureUtils moduleLayerFeatureUtils;
@@ -207,14 +210,17 @@ public class ModuleLayerFeature implements InternalFeature {
         ModuleLayer runtimeBootLayerPrototype = scanRuntimeBootLayerPrototype(access);
         scanRuntimeClassLoaderValueMapPrototype(access, runtimeBootLayerPrototype);
 
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReferenceLocationField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReferenceImplLocationField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.jarModuleReaderJfField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.jarModuleReaderUriField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReference1ValFileStringField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReference1ValUriField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.loadedModuleClassCodeSourceURLField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
-        access.registerFieldValueTransformer(moduleLayerFeatureUtils.loadedModuleClassURIField, ModuleLayerFeatureUtils.ResetModuleReferenceLocation.INSTANCE);
+        FieldValueTransformer moduleReferenceLocationTransformer = new ModuleLayerFeatureUtils.ResetModuleReferenceLocation(
+                        access.imageClassLoader.classLoaderSupport.modulepathModuleFinder.findAll());
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.builtinClassLoaderPackageToModuleField, (receiver, originalValue) -> moduleLayerFeatureUtils.runtimePackageToModule);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReferenceLocationField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReferenceImplLocationField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.jarModuleReaderJfField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.jarModuleReaderUriField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReference1ValFileStringField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.moduleReference1ValUriField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.loadedModuleClassCodeSourceURLField, moduleReferenceLocationTransformer);
+        access.registerFieldValueTransformer(moduleLayerFeatureUtils.loadedModuleClassURIField, moduleReferenceLocationTransformer);
     }
 
     /**
@@ -338,10 +344,12 @@ public class ModuleLayerFeature implements InternalFeature {
         Set<Module> runtimeImageUnnamedModules = runtimeImageModules.stream().filter(Predicate.not(Module::isNamed)).collect(Collectors.toSet()); // noEconomicSet(streaming)
 
         /*
-         * Parse explicitly added modules via --add-modules. This is done early as this information
-         * is required when filtering the analysis reachable module set.
+         * Parse explicitly added modules via --add-modules and add the system modules required by
+         * application module-path entries. This is done early as this information is required when
+         * filtering the analysis reachable module set.
          */
         Set<String> extraModules = HostedModuleSupport.parseModuleSetModifierProperty(HostedModuleSupport.PROPERTY_IMAGE_EXPLICITLY_ADDED_MODULES);
+        extraModules.addAll(accessImpl.imageClassLoader.classLoaderSupport.imageModulePathRequiredSystemModules);
         extraModules.addAll(Resources.getIncludedResourcesModules());
         extraModules.stream().filter(Predicate.not(HostedModuleSupport.nonExplicitModules::contains)).forEach(moduleName -> {
             Optional<?> module = accessImpl.imageClassLoader.findModule(moduleName);
@@ -374,6 +382,15 @@ public class ModuleLayerFeature implements InternalFeature {
                         .distinct()
                         .sorted(Comparator.comparingInt(ModuleLayerFeatureUtils::distanceFromBootModuleLayer))
                         .collect(Collectors.toList());
+
+        if (reachableModuleLayers.isEmpty() && ImageLayerBuildingSupport.buildingExtensionLayer()) {
+            /*
+             * An extension layer can be small enough to have no reachable types from named modules.
+             * We still need to synthesize the runtime boot layer, so use the hosted boot layer as
+             * the minimal input when no other module layer is reachable.
+             */
+            reachableModuleLayers = List.of(ModuleLayer.boot());
+        }
 
         /*
          * Remove once GR-44584 is merged. See
@@ -615,7 +632,7 @@ public class ModuleLayerFeature implements InternalFeature {
         ModuleLayer runtimeModuleLayer = null;
         try {
             runtimeModuleLayer = moduleLayerFeatureUtils.createNewModuleLayerInstance(runtimeModuleLayerConfiguration);
-            Map<String, Module> nameToModule = moduleLayerFeatureUtils.synthesizeNameToModule(accessImpl, runtimeModuleLayer, clf);
+            Map<String, Module> nameToModule = moduleLayerFeatureUtils.synthesizeNameToModule(accessImpl, runtimeModuleLayer, clf, isRuntimeBootLayer(parentLayers));
             for (Module syntheticModule : syntheticModules) {
                 Module runtimeSyntheticModule = moduleLayerFeatureUtils.getOrCreateRuntimeModuleForHostedModule(syntheticModule, accessImpl);
                 nameToModule.putIfAbsent(runtimeSyntheticModule.getName(), runtimeSyntheticModule);
@@ -628,6 +645,10 @@ public class ModuleLayerFeature implements InternalFeature {
         } catch (InstantiationException | IllegalAccessException | InvocationTargetException ex) {
             throw VMError.shouldNotReachHere("Failed to synthesize the runtime module layer: " + runtimeModuleLayer, ex);
         }
+    }
+
+    private static boolean isRuntimeBootLayer(List<ModuleLayer> parentLayers) {
+        return parentLayers.size() == 1 && parentLayers.getFirst() == ModuleLayer.empty();
     }
 
     private static ServicesCatalog synthesizeRuntimeModuleLayerServicesCatalog(Map<String, Module> nameToModule) {
@@ -663,6 +684,8 @@ public class ModuleLayerFeature implements InternalFeature {
                 for (Map.Entry<Module, Module> e2 : unnamedModulePairs.entrySet()) {
                     replicateVisibilityModification(accessImpl, applicationModules, hostedFrom, e2.getKey(), runtimeFrom, e2.getValue());
                 }
+            }
+            for (Module runtimeFrom : namedModulePairs.values()) {
                 moduleLayerFeatureUtils.encodeFields(accessImpl, runtimeFrom);
             }
         } catch (IllegalAccessException ex) {
@@ -781,7 +804,17 @@ public class ModuleLayerFeature implements InternalFeature {
         runtimeModuleLayer.modules();
     }
 
+    /**
+     * Compact immutable JDK collection implementations are only safe for closed executable images.
+     * Layered image builds keep module metadata mutable/observable across layer patching and
+     * rescanning, and shared-library images preserve more runtime module state than ordinary
+     * executables.
+     */
     @Platforms(Platform.HOSTED_ONLY.class)
+    private static boolean shouldCompactModuleMetadata() {
+        return !ImageLayerBuildingSupport.buildingImageLayer() && !SubstrateOptions.SharedLibrary.getValue();
+    }
+
     private final class ModuleLayerFeatureUtils {
         private final Map<ClassLoader, Map<String, Module>> runtimeModules;
         private final ImageClassLoader imageClassLoader;
@@ -806,6 +839,7 @@ public class ModuleLayerFeature implements InternalFeature {
         private final Method systemModuleFindersSystemModulesMethod;
         private final Method moduleBootstrapLimitFinderMethod;
         private final Method defaultRootsComputeMethod;
+        private final Method classLoadersBootLoaderMethod;
         private final Constructor<ModuleLayer> moduleLayerConstructor;
         private final Field moduleLayerNameToModuleField;
         private final Field moduleLayerParentsField;
@@ -817,16 +851,19 @@ public class ModuleLayerFeature implements InternalFeature {
         private final Field jarModuleReaderUriField;
         private final Field moduleReference1ValFileStringField;
         private final Field moduleReference1ValUriField;
+        private final Constructor<?> loadedModuleConstructor;
         private final Field loadedModuleClassCodeSourceURLField;
         private final Field loadedModuleClassURIField;
+        private final Field builtinClassLoaderNameToModuleField;
+        private final Field builtinClassLoaderPackageToModuleField;
+        private final Map<String, Object> runtimePackageToModule;
         private final Set<String> nativeAccessEnabled;
 
         ModuleLayerFeatureUtils(ImageClassLoader cl) {
             runtimeModules = new HashMap<>();
             imageClassLoader = cl;
-            nativeAccessEnabled = NativeImageClassLoaderOptions.EnableNativeAccess.getValue().values().stream()
-                            .flatMap(m -> Arrays.stream(StringUtil.split(m, ",")))
-                            .collect(Collectors.toSet());
+            nativeAccessEnabled = NativeImageClassLoaderOptions.EnableNativeAccess.getValue().valuesAsSet();
+            runtimePackageToModule = new ConcurrentHashMap<>();
 
             Method classGetDeclaredFields0Method = ReflectionUtil.lookupMethod(Class.class, "getDeclaredFields0", boolean.class);
             try {
@@ -881,6 +918,7 @@ public class ModuleLayerFeature implements InternalFeature {
                 moduleBootstrapLimitFinderMethod = ReflectionUtil.lookupMethod(ModuleBootstrap.class, "limitFinder", ModuleFinder.class, Set.class, Set.class);
 
                 defaultRootsComputeMethod = ReflectionUtil.lookupMethod(DefaultRoots.class, "compute", ModuleFinder.class, ModuleFinder.class);
+                classLoadersBootLoaderMethod = ReflectionUtil.lookupMethod(ClassLoaders.class, "bootLoader");
 
                 moduleLayerConstructor = ReflectionUtil.lookupConstructor(ModuleLayer.class, Configuration.class, List.class, Function.class);
                 moduleLayerNameToModuleField = ReflectionUtil.lookupField(ModuleLayer.class, "nameToModule");
@@ -892,13 +930,18 @@ public class ModuleLayerFeature implements InternalFeature {
                 Class<?> jarModuleReaderClass = ReflectionUtil.lookupClass("jdk.internal.module.ModuleReferences$JarModuleReader");
                 jarModuleReaderJfField = ReflectionUtil.lookupField(jarModuleReaderClass, "jf");
                 jarModuleReaderUriField = ReflectionUtil.lookupField(jarModuleReaderClass, "uri");
-                /* Supplier<ModuleReader> in ModuleReferences.newJarModule() captures dirs. */
+                /*
+                 * Supplier<ModuleReader> in ModuleReferences.newJarModule() captures module paths.
+                 */
                 Class<?> moduleReference1Class = ReflectionUtil.lookupClass("jdk.internal.module.ModuleReferences$1");
                 moduleReference1ValFileStringField = ReflectionUtil.lookupField(moduleReference1Class, "val$fileString");
                 moduleReference1ValUriField = ReflectionUtil.lookupField(moduleReference1Class, "val$uri");
                 Class<?> loadedModuleClass = ReflectionUtil.lookupClass("jdk.internal.loader.BuiltinClassLoader$LoadedModule");
+                loadedModuleConstructor = ReflectionUtil.lookupConstructor(loadedModuleClass, BuiltinClassLoader.class, ModuleReference.class);
                 loadedModuleClassCodeSourceURLField = ReflectionUtil.lookupField(loadedModuleClass, "codeSourceURL");
                 loadedModuleClassURIField = ReflectionUtil.lookupField(loadedModuleClass, "uri");
+                builtinClassLoaderNameToModuleField = ReflectionUtil.lookupField(BuiltinClassLoader.class, "nameToModule");
+                builtinClassLoaderPackageToModuleField = ReflectionUtil.lookupField(BuiltinClassLoader.class, "packageToModule");
             } catch (ReflectiveOperationException | NoSuchElementException ex) {
                 throw VMError.shouldNotReachHere("Failed to retrieve fields of the Module/ModuleLayer class.", ex);
             }
@@ -1056,12 +1099,14 @@ public class ModuleLayerFeature implements InternalFeature {
          * and removal of VM state updates (otherwise we would be re-defining modules to the host
          * VM).
          */
-        Map<String, Module> synthesizeNameToModule(AnalysisAccessBase access, ModuleLayer runtimeModuleLayer, Function<String, ClassLoader> clf)
+        Map<String, Module> synthesizeNameToModule(AnalysisAccessBase access, ModuleLayer runtimeModuleLayer, Function<String, ClassLoader> clf, boolean patchPackageToModule)
                         throws IllegalAccessException, InvocationTargetException {
             Configuration cf = runtimeModuleLayer.configuration();
 
             int cap = (int) (cf.modules().size() / 0.75f + 1.0f);
             Map<String, Module> nameToModule = new HashMap<>(cap);
+            Map<BuiltinClassLoader, Map<String, ModuleReference>> builtinLoaderNameToModule = new HashMap<>();
+            Map<BuiltinClassLoader, Map<String, ModuleReference>> builtinLoaderPackageToModule = patchPackageToModule ? new HashMap<>() : null;
 
             /*
              * Remove mapping of modules to classloaders. Create module instances without defining
@@ -1071,7 +1116,8 @@ public class ModuleLayerFeature implements InternalFeature {
                 ModuleReference mref = resolvedModule.reference();
                 ModuleDescriptor descriptor = mref.descriptor();
                 String name = descriptor.name();
-                ClassLoader loader = clf.apply(name);
+                ClassLoader hostedLoader = clf.apply(name);
+                ClassLoader loader = HostedSubstrateUtil.getRuntimeClassLoader(hostedLoader);
                 boolean nativeAccess = false;
                 Module m = getOrCreateRuntimeModuleForHostedModule(loader, name, descriptor, access, nativeAccess);
                 if (!descriptor.equals(m.getDescriptor())) {
@@ -1080,6 +1126,22 @@ public class ModuleLayerFeature implements InternalFeature {
                 }
                 patchModuleLayerField(access, m, runtimeModuleLayer);
                 nameToModule.put(name, m);
+                BuiltinClassLoader builtinLoader = runtimeBuiltinLoaderForModuleLoader(loader);
+                if (builtinLoader != null) {
+                    builtinLoaderNameToModule.computeIfAbsent(builtinLoader, ignored -> new HashMap<>()).put(name, mref);
+                    if (patchPackageToModule) {
+                        for (String packageName : descriptor.packages()) {
+                            builtinLoaderPackageToModule.computeIfAbsent(builtinLoader, ignored -> new HashMap<>()).put(packageName, mref);
+                        }
+                    }
+                }
+            }
+
+            for (Map.Entry<BuiltinClassLoader, Map<String, ModuleReference>> entry : builtinLoaderNameToModule.entrySet()) {
+                patchBuiltinClassLoaderNameToModuleField(access, entry.getKey(), entry.getValue());
+            }
+            if (patchPackageToModule) {
+                patchBuiltinClassLoaderPackageToModuleField(access, builtinLoaderPackageToModule);
             }
 
             /*
@@ -1198,6 +1260,34 @@ public class ModuleLayerFeature implements InternalFeature {
             return nameToModule;
         }
 
+        private static Map<String, Set<Module>> compactPackageMap(Map<String, Set<Module>> packages) {
+            if (!shouldCompactModuleMetadata()) {
+                return packages;
+            }
+            Map<String, Set<Module>> compactPackages = new HashMap<>(packages.size());
+            for (Map.Entry<String, Set<Module>> entry : packages.entrySet()) {
+                compactPackages.put(entry.getKey(), Set.copyOf(entry.getValue()));
+            }
+            return compactPackages;
+        }
+
+        /// Gets the runtime built-in class loader that owns module metadata for `loader`.
+        ///
+        /// The JDK represents boot modules with a `null` module class loader, but
+        /// `BuiltinClassLoader.packageToModule` stores `LoadedModule` entries against the boot
+        /// `BuiltinClassLoader` instance. This method performs that conversion while preserving
+        /// non-built-in class loaders as unsupported for the built-in loader maps.
+        private BuiltinClassLoader runtimeBuiltinLoaderForModuleLoader(ClassLoader loader) {
+            if (loader == null) {
+                try {
+                    return (BuiltinClassLoader) classLoadersBootLoaderMethod.invoke(null);
+                } catch (IllegalAccessException | InvocationTargetException ex) {
+                    throw VMError.shouldNotReachHere("Failed to retrieve the boot BuiltinClassLoader.", ex);
+                }
+            }
+            return loader instanceof BuiltinClassLoader builtinLoader ? builtinLoader : null;
+        }
+
         private void rescan(AnalysisAccessBase access, Map<String, Set<Module>> packages, Module m, Field modulePackagesField) {
             if (ImageLayerBuildingSupport.buildingImageLayer()) {
                 access.rescanObject(packages, scanReason);
@@ -1228,12 +1318,10 @@ public class ModuleLayerFeature implements InternalFeature {
 
         @SuppressWarnings("unchecked")
         void addReads(AfterAnalysisAccessImpl accessImpl, Module module, Module other) throws IllegalAccessException {
-            Set<Module> reads = (Set<Module>) moduleReadsField.get(module);
-            if (reads == null) {
-                reads = new HashSet<>(1); // noEconomicSet(streaming)
-                moduleReadsField.set(module, reads);
-            }
+            Set<Module> oldReads = (Set<Module>) moduleReadsField.get(module);
+            Set<Module> reads = oldReads == null ? new HashSet<>(1) : new HashSet<>(oldReads); // noEconomicSet(streaming)
             reads.add(other == null ? allUnnamedModule : other);
+            moduleReadsField.set(module, reads);
             accessImpl.rescanField(module, moduleReadsField, scanReason);
         }
 
@@ -1282,10 +1370,11 @@ public class ModuleLayerFeature implements InternalFeature {
             if (fieldValue == null) {
                 return;
             }
-            Map<String, Set<Module>> encodedFieldValue = fieldValue.entrySet().stream()
-                            .collect(Collectors.toMap(
-                                            e -> encoder.encodePackage(e.getKey()),
-                                            Map.Entry::getValue));
+            Map<String, Set<Module>> encodedFieldValue = new HashMap<>(fieldValue.size());
+            for (Map.Entry<String, Set<Module>> entry : fieldValue.entrySet()) {
+                encodedFieldValue.put(encoder.encodePackage(entry.getKey()), entry.getValue());
+            }
+            encodedFieldValue = compactPackageMap(encodedFieldValue);
             field.set(module, encodedFieldValue);
             if (ImageLayerBuildingSupport.buildingImageLayer()) {
                 accessImpl.rescanObject(encodedFieldValue, scanReason);
@@ -1359,7 +1448,8 @@ public class ModuleLayerFeature implements InternalFeature {
         }
 
         void patchModuleLayerNameToModuleField(AnalysisAccessBase accessImpl, ModuleLayer moduleLayer, Map<String, Module> nameToModule) throws IllegalAccessException {
-            moduleLayerNameToModuleField.set(moduleLayer, nameToModule);
+            Map<String, Module> runtimeNameToModule = shouldCompactModuleMetadata() ? Map.copyOf(nameToModule) : nameToModule;
+            moduleLayerNameToModuleField.set(moduleLayer, runtimeNameToModule);
             accessImpl.rescanField(moduleLayer, moduleLayerNameToModuleField, scanReason);
         }
 
@@ -1371,6 +1461,57 @@ public class ModuleLayerFeature implements InternalFeature {
         void patchModuleLayerServicesCatalogField(AnalysisAccessBase accessImpl, ModuleLayer moduleLayer, ServicesCatalog servicesCatalog) throws IllegalAccessException {
             moduleLayerServicesCatalogField.set(moduleLayer, servicesCatalog);
             accessImpl.rescanField(moduleLayer, moduleLayerServicesCatalogField, scanReason);
+        }
+
+        @SuppressWarnings("unchecked")
+        void patchBuiltinClassLoaderNameToModuleField(AnalysisAccessBase accessImpl, BuiltinClassLoader loader, Map<String, ModuleReference> nameToModule) throws IllegalAccessException {
+            Map<String, ModuleReference> builtinLoaderNameToModule = (Map<String, ModuleReference>) builtinClassLoaderNameToModuleField.get(loader);
+            boolean changed = false;
+            for (Map.Entry<String, ModuleReference> entry : nameToModule.entrySet()) {
+                ModuleReference previous = builtinLoaderNameToModule.put(entry.getKey(), entry.getValue());
+                changed |= previous != entry.getValue();
+            }
+            if (changed) {
+                if (ImageLayerBuildingSupport.buildingImageLayer()) {
+                    /*
+                     * GR-75458 tracks whether BuiltinClassLoader.nameToModule needs dedicated
+                     * layered-image handling similar to Module open/exported package maps.
+                     */
+                    accessImpl.rescanObject(builtinLoaderNameToModule, scanReason);
+                } else {
+                    accessImpl.rescanField(loader, builtinClassLoaderNameToModuleField, scanReason);
+                }
+            }
+        }
+
+        /// Rebuilds the runtime `BuiltinClassLoader.packageToModule` entries for packages selected
+        /// by analysis.
+        ///
+        /// Packages in the same module share one JDK `LoadedModule` instance, matching
+        /// `BuiltinClassLoader.loadModule`. The map is cleared before repopulating it so the final
+        /// boot layer synthesis replaces the broader before-analysis prototype. The static field is
+        /// transformed into `runtimePackageToModule` during image heap scanning, so rescanning that
+        /// map is enough to keep the image heap and the JDK lookup table consistent.
+        void patchBuiltinClassLoaderPackageToModuleField(AnalysisAccessBase accessImpl, Map<BuiltinClassLoader, Map<String, ModuleReference>> packageToModule) {
+            runtimePackageToModule.clear();
+            for (Map.Entry<BuiltinClassLoader, Map<String, ModuleReference>> loaderEntry : packageToModule.entrySet()) {
+                BuiltinClassLoader loader = loaderEntry.getKey();
+                Map<ModuleReference, Object> loadedModules = new HashMap<>();
+                for (Map.Entry<String, ModuleReference> packageEntry : loaderEntry.getValue().entrySet()) {
+                    try {
+                        ModuleReference moduleReference = packageEntry.getValue();
+                        Object loadedModule = loadedModules.get(moduleReference);
+                        if (loadedModule == null) {
+                            loadedModule = loadedModuleConstructor.newInstance(loader, moduleReference);
+                            loadedModules.put(moduleReference, loadedModule);
+                        }
+                        runtimePackageToModule.put(packageEntry.getKey(), loadedModule);
+                    } catch (InstantiationException | IllegalAccessException | InvocationTargetException ex) {
+                        throw VMError.shouldNotReachHere("Failed to create a runtime BuiltinClassLoader.LoadedModule.", ex);
+                    }
+                }
+            }
+            accessImpl.rescanObject(runtimePackageToModule, scanReason);
         }
 
         ClassLoader getClassLoaderForBootLayerModule(String name) {
@@ -1453,25 +1594,142 @@ public class ModuleLayerFeature implements InternalFeature {
             }
         }
 
-        /**
-         * Patch module references that contain URLs with a non-JRT protocol. Module references can
-         * contain URLs that capture hosted directories, e.g.,
-         * {@linkplain "file:///home/user/dir/foo.jar"}. See
-         * {@link com.oracle.svm.hosted.image.DisallowedImageHeapObjectFeature} for more details on
-         * what substrings are detected during the image build.
-         */
+        /// Redact file-backed module reference locations so hosted directories do not leak into the
+        /// image heap. Module references can capture hosted paths such as
+        /// `file:///home/user/dir/foo.jar` while non-file locations, including JRT locations, are
+        /// preserved.
+        ///
+        /// Examples of redactions performed here:
+        ///
+        /// - [String]: `/home/user/dir/foo.jar` becomes `/REDACTED/foo.module` when the module name
+        /// is known, or `/REDACTED` otherwise.
+        /// - [URI]: `file:///home/user/dir/foo.jar` becomes `file:///REDACTED/foo.module` when the
+        /// module name is known, or `file:///REDACTED` otherwise.
+        /// - [URL]: `file:/home/user/dir/foo.jar` becomes `file:/REDACTED/foo.module` when the
+        /// module name is known, or `file:/REDACTED` otherwise.
+        /// - [JarFile]: the field is cleared to `null` because a [JarFile] object cannot be safely
+        /// redacted while preserving its type.
+        ///
+        /// See [com.oracle.svm.hosted.image.DisallowedImageHeapObjectFeature] for more details on
+        /// what substrings are detected during the image build.
         static final class ResetModuleReferenceLocation implements FieldValueTransformer {
 
-            static final FieldValueTransformer INSTANCE = new ResetModuleReferenceLocation();
+            final URI redactedFileURI;
+            final Map<URI, String> moduleNameByLocation;
+            final Map<String, String> moduleNameByPath;
 
-            private ResetModuleReferenceLocation() {
+            private ResetModuleReferenceLocation(Collection<ModuleReference> moduleReferences) {
+                moduleNameByLocation = new HashMap<>();
+                moduleNameByPath = new HashMap<>();
+                for (ModuleReference moduleReference : moduleReferences) {
+                    moduleReference.location().ifPresent(location -> {
+                        if ("file".equalsIgnoreCase(location.getScheme())) {
+                            String moduleName = moduleReference.descriptor().name();
+                            moduleNameByLocation.put(location, moduleName);
+                            moduleNameByPath.put(Path.of(location).toString(), moduleName);
+                        }
+                    });
+                }
+                redactedFileURI = URI.create("file:///REDACTED");
             }
 
             @Override
             public Object transform(Object receiver, Object originalValue) {
-                if (originalValue == null || originalValue.toString().startsWith("jrt://")) {
+                if (originalValue == null) {
                     return originalValue;
-                } else {
+                }
+                if (originalValue instanceof String path) {
+                    return getRedactedFileURI(findModuleName(receiver, path, null)).getPath();
+                }
+                FileLocationKind locationKind = FileLocationKind.of(originalValue);
+                if (locationKind != null) {
+                    URI originalURI = asFileURI(locationKind, originalValue);
+                    if (originalURI == null) {
+                        return originalValue;
+                    }
+                    return locationKind.redact(getRedactedFileURI(findModuleName(receiver, null, originalURI)), originalValue);
+                }
+                if (originalValue instanceof JarFile) {
+                    /*
+                     * A JarFile is a ZipFile and is normally rejected by the image-heap
+                     * disallowed-object check because it wraps native state and file descriptors.
+                     * This transformer is registered for specific JDK module-layer fields, and the
+                     * only JarFile value it handles is
+                     * jdk.internal.module.ModuleReferences.JarModuleReader#jf. That field is
+                     * location-sensitive module-reader cache state: it cannot be carried into the
+                     * image heap, and it cannot be safely redacted while preserving its type. Clear
+                     * it here so baked-in JarModuleReader instances can later restore it from the
+                     * runtime module path before jar-backed module resource access.
+                     */
+                    return null;
+                }
+                throw VMError.shouldNotReachHere("File based location '%s' of unexpected type %s", originalValue.toString(), originalValue.getClass());
+            }
+
+            private URI getRedactedFileURI(String moduleName) {
+                return moduleName == null ? redactedFileURI : URI.create("file:///REDACTED/" + moduleName);
+            }
+
+            private String findModuleName(Object receiver, String originalPath, URI originalURI) {
+                if (receiver instanceof ModuleReference moduleReference) {
+                    return moduleReference.descriptor().name();
+                }
+                if (originalPath != null) {
+                    String moduleName = moduleNameByPath.get(originalPath);
+                    if (moduleName != null) {
+                        return moduleName;
+                    }
+                }
+                return originalURI == null ? null : moduleNameByLocation.get(originalURI);
+            }
+
+            private static URI asFileURI(FileLocationKind locationKind, Object value) {
+                try {
+                    URI uri = locationKind.asURI(value);
+                    return "file".equalsIgnoreCase(uri.getScheme()) ? uri : null;
+                } catch (IllegalArgumentException | URISyntaxException e) {
+                    return null;
+                }
+            }
+
+            private enum FileLocationKind {
+                URI_VALUE {
+                    @Override
+                    URI asURI(Object value) {
+                        return (URI) value;
+                    }
+
+                    @Override
+                    Object redact(URI redactedURI, Object originalValue) {
+                        return redactedURI;
+                    }
+                },
+                URL_VALUE {
+                    @Override
+                    URI asURI(Object value) throws URISyntaxException {
+                        return ((URL) value).toURI();
+                    }
+
+                    @Override
+                    Object redact(URI redactedURI, Object originalValue) {
+                        try {
+                            return redactedURI.toURL();
+                        } catch (MalformedURLException e) {
+                            throw VMError.shouldNotReachHere("Failed to create redacted URL for " + originalValue, e);
+                        }
+                    }
+                };
+
+                abstract URI asURI(Object value) throws URISyntaxException;
+
+                abstract Object redact(URI redactedURI, Object originalValue);
+
+                static FileLocationKind of(Object value) {
+                    if (value instanceof URI) {
+                        return URI_VALUE;
+                    } else if (value instanceof URL) {
+                        return URL_VALUE;
+                    }
                     return null;
                 }
             }

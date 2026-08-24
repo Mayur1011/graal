@@ -41,8 +41,8 @@ import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.shared.AlwaysInline;
-import com.oracle.svm.core.NeverInline;
-import com.oracle.svm.core.c.struct.PinnedObjectField;
+import com.oracle.svm.shared.NeverInline;
+import com.oracle.svm.guest.staging.core.c.struct.PinnedObjectField;
 import com.oracle.svm.core.heap.ObjectVisitor;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.identityhashcode.IdentityHashCodeSupport;
@@ -181,9 +181,9 @@ public final class HeapChunk {
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    public static void initialize(Header<?> chunk, Pointer objectsStart, UnsignedWord endOffset) {
+    public static void initialize(Header<?> chunk, Pointer initialTop, UnsignedWord endOffset) {
         HeapChunk.setEndOffset(chunk, endOffset);
-        HeapChunk.setTopPointer(chunk, objectsStart);
+        HeapChunk.setTopPointer(chunk, initialTop);
         HeapChunk.setSpace(chunk, null);
         HeapChunk.setNext(chunk, Word.nullPointer());
         HeapChunk.setPrevious(chunk, Word.nullPointer());
@@ -223,6 +223,11 @@ public final class HeapChunk {
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static UnsignedWord getEndOffset(Header<?> that) {
+        return that.getEndOffset();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord getSize(Header<?> that) {
         return that.getEndOffset();
     }
 

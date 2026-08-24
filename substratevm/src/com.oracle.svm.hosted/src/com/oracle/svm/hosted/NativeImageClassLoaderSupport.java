@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,6 +28,7 @@ import static jdk.graal.compiler.util.Digest.DigestBuilder;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.module.Configuration;
 import java.lang.module.FindException;
 import java.lang.module.ModuleDescriptor;
@@ -36,6 +37,7 @@ import java.lang.module.ModuleReader;
 import java.lang.module.ModuleReference;
 import java.lang.module.ResolvedModule;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
@@ -83,7 +85,9 @@ import java.util.zip.ZipFile;
 
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
+import org.graalvm.collections.Equivalence;
 import org.graalvm.collections.UnmodifiableEconomicSet;
+import org.graalvm.nativeimage.impl.AnnotationExtractor;
 import org.graalvm.nativeimage.libgraal.hosted.LibGraalLoader;
 
 import com.oracle.svm.core.NativeImageClassLoaderOptions;
@@ -93,7 +97,6 @@ import com.oracle.svm.core.imagelayer.LayeredImageOptions;
 import com.oracle.svm.core.util.ClasspathUtils;
 import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.hosted.annotation.SubstrateAnnotationExtractor;
 import com.oracle.svm.hosted.driver.IncludeOptionsSupport;
 import com.oracle.svm.hosted.driver.LayerOptionsSupport;
 import com.oracle.svm.hosted.image.PreserveOptionsSupport;
@@ -107,17 +110,26 @@ import com.oracle.svm.shared.option.SubstrateOptionsParser;
 import com.oracle.svm.shared.util.ClassUtil;
 import com.oracle.svm.shared.util.LogUtils;
 import com.oracle.svm.shared.util.ReflectionUtil;
-import com.oracle.svm.shared.util.StringUtil;
 import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.HostedModuleSupport;
+import com.oracle.svm.util.JVMCIReflectionUtil;
 
 import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.options.OptionDescriptors;
 import jdk.graal.compiler.options.OptionKey;
 import jdk.graal.compiler.options.OptionValues;
+import jdk.graal.compiler.util.EconomicHashSet;
+import jdk.graal.compiler.vmaccess.InvocationException;
 import jdk.internal.module.Modules;
 import jdk.internal.module.Resources;
+import jdk.vm.ci.meta.JavaConstant;
 
+/**
+ * Provides class- and module-path support for native image builds.
+ *
+ * GR-77847: This class needs to be revisited for Terminus.
+ */
 public final class NativeImageClassLoaderSupport {
 
     public static final String ALL_UNNAMED = "ALL-UNNAMED";
@@ -129,9 +141,14 @@ public final class NativeImageClassLoaderSupport {
 
     private final UnmodifiableEconomicSet<Path> imageProvidedJars;
     /**
-     * Cleared by {@link #computePathEntryDigests()} on first call.
+     * Cleared by {@link #getPathEntryDigests()} on first call.
      */
     private PathDigests pathDigests;
+    /**
+     * Cached after the mutable {@link #pathDigests} have been aggregated because a single
+     * classloader can be reused to build multiple layered images in the same process.
+     */
+    private List<PathDigestEntry> pathDigestEntries;
     private final Class<?> explodedModuleReaderClass;
 
     private final ConcurrentHashMap<String, LinkedHashSet<String>> serviceProviders;
@@ -141,8 +158,14 @@ public final class NativeImageClassLoaderSupport {
     public final ModuleFinder upgradeAndSystemModuleFinder;
     public final ModuleLayer moduleLayerForImageBuild;
     public final ModuleFinder modulepathModuleFinder;
+    /**
+     * System modules that are transitively read by real application modules on the image module
+     * path. These modules are not necessarily explicit image roots, but runtime module metadata and
+     * runtime class loading can still need them in the image.
+     */
+    public final Set<String> imageModulePathRequiredSystemModules;
 
-    public final SubstrateAnnotationExtractor annotationExtractor;
+    private AnnotationExtractor annotationExtractor;
 
     private Path layerFile;
 
@@ -207,13 +230,8 @@ public final class NativeImageClassLoaderSupport {
 
     private LoadClassHandler loadClassHandler;
 
-    /**
-     * Uninitialized value for {@link #libGraalLoader}.
-     */
-    private static final LibGraalLoader UninitializedLibGraalLoader = Map::of;
-
-    private LibGraalLoader libGraalLoader = UninitializedLibGraalLoader;
-    private List<ClassLoader> classLoaders;
+    private JavaConstant libGraalLoader;
+    private List<JavaConstant> classLoaders;
 
     private final Method implAddReadsAllUnnamed = ReflectionUtil.lookupMethod(Module.class, "implAddReadsAllUnnamed");
     private final Method implAddEnableNativeAccess = ReflectionUtil.lookupMethod(Module.class, "implAddEnableNativeAccess");
@@ -273,14 +291,13 @@ public final class NativeImageClassLoaderSupport {
 
         ModuleLayer moduleLayer = ModuleLayer.defineModules(configuration, List.of(ModuleLayer.boot()), _ -> classLoader).layer();
         adjustBootLayerQualifiedExports(moduleLayer);
+        imageModulePathRequiredSystemModules = computeImageModulePathRequiredSystemModules(configuration, moduleNames);
         moduleLayerForImageBuild = moduleLayer;
         allLayers(moduleLayerForImageBuild).stream()
                         .flatMap(layer -> layer.modules().stream())
                         .forEach(this::registerModulePathServiceProviders);
 
         modulepathModuleFinder = ModuleFinder.of(modulepath().toArray(Path[]::new));
-
-        annotationExtractor = new SubstrateAnnotationExtractor();
 
         includeConfigSealed = false;
 
@@ -312,14 +329,29 @@ public final class NativeImageClassLoaderSupport {
     }
 
     /**
-     * The temporary {@link PathDigestEntry} object is used to create the list of
-     * {@link PathDigestEntry} tuples. Note that the {@code pathDigests} field is cleared after the
-     * first time this method is called.
+     * Returns the class loader used to load image classes as a constant owned by the guest context.
+     * In fully isolated mode, this is the guest system class loader. Otherwise, it is a constant
+     * reference to the hosted {@linkplain #getClassLoader() native image class loader}.
      */
-    public List<PathDigestEntry> computePathEntryDigests() {
-        List<PathDigestEntry> res = PathDigestEntry.aggregatePathDigests(pathDigests);
-        pathDigests = null;
-        return res;
+    private JavaConstant getGuestClassLoader() {
+        GuestAccess guestAccess = GuestAccess.get();
+        if (guestAccess.isFullyIsolated()) {
+            return guestAccess.invokeStatic(guestAccess.elements.java_lang_ClassLoader_getSystemClassLoader);
+        }
+        return guestAccess.getSnippetReflection().forObject(getClassLoader());
+    }
+
+    /**
+     * The temporary {@link PathDigests} object is used to create the list of
+     * {@link PathDigestEntry} tuples. Note that the {@code pathDigests} field is cleared after the
+     * first time this method is called, and subsequent calls return the cached entries.
+     */
+    public List<PathDigestEntry> getPathEntryDigests() {
+        if (pathDigests != null) {
+            pathDigestEntries = List.copyOf(PathDigestEntry.aggregatePathDigests(pathDigests));
+            pathDigests = null;
+        }
+        return pathDigestEntries;
     }
 
     public void initializePathDigests(Path digestIgnoreRelativePath) {
@@ -342,6 +374,7 @@ public final class NativeImageClassLoaderSupport {
         }
 
         pathDigests = new PathDigests(filterIgnoredPathEntries(imagecp, digestIgnorePaths), filterIgnoredPathEntries(imagemp, digestIgnorePaths));
+        pathDigestEntries = null;
     }
 
     private static List<Path> filterIgnoredPathEntries(List<Path> pathEntries, List<Path> digestIgnorePaths) {
@@ -355,14 +388,66 @@ public final class NativeImageClassLoaderSupport {
         }).toList();
     }
 
-    public LibGraalLoader getLibGraalLoader() {
-        VMError.guarantee(libGraalLoader != UninitializedLibGraalLoader, "Invalid access to libGraalLoader before getting set up");
+    public JavaConstant getLibGraalLoader() {
+        VMError.guarantee(libGraalLoader != null, "Invalid access to libGraalLoader before getting set up");
         return libGraalLoader;
     }
 
-    public List<ClassLoader> getClassLoaders() {
+    public List<JavaConstant> getClassLoaders() {
         VMError.guarantee(classLoaders != null, "Invalid access to classLoaders before getting set up");
         return classLoaders;
+    }
+
+    /**
+     * Installs the same-context annotation extractor after the guest VM configuration is available.
+     */
+    void setAnnotationExtractor(AnnotationExtractor extractor) {
+        VMError.guarantee(annotationExtractor == null, "Annotation extractor is already initialized");
+        annotationExtractor = Objects.requireNonNull(extractor);
+    }
+
+    /**
+     * Returns the same-context annotation extractor selected for this image build.
+     */
+    AnnotationExtractor getAnnotationExtractor() {
+        VMError.guarantee(annotationExtractor != null, "Annotation extractor is not initialized");
+        return annotationExtractor;
+    }
+
+    /**
+     * Pre-initializes the dynamic modules that {@link Proxy} creates for public-interface proxy
+     * classes.
+     *
+     * {@link Proxy} assigns names such as {@code jdk.proxyN} lazily, when the first
+     * public-interface proxy class is created for a class loader. The assigned module name depends
+     * on the class loader and on the order in which proxy modules are allocated. For layered image
+     * builds, that order must be stable between layer creation and later layer use, otherwise
+     * classes in different layers can observe different dynamic proxy module names.
+     *
+     * To make the allocation deterministic, create a harmless throw-away proxy class for each
+     * relevant class loader before proxy creation can be triggered indirectly by class loading,
+     * configuration parsing, or analysis. {@link Runnable} is used only as a simple public
+     * interface; the generated proxy classes themselves are not used.
+     */
+    @SuppressWarnings("deprecation")
+    public void preinitializeProxyDynamicModules() {
+        Set<ClassLoader> loaders = new EconomicHashSet<>(Equivalence.IDENTITY_WITH_SYSTEM_HASHCODE);
+        loaders.add(null);
+        loaders.add(ClassLoader.getPlatformClassLoader());
+        NativeImageSystemClassLoader systemClassLoader = NativeImageSystemClassLoader.singleton();
+        loaders.add(systemClassLoader.defaultSystemClassLoader);
+        loaders.add(systemClassLoader);
+        for (JavaConstant guestClassLoader : getClassLoaders()) {
+            /*
+             * GR-77847: This converts a guest class-loader constant back to a builder-hosted object.
+             * Terminus must preinitialize proxy dynamic modules in the guest context instead.
+             */
+            loaders.add(GuestAccess.get().getSnippetReflection().asObject(ClassLoader.class, guestClassLoader));
+        }
+
+        for (ClassLoader loader : loaders) {
+            Proxy.getProxyClass(loader, Runnable.class);
+        }
     }
 
     public ModuleFinder getModulePathsFinder() {
@@ -403,7 +488,11 @@ public final class NativeImageClassLoaderSupport {
         loadClassHandler = new LoadClassHandler(executor, imageClassLoader);
         loadClassHandler.run();
 
-        LibGraalLoader loader = getLibGraalLoader();
+        /*
+         * GR-77772: This converts a guest class-loader constant back to a builder-hosted
+         * object. Terminus must keep this operation in the guest context instead.
+         */
+        LibGraalLoader loader = GuestAccess.get().getSnippetReflection().asObject(LibGraalLoader.class, getLibGraalLoader());
         if (loader != null) {
             /* If we have a LibGraalLoader, register its classes to the image builder */
             GuestTypes guestTypes = imageClassLoader.guestTypes;
@@ -502,7 +591,7 @@ public final class NativeImageClassLoaderSupport {
 
     private static void adjustBootLayerQualifiedExports(ModuleLayer layer) {
         /*
-         * For all qualified exports packages of modules in the the boot layer we check if layer
+         * For all qualified exports packages of modules in the boot layer we check if layer
          * contains modules that satisfy such qualified exports. If we find a match we perform a
          * addExports.
          */
@@ -544,6 +633,54 @@ public final class NativeImageClassLoaderSupport {
 
     protected List<Path> applicationModulePath() {
         return imagemp;
+    }
+
+    /**
+     * Computes the system modules that are transitively read by application modules passed via
+     * {@code -imagemp}.
+     *
+     * @param configuration module graph resolved from the image module path
+     * @param applicationModuleNames module names discovered directly from the image module path
+     * @return names of system modules read transitively by application modules
+     */
+    private Set<String> computeImageModulePathRequiredSystemModules(Configuration configuration, Set<String> applicationModuleNames) {
+        Set<ResolvedModule> applicationModules = applicationModuleNames.stream()
+                        .map(configuration::findModule)
+                        .flatMap(Optional::stream)
+                        .filter(module -> !hasFileLocation(module, imageProvidedJars::contains))
+                        .collect(Collectors.toSet());
+        Set<String> requiredSystemModules = transitiveReads(applicationModules).stream()
+                        .map(ResolvedModule::name)
+                        .filter(moduleName -> upgradeAndSystemModuleFinder.find(moduleName).isPresent())
+                        .collect(Collectors.toUnmodifiableSet());
+        return requiredSystemModules;
+    }
+
+    /**
+     * Returns the transitive closure of {@link ResolvedModule#reads()} for {@code modules}.
+     */
+    private static Set<ResolvedModule> transitiveReads(Collection<ResolvedModule> modules) {
+        Set<ResolvedModule> reads = new LinkedHashSet<>();
+        Deque<ResolvedModule> worklist = modules.stream()
+                        .flatMap(module -> module.reads().stream())
+                        .collect(Collectors.toCollection(ArrayDeque::new));
+        while (!worklist.isEmpty()) {
+            ResolvedModule module = worklist.removeFirst();
+            if (reads.add(module)) {
+                module.reads().forEach(worklist::add);
+            }
+        }
+        return Set.copyOf(reads);
+    }
+
+    /**
+     * Tests whether {@code module} has a {@code file:} location accepted by {@code matches}.
+     */
+    private static boolean hasFileLocation(ResolvedModule module, Predicate<Path> matches) {
+        return module.reference().location().stream()
+                        .filter(uri -> "file".equalsIgnoreCase(uri.getScheme()))
+                        .map(Path::of)
+                        .anyMatch(matches);
     }
 
     public Optional<Module> findModule(String moduleName) {
@@ -591,7 +728,7 @@ public final class NativeImageClassLoaderSupport {
                 }
             }
         });
-        NativeImageClassLoaderOptions.EnableNativeAccess.getValue(parsedHostedOptions).values().stream().flatMap(m -> Arrays.stream(StringUtil.split(m, ","))).forEach(moduleName -> {
+        NativeImageClassLoaderOptions.EnableNativeAccess.getValue(parsedHostedOptions).values().forEach(moduleName -> {
             if (ALL_UNNAMED.equals(moduleName)) {
                 ReflectionUtil.invokeMethod(implAddEnableNativeAccessToAllUnnamed, null);
             } else {
@@ -703,21 +840,26 @@ public final class NativeImageClassLoaderSupport {
 
     public void setupLibGraalClassLoader() {
         var className = SubstrateOptions.LibGraalClassLoader.getValue(parsedHostedOptions);
+        var guestAccess = GuestAccess.get();
+        JavaConstant nativeImageClassLoader = getGuestClassLoader();
         if (!className.isEmpty()) {
             String nameOption = SubstrateOptionsParser.commandArgument(SubstrateOptions.LibGraalClassLoader, className);
+            JavaConstant loaderClass;
             try {
-                Class<?> loaderClass = Class.forName(className, true, classLoader);
-                if (!LibGraalLoader.class.isAssignableFrom(loaderClass)) {
-                    throw VMError.shouldNotReachHere("Class named by " + nameOption + " does not implement " + LibGraalLoader.class + '.');
-                }
-                libGraalLoader = (LibGraalLoader) ReflectionUtil.newInstance(loaderClass);
-                classLoaders = List.of((ClassLoader) libGraalLoader, getClassLoader());
-            } catch (ClassNotFoundException e) {
-                throw VMError.shouldNotReachHere("Class named by " + nameOption + " could not be found.", e);
+                loaderClass = guestAccess.invokeStatic(guestAccess.elements.java_lang_Class_forName,
+                                guestAccess.asGuestString(className), JavaConstant.forBoolean(true), nativeImageClassLoader);
+            } catch (InvocationException e) {
+                throw VMError.shouldNotReachHere("Class named by " + nameOption + " could not be loaded.", e);
             }
+            var loaderType = guestAccess.getProviders().getConstantReflection().asJavaType(loaderClass);
+            if (!guestAccess.lookupType(LibGraalLoader.class).isAssignableFrom(loaderType)) {
+                throw VMError.shouldNotReachHere("Class named by " + nameOption + " does not implement " + LibGraalLoader.class + '.');
+            }
+            libGraalLoader = guestAccess.invoke(JVMCIReflectionUtil.getDeclaredConstructor(false, loaderType), null);
+            classLoaders = List.of(libGraalLoader, nativeImageClassLoader);
         } else {
-            libGraalLoader = null;
-            classLoaders = List.of(getClassLoader());
+            libGraalLoader = JavaConstant.NULL_POINTER;
+            classLoaders = List.of(nativeImageClassLoader);
         }
     }
 
@@ -962,6 +1104,18 @@ public final class NativeImageClassLoaderSupport {
                                 .distinct().forEach(mn -> modulesRequiringInitModule.putIfAbsent(mn, InitModuleAction.LoadLinkAndRegisterTypes));
 
                 Set<String> explicitlyAddedModules = HostedModuleSupport.parseModuleSetModifierProperty(HostedModuleSupport.PROPERTY_IMAGE_EXPLICITLY_ADDED_MODULES);
+                for (String moduleName : imageModulePathRequiredSystemModules) {
+                    /*
+                     * Application module-path entries can require system modules that are already
+                     * visible to the builder VM. BootClassRegistry resolves a runtime-loaded boot
+                     * class' package to its jimage module, e.g. javax.xml.namespace.QName to
+                     * java.xml, through the runtime BuiltinClassLoader.packageToModule metadata.
+                     * Load and link these modules so their package descriptors are included in the
+                     * synthesized runtime boot module layer, without registering their classes as
+                     * analysis types.
+                     */
+                    modulesRequiringInitModule.putIfAbsent(moduleName, InitModuleAction.LoadLink);
+                }
 
                 for (ModuleReference moduleReference : upgradeAndSystemModuleFinder.findAll()) {
                     String moduleName = moduleReference.descriptor().name();
@@ -1028,7 +1182,8 @@ public final class NativeImageClassLoaderSupport {
                 final boolean includeUnconditionally = layerSelectors.moduleNames().contains(module.getName());
                 final boolean preserveModule = preserveSelectors.moduleNames().contains(module.getName());
                 var container = moduleReference.location().orElseThrow();
-                if (ModuleLayer.boot().equals(module.getLayer())) {
+                final boolean isBuilderContainer = ModuleLayer.boot().equals(module.getLayer());
+                if (isBuilderContainer) {
                     imageClassLoader.guestTypes.builderURILocations.add(container);
                 }
                 final boolean isInImageModulePathOfLayeredBuild = pathDigests != null && pathDigests.mpDigests.containsKey(container);
@@ -1039,7 +1194,7 @@ public final class NativeImageClassLoaderSupport {
                         String className = extractClassName(moduleResource, fileSystemSeparatorChar);
                         if (className != null) {
                             currentlyProcessedEntry = moduleReferenceLocation + fileSystemSeparatorChar + moduleResource;
-                            executor.execute(() -> handleClassFileName(container, module, className, includeUnconditionally, registerTypes, preserveModule));
+                            executor.execute(() -> handleClassFileName(container, module, className, includeUnconditionally, registerTypes, preserveModule, isBuilderContainer));
                         }
                         if (isInImageModulePathOfLayeredBuild) {
                             executor.execute(() -> PathDigests.storePathFileDigest(container, moduleResource, isJar, pathDigests.mpDigests));
@@ -1135,7 +1290,7 @@ public final class NativeImageClassLoaderSupport {
                     String className = extractClassName(fileName, fileSystemSeparatorChar);
                     if (className != null) {
                         currentlyProcessedEntry = file.toUri().toString();
-                        executor.execute(() -> handleClassFileName(container, null, className, includeUnconditionally, true, includeAllMetadata));
+                        executor.execute(() -> handleClassFileName(container, null, className, includeUnconditionally, true, includeAllMetadata, false));
                     }
                     if (isInImageClassPathOfLayeredBuild) {
                         executor.execute(() -> PathDigests.storePathFileDigest(container, fileName, isJar, pathDigests.cpDigests));
@@ -1226,7 +1381,8 @@ public final class NativeImageClassLoaderSupport {
          * Processes the name of a class discovered while scanning a classpath or module-path
          * origin.
          */
-        private void handleClassFileName(URI container, Module module, String className, boolean includeUnconditionally, boolean registerTypes, boolean preserveReflectionMetadata) {
+        private void handleClassFileName(URI container, Module module, String className, boolean includeUnconditionally, boolean registerTypes, boolean preserveReflectionMetadata,
+                        boolean isBuilderContainer) {
             handleClassFileNameInBuilderContext(module, className, registerTypes);
 
             imageClassLoader.guestTypes.handleClassFileName(container,
@@ -1236,6 +1392,7 @@ public final class NativeImageClassLoaderSupport {
                             includeUnconditionally,
                             registerTypes,
                             preserveReflectionMetadata,
+                            isBuilderContainer,
                             includePackages,
                             preservePackages);
 
@@ -1448,6 +1605,31 @@ public final class NativeImageClassLoaderSupport {
     }
 
     /**
+     * Updates the digest without materializing the whole resource in one byte array. The buffer is
+     * filled before each update so the digest does not depend on arbitrary short-read boundaries
+     * from the input stream. This avoids overflowing {@link Integer#MAX_VALUE} for path digest
+     * inputs larger than a single Java byte array can represent.
+     */
+    static void updatePathDigest(DigestBuilder db, InputStream input) throws IOException {
+        byte[] buffer = new byte[PathDigests.FILE_DIGEST_BUFFER_SIZE];
+        int buffered = 0;
+        int bytesRead;
+        while ((bytesRead = input.read(buffer, buffered, buffer.length - buffered)) != -1) {
+            if (bytesRead == 0) {
+                continue;
+            }
+            buffered += bytesRead;
+            if (buffered == buffer.length) {
+                db.update(buffer);
+                buffered = 0;
+            }
+        }
+        if (buffered > 0) {
+            db.update(Arrays.copyOf(buffer, buffered));
+        }
+    }
+
+    /**
      * Stores a collection of individual class/resource file digests that is updated during class
      * loading. In particular, {@code PathDigests} objects store and update two
      * {@link EconomicMap}s, one for class-path entries and the other for module-path entries. Each
@@ -1471,6 +1653,8 @@ public final class NativeImageClassLoaderSupport {
          */
         private final EconomicMap<URI, List<String>> mpDigests = EconomicMap.create();
 
+        private static final int FILE_DIGEST_BUFFER_SIZE = 64 * 1024;
+
         private PathDigests(List<Path> imagecp, List<Path> imagemp) {
             imagecp.stream()
                             .map(Path::toUri)
@@ -1490,26 +1674,28 @@ public final class NativeImageClassLoaderSupport {
          * @param digests where to record the digest
          */
         private static void storePathFileDigest(URI container, String resource, boolean isJar, EconomicMap<URI, List<String>> digests) {
-            byte[] fileContent;
+            DigestBuilder db = new DigestBuilder();
             try {
                 if (isJar) {
                     try (JarFile jarFile = new JarFile(new File(container), true, ZipFile.OPEN_READ, JarFile.runtimeVersion())) {
                         JarEntry jarEntry = jarFile.getJarEntry(resource);
-                        fileContent = jarFile.getInputStream(jarEntry).readAllBytes();
+                        try (InputStream input = jarFile.getInputStream(jarEntry)) {
+                            updatePathDigest(db, input);
+                        }
                     }
                 } else {
                     Path resourcePath = Path.of(container).resolve(resource);
                     if (!resourcePath.toFile().isFile()) {
                         return;
                     }
-                    fileContent = Files.readAllBytes(resourcePath);
+                    try (InputStream input = Files.newInputStream(resourcePath)) {
+                        updatePathDigest(db, input);
+                    }
                 }
             } catch (IOException e) {
                 throw UserError.abort("Image builder cannot read file: " + resource);
             }
 
-            DigestBuilder db = new DigestBuilder();
-            db.update(fileContent);
             db.update(resource.getBytes(StandardCharsets.UTF_8));
             List<String> containerDigests = digests.get(container);
             synchronized (containerDigests) {
@@ -1559,7 +1745,7 @@ public final class NativeImageClassLoaderSupport {
                                 .sorted()
                                 .map(d -> d.getBytes(StandardCharsets.UTF_8))
                                 .forEach(db::update);
-                Path path = Path.of(cursor.getKey().getPath());
+                Path path = Path.of(cursor.getKey());
                 String digest = new String(db.digest(), StandardCharsets.UTF_8);
                 aggregatedDigests.add(new PathDigestEntry(type, digest, path));
             }

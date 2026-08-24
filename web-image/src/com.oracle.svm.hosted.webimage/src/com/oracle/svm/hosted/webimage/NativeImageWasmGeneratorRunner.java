@@ -34,8 +34,7 @@ import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CShortPointer;
 
 import com.oracle.graal.pointsto.util.TimerCollection;
-import com.oracle.svm.core.JavaMainWrapper;
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.util.ExitStatus;
 import com.oracle.svm.hosted.ImageClassLoader;
@@ -46,6 +45,7 @@ import com.oracle.svm.hosted.ProgressReporter;
 import com.oracle.svm.hosted.c.CAnnotationProcessorCache;
 import com.oracle.svm.hosted.image.AbstractImage;
 import com.oracle.svm.hosted.option.HostedOptionParser;
+import com.oracle.svm.hosted.sboutlining.SBOutliningFeature;
 import com.oracle.svm.hosted.webimage.logging.visualization.VisualizationSupport;
 import com.oracle.svm.hosted.webimage.name.WebImageNamingConvention;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions;
@@ -54,10 +54,8 @@ import com.oracle.svm.hosted.webimage.util.BenchmarkLogger;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmLMJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasmgc.WebImageWasmGCJavaMainSupport;
 import com.oracle.svm.shared.option.ReplacingLocatableMultiOptionValue;
-import com.oracle.svm.util.AnnotatedObjectAccess;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
-import com.oracle.svm.webimage.WebImageJSJavaMainSupport;
 import com.oracle.svm.webimage.WebImageJavaMainSupport;
 
 import jdk.graal.compiler.options.OptionDescriptor;
@@ -135,6 +133,10 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
         // Forcibly turn off CAnnotation processor cache
         optionProvider.getHostedValues().put(CAnnotationProcessorCache.Options.UseCAPCache, false);
 
+        // Web Image does not support StringBuilder or StringBuffer outlining.
+        optionProvider.getHostedValues().put(SBOutliningFeature.Options.OutlineStringBuilderAppends, false);
+        optionProvider.getHostedValues().put(SBOutliningFeature.Options.OutlineStringBufferAppends, false);
+
         optionProvider.getHostedValues().put(SubstrateOptions.CompilerBackend, "webImage");
 
         // reduce image size
@@ -191,13 +193,17 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
         return new MainEntryPoint(mainEntryMethod, null);
     }
 
+    /**
+     * Returns the backend-specific Web Image entry point that wraps application Java main invocation.
+     */
     @Override
-    protected Method getMainEntryMethod(ImageClassLoader classLoader) throws NoSuchMethodException {
-        return switch (WebImageOptions.getBackend(classLoader)) {
+    protected ResolvedJavaMethod getMainEntryMethod(ImageClassLoader classLoader) throws NoSuchMethodException {
+        Method mainEntryMethod = switch (WebImageOptions.getBackend(classLoader)) {
             case JS -> WebImageJavaMainSupport.class.getDeclaredMethod("run", String[].class);
             case WASM -> WebImageWasmLMJavaMainSupport.class.getDeclaredMethod("run", int.class, CIntPointer.class, CShortPointer.class);
             case WASMGC -> WebImageWasmGCJavaMainSupport.class.getDeclaredMethod("run", String[].class);
         };
+        return GuestAccess.get().lookupMethod(mainEntryMethod);
     }
 
     protected static ResolvedJavaMethod getLibraryEntyPointMethod(ImageClassLoader classLoader) {
@@ -210,15 +216,6 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
     }
 
     @Override
-    protected JavaMainWrapper.JavaMainSupport createJavaMainSupport(Method javaMainMethod, ImageClassLoader classLoader) throws IllegalAccessException {
-        return switch (WebImageOptions.getBackend(classLoader)) {
-            case JS -> new WebImageJSJavaMainSupport(javaMainMethod);
-            case WASM -> new WebImageWasmLMJavaMainSupport(javaMainMethod);
-            case WASMGC -> new WebImageWasmGCJavaMainSupport(javaMainMethod);
-        };
-    }
-
-    @Override
-    protected void verifyMainEntryPoint(ResolvedJavaMethod mainEntryPoint, AnnotatedObjectAccess annotationAccess) {
+    protected void verifyMainEntryPoint(ResolvedJavaMethod mainEntryPoint) {
     }
 }

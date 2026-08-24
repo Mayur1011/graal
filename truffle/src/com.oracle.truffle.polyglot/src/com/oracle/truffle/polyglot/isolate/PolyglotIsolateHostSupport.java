@@ -41,7 +41,9 @@
 package com.oracle.truffle.polyglot.isolate;
 
 import com.oracle.truffle.api.InternalResource;
+import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.impl.Accessor;
+import com.oracle.truffle.api.impl.DefaultTruffleRuntime;
 import com.oracle.truffle.api.impl.PolyglotIsolateLanguages;
 import org.graalvm.collections.Pair;
 import org.graalvm.home.HomeFinder;
@@ -73,10 +75,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -86,14 +90,51 @@ import java.util.stream.Collectors;
 
 final class PolyglotIsolateHostSupport {
 
+    // Mapping of standard HotSpot X options into SVM options
+    private static final Map<String, String> XOPTIONS = Map.of("Xms", "MinHeapSize",
+                    "Xmx", "MaxHeapSize",
+                    "Xmn", "MaxNewSize",
+                    "Xss", "StackSize");
+
     private static final Map<Set<String>, LibraryConfig> libraryCache = new ConcurrentHashMap<>();
     private static volatile Lazy lazy;
+
+    static boolean hasIsolateLibraryForLanguages(Set<String> languageIds) {
+        if (languageIds.isEmpty()) {
+            return false;
+        }
+        for (PolyglotIsolateResource resource : computeAvailablePolyglotIsolateResources()) {
+            if (resource.includedLanguages.containsAll(languageIds)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static Collection<Set<String>> getAvailableIsolatedLanguages() {
+        return resolveAvailablePolyglotIsolates(HomeFinder.getInstance()).stream().map(PolyglotIsolateResource::includedLanguages).toList();
+    }
 
     static Engine buildIsolatedEngine(AbstractPolyglotImpl polyglot, Engine localEngine, String[] isolateLanguages, String[] permittedLanguages, SandboxPolicy sandboxPolicy, OutputStream out,
                     OutputStream err, InputStream in, Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
                     boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, boolean registerInActiveEngines, boolean externalProcess, long stackHeadroom,
                     String isolateLibrary, String isolateLauncher) {
         assert isolateLanguages != null;
+
+        if (!ImageInfo.inImageCode() && Truffle.getRuntime() instanceof DefaultTruffleRuntime && PolyglotIsolateAccessor.ENGINE.getModulesAccessor() == null) {
+            /*
+             * On HotSpot, polyglot isolates running with the fallback Truffle runtime require
+             * libtruffleattach to provide stack-limit support and terminating thread locals.
+             * Loading libtruffleattach can fail for several reasons, such as a missing library,
+             * incorrect packaging, loading from multiple class loaders, or missing native-access
+             * permissions. In that case isolate hosting cannot continue, so we abort and include
+             * the original libtruffleattach initialization error in the failure message.
+             */
+            String moduleAccessorInitError = PolyglotIsolateAccessor.ENGINE.getModuleAccessorInitializationError();
+            throw new IllegalStateException("Polyglot isolates require libtruffleattach when running on HotSpot with the fallback Truffle runtime. " +
+                            "The libtruffleattach library could not be loaded: " + moduleAccessorInitError + " " +
+                            "Resolve the libtruffleattach loading issue, or switch to the optimized Truffle runtime.");
+        }
         APIAccess apiAccess = polyglot.getAPIAccess();
         LibraryConfig libraryConfig = resolveIsolatePaths(apiAccess.getEngineReceiver(localEngine), isolateLibrary, isolateLauncher, permittedLanguages, isolateLanguages);
         return spawnIsolatedEngine(polyglot, localEngine, permittedLanguages, sandboxPolicy, out, err, in, options, systemPropertiesOptions, useSystemProperties, allowExperimentalOptions, boundEngine,
@@ -266,11 +307,12 @@ final class PolyglotIsolateHostSupport {
         Lazy l = initializeLazy(polyglot);
         APIAccess apiAccess = polyglot.getAPIAccess();
         OptionValues engineOptions = PolyglotIsolateAccessor.ENGINE.getEngineOptionValues(apiAccess.getEngineReceiver(localEngine));
+        List<String> vmArguments = createIsolateArguments(engineOptions);
         ForeignPolyglotIsolateServices polyglotIsolateServices;
         if (externalProcess) {
-            polyglotIsolateServices = spawnProcessIsolate(libraryConfig, l);
+            polyglotIsolateServices = spawnProcessIsolate(libraryConfig, l, vmArguments);
         } else {
-            polyglotIsolateServices = spawnNativeIsolate(libraryConfig, l, engineOptions);
+            polyglotIsolateServices = spawnNativeIsolate(libraryConfig, l, vmArguments, engineOptions);
         }
         Isolate<?> isolate = polyglotIsolateServices.getPeer().getIsolate();
         boolean success = false;
@@ -319,7 +361,7 @@ final class PolyglotIsolateHostSupport {
         return l;
     }
 
-    private static ForeignPolyglotIsolateServices spawnProcessIsolate(LibraryConfig libraryConfig, Lazy l) {
+    private static ForeignPolyglotIsolateServices spawnProcessIsolate(LibraryConfig libraryConfig, Lazy l, List<String> vmArguments) {
         if (InternalResource.OS.getCurrent() == InternalResource.OS.WINDOWS && !ProcessIsolate.isSupported()) {
             throw new IllegalArgumentException(String.format("The option 'engine.IsolateMode=external' requires UNIX domain socket support, " +
                             "which is not available on this operating system (OS version %s). " +
@@ -340,6 +382,8 @@ final class PolyglotIsolateHostSupport {
                             }
                         })).//
                         onIsolateTearDown(PolyglotIsolateHostSupport::onIsolateTearDown).//
+                        launcherArguments(vmArguments).//
+                        launcherArgument("--").//
                         launcherArgument(polyglotIsolateLibrary.toString()).//
                         launcherArgument(ProcessIsolateEntryPoint.class.getName()).//
                         launcherArgument(socketAddress.toString()).//
@@ -351,7 +395,7 @@ final class PolyglotIsolateHostSupport {
         }
     }
 
-    private static ForeignPolyglotIsolateServices spawnNativeIsolate(LibraryConfig libraryConfig, Lazy l, OptionValues engineOptions) {
+    private static ForeignPolyglotIsolateServices spawnNativeIsolate(LibraryConfig libraryConfig, Lazy l, List<String> vmArguments, OptionValues engineOptions) {
         int isolationDomain = 0;
         if (PolyglotIsolateAccessor.ENGINE.isIsolateMemoryProtection(engineOptions)) {
             // -1 is the auto-assign mode
@@ -360,6 +404,7 @@ final class PolyglotIsolateHostSupport {
         l.useNativeIsolateLibrary(libraryConfig.libraryPath());
         NativeIsolateConfig config = NativeIsolateConfig.newBuilder(l.nativeIsolateLibraryPath).//
                         nativeIsolateHandlerOption(PolyglotNativeIsolateHandler.ISOLATION_DOMAIN, isolationDomain).//
+                        nativeIsolateHandlerOption(PolyglotNativeIsolateHandler.ARGUMENTS, vmArguments).//
                         nativeThreadLocalFactory(() -> PolyglotIsolateAccessor.RUNTIME.createTerminatingThreadLocal(() -> null, (t) -> {
                             if (t != null) {
                                 t.getIsolate().detachCurrentThread();
@@ -374,6 +419,59 @@ final class PolyglotIsolateHostSupport {
         }
     }
 
+    private static List<String> createIsolateArguments(OptionValues engineOptions) {
+        /*
+         * Unlike the argument parsing used by CEntryPointActions.enterCreateIsolate, JNI
+         * CreateJavaVM does not guarantee that a later duplicate VM option overrides an earlier
+         * one. Canonicalize options in a LinkedHashMap so each option is emitted once and mandatory
+         * policy options deterministically replace user-provided values.
+         */
+        Map<String, String> vmOptions = new LinkedHashMap<>();
+
+        /*
+         * Preserve the polyglot isolate default of disabled signal handling. Explicit
+         * engine.IsolateOption values added below take precedence over these defaults, which is
+         * needed by languages that install their own signal handlers.
+         */
+        vmOptions.put("EnableSignalHandling", "false");
+        vmOptions.put("InstallSegfaultHandler", "false");
+
+        for (Map.Entry<String, String> entry : engineOptions.get(PolyglotIsolateAccessor.ENGINE.getIsolateOptionOption()).entrySet()) {
+            vmOptions.put(canonicalizeIsolateOptionName(entry.getKey()), entry.getValue());
+        }
+
+        long maxIsolateMemory = engineOptions.get(PolyglotIsolateAccessor.ENGINE.getMaxIsolateMemoryOption());
+        if (maxIsolateMemory != -1) {
+            vmOptions.put("MaxHeapSize", Long.toString(maxIsolateMemory));
+        }
+
+        Enum<?> untrustedCodePolicy = engineOptions.get(PolyglotIsolateAccessor.ENGINE.getUntrustedCodeMitigationOption());
+        if (PolyglotIsolateAccessor.ENGINE.isUntrustedCodeMitigationPolicySoftware(untrustedCodePolicy)) {
+            // memory masking is only implemented on AMD64
+            if (InternalResource.CPUArchitecture.getCurrent() == InternalResource.CPUArchitecture.AMD64) {
+                vmOptions.put("MemoryMaskingAndFencing", "true");
+            } else {
+                /* Prevent a user-provided true value from conflicting with mandatory GuardTargets. */
+                vmOptions.put("SpeculativeExecutionBarriers", "false");
+                vmOptions.put("SpectrePHTBarriers", "GuardTargets");
+            }
+            vmOptions.put("BlindConstants", "true");
+            vmOptions.put("MaxRuntimeCodeOffset", "128");
+        }
+
+        List<String> vmArguments = new ArrayList<>(vmOptions.size());
+        vmOptions.forEach((name, value) -> vmArguments.add(toIsolateArgument(name, value)));
+        return vmArguments;
+    }
+
+    private static String canonicalizeIsolateOptionName(String name) {
+        return XOPTIONS.getOrDefault(name, name);
+    }
+
+    private static String toIsolateArgument(String name, String value) {
+        return "-Djdk.graal." + name + "=" + value;
+    }
+
     private static void onIsolateTearDown(Isolate<?> isolate) {
         Lazy l = lazy;
         ForeignEngine foreignEngine = l.findEngineReferenceByIsolate(isolate);
@@ -385,7 +483,20 @@ final class PolyglotIsolateHostSupport {
             foreignEngine.close();
             // Parfait_ALLOW toctou-race-condition-warning (prevented by NativeIsolate#create)
             l.unregisterEngine(foreignEngine.getKey());
-            foreignEngine.getPolyglotIsolateServices().onIsolateTearDown();
+            IsolateThread isolateThread = isolate.tryEnter();
+            /*
+             * ForeignEngineDispatch#onEngineCollected can call Isolate#shutdown for an already
+             * terminated external isolate. In that case the shutdown path invokes this
+             * teardown hook for host-side cleanup, but the isolate cannot be entered anymore.
+             * Run guest-side teardown when the isolate is still enterable.
+             */
+            if (isolateThread != null) {
+                try {
+                    foreignEngine.getPolyglotIsolateServices().onIsolateTearDown();
+                } finally {
+                    isolateThread.leave();
+                }
+            }
         }
     }
 

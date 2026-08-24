@@ -39,10 +39,10 @@ import com.oracle.svm.core.deopt.SubstrateInstalledCode;
 import com.oracle.svm.core.heap.CodeReferenceMapDecoder;
 import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.ReferenceMapIndex;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
-import com.oracle.svm.core.heap.RestrictHeapAccess.Access;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access;
 import com.oracle.svm.core.heap.VMOperationInfos;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.thread.JavaVMOperation;
 import com.oracle.svm.core.thread.VMOperation;
@@ -64,7 +64,7 @@ import jdk.vm.ci.code.InstalledCode;
 /**
  * Provides the main entry points to look up metadata for code, either
  * {@link #getImageCodeCacheForLayer(int) ahead-of-time compiled code in the native image} or
- * {@link CodeInfoTable#getRuntimeCodeCache() code compiled at runtime}.
+ * {@link CodeInfoTable#getRuntimeCodeCache() code installed at runtime}.
  * <p>
  * Users of this class must take special care because code can be invalidated at arbitrary times and
  * their metadata can be freed, see notes on {@link CodeInfoAccess}.
@@ -125,10 +125,9 @@ public class CodeInfoTable {
     }
 
     public static CodeInfoQueryResult lookupCodeInfoQueryResult(CodeInfo info, CodePointer absoluteIP) {
+        assert info.isNonNull();
+
         counters().lookupCodeInfoCount.inc();
-        if (info.isNull()) {
-            return null;
-        }
         CodeInfoQueryResult result = new CodeInfoQueryResult();
         result.ip = absoluteIP;
         CodeInfoAccess.lookupCodeInfo(info, absoluteIP, result);

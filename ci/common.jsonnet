@@ -43,6 +43,10 @@ local common_json = import "../common.json";
     local _version_build_id = std.split(_parts[1], "+");
     _version_build_id[1]
     ,
+  local get_labsjdk_jvmci_build_id(jdk) =
+    local _parts = std.split(jdk.version, "-");
+    _parts[std.length(_parts) - 1]
+    ,
   local jdks_data = {
     [name]: jdk_base + common_json.jdks[name] + { jdk_version:: 17 }
     for name in ["oraclejdk17"] + variants("labsjdk-ce-17") + variants("labsjdk-ee-17")
@@ -87,7 +91,24 @@ local common_json = import "../common.json";
     local _lv = std.strReplace(_labsjdk.version, "ee-", "jdk-");
     # Skip the check if we are not using a labsjdk. This can happen on JDK integration branches.
     local no_labsjdk = _labsjdk.name != "labsjdk";
-    assert no_labsjdk || std.startsWith(_lv, _ov) : "update oraclejdk-latest to match labsjdk-ee-latest: %s+%s vs %s" % [_oraclejdk.version, _oraclejdk.build_id, _labsjdk.version];
+    # Skip the check if we are using labsjdk with build number equal zero
+    local labsjdk_with_build_zero = std.findSubstr('+0-jvmci-', _lv) != [];
+    local oraclejdk_base_version = std.split(_ov, "+")[0];
+    local labsjdk_base_version = std.split(_lv, "+")[0];
+    # Labs JDK can include 5 digits in its base version.
+    # Skip the check when Labsjdk latest is dervied from Oracle JDK latest base-version.
+    local labsjdk_with_extra_base_version_component =
+      std.length(std.split(labsjdk_base_version, ".")) == std.length(std.split(oraclejdk_base_version, ".")) + 1 &&
+      std.startsWith(labsjdk_base_version, oraclejdk_base_version + ".");
+    assert no_labsjdk || std.startsWith(_lv, _ov) || labsjdk_with_build_zero || labsjdk_with_extra_base_version_component: "update oraclejdk-latest to match labsjdk-ee-latest: %s+%s vs %s" % [_oraclejdk.version, _oraclejdk.build_id, _labsjdk.version];
+    true,
+  # Verify labsjdk-ce-latest and labsjdk-ee-latest JVMCI build numbers match
+  assert
+    local _labsjdk_ce = common_json.jdks["labsjdk-ce-latest"];
+    local _labsjdk_ee = common_json.jdks["labsjdk-ee-latest"];
+    local _ce_jvmci_build_id = get_labsjdk_jvmci_build_id(_labsjdk_ce);
+    local _ee_jvmci_build_id = get_labsjdk_jvmci_build_id(_labsjdk_ee);
+    assert _ce_jvmci_build_id == _ee_jvmci_build_id : "labsjdk-ce-latest and labsjdk-ee-latest JVMCI build numbers differ: %s vs %s" % [_labsjdk_ce.version, _labsjdk_ee.version];
     true,
 
   # The raw jdk data, the same as common_json.jdks + { jdk_version:: }
@@ -301,7 +322,7 @@ local common_json = import "../common.json";
 
     wasm:: {
       downloads+: {
-        WABT_DIR: {name: 'wabt', version: '1.0.37', platformspecific: true},
+        WABT_DIR: {name: 'wabt', version: '1.0.41', platformspecific: true},
       },
       environment+: {
         WABT_DIR: '$WABT_DIR/bin',
@@ -310,7 +331,7 @@ local common_json = import "../common.json";
 
     wasm_ol8:: {
       downloads+: {
-        WABT_DIR: {name: 'wabt', version: '1.0.37-ol8', platformspecific: true},
+        WABT_DIR: {name: 'wabt', version: '1.0.41-ol8', platformspecific: true},
       },
       environment+: {
         WABT_DIR: '$WABT_DIR/bin',
@@ -324,43 +345,6 @@ local common_json = import "../common.json";
       environment+: {
         EMCC_DIR: '$EMSDK_DIR/upstream/emscripten/'
       }
-    },
-
-    fastr:: {
-      # Note: On both Linux and MacOS, FastR depends on the gnur module and on gfortran
-      # of a specific version (4.8.5 on Linux, 10.2.0 on MacOS)
-      # However, we do not need to load those modules, we only configure specific environment variables to
-      # point to these specific modules. These modules and the configuration is only necessary for installation of
-      # some R packages (that have Fortran code) and in order to run GNU-R
-      packages+:
-        if (self.os == "linux" && self.arch == "amd64") then {
-          readline: '==6.3',
-          pcre2: '==10.37',
-          gnur: '==4.0.3-gcc4.8.5-pcre2',
-        } + if (std.objectHasAll(self, 'os_distro') && self['os_distro'] == 'ol' && std.objectHasAll(self, 'os_distro_version') && self['os_distro_version'] == '9') then {curl: '==7.78.0'} else {curl: '==7.50.1'}
-        else {},
-      environment+:
-        if (self.os == "linux" && self.arch == "amd64") then {
-          TZDIR: '/usr/share/zoneinfo',
-          PKG_INCLUDE_FLAGS_OVERRIDE : '-I/cm/shared/apps/bzip2/1.0.6/include -I/cm/shared/apps/xz/5.2.2/include -I/cm/shared/apps/pcre2/10.37/include -I/cm/shared/apps/curl/7.50.1/include',
-          PKG_LDFLAGS_OVERRIDE : '-L/cm/shared/apps/bzip2/1.0.6/lib -L/cm/shared/apps/xz/5.2.2/lib -L/cm/shared/apps/pcre2/10.37/lib -L/cm/shared/apps/curl/7.50.1/lib -L/cm/shared/apps/gcc/4.8.5/lib64',
-          FASTR_FC: '/cm/shared/apps/gcc/4.8.5/bin/gfortran',
-          FASTR_CC: '/cm/shared/apps/gcc/4.8.5/bin/gcc',
-          GNUR_HOME_BINARY: '/cm/shared/apps/gnur/4.0.3_gcc4.8.5_pcre2-10.37/R-4.0.3',
-          FASTR_RELEASE: 'true',
-        }
-        else {},
-      downloads+:
-        if (self.os == "linux" && self.arch == "amd64") then {
-          BLAS_LAPACK_DIR: { name: 'fastr-403-blas-lapack-gcc', version: '4.8.5', platformspecific: true },
-          F2C_BINARY: { name: 'f2c-binary', version: '7', platformspecific: true },
-          FASTR_RECOMMENDED_BINARY: { name: 'fastr-recommended-pkgs', version: '16', platformspecific: true },
-        }
-        else {},
-      catch_files+: if (self.os != "windows" && self.arch == "amd64") then [
-        'GNUR_CONFIG_LOG = (?P<filename>.+\\.log)',
-        'GNUR_MAKE_LOG = (?P<filename>.+\\.log)',
-      ] else [],
     },
 
     svm:: {

@@ -37,13 +37,13 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.jfr.oldobject.JfrOldObjectRepository;
 import com.oracle.svm.core.jfr.sampler.JfrExecutionSampler;
 import com.oracle.svm.core.jfr.sampler.JfrRecurringCallbackExecutionSampler;
-import com.oracle.svm.core.jfr.traceid.JfrTraceIdEpoch;
+import com.oracle.svm.core.jfr.traceid.JfrEpoch;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.os.RawFileOperationSupport;
 import com.oracle.svm.core.os.RawFileOperationSupport.FileAccessMode;
@@ -56,7 +56,7 @@ import com.oracle.svm.core.thread.RecurringCallbackSupport;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMOperationControl;
 import com.oracle.svm.core.thread.VMThreads;
-import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.shared.Uninterruptible;
 
 import jdk.graal.compiler.core.common.NumUtil;
@@ -152,7 +152,7 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
     }
 
     @Override
-    public void setFilename(String fileToOpen) {
+    public void setFileToOpen(String fileToOpen) {
         assert lock.isOwner();
         this.fileToOpen = fileToOpen;
     }
@@ -321,6 +321,7 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
     }
 
     private void writeFlushCheckpoint() {
+        assert lock.isOwner();
         long start = beginCheckpointEvent(JfrCheckpointType.Flush);
         long poolCountPos = writeCheckpointPoolCountPlaceholder();
         int poolCount = newChunk ? writeSerializers() : 0;
@@ -334,18 +335,20 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
 
     @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Used on OOME for emergency dumps")
     private void writePreviousEpochFlushCheckpoint() {
+        assert lock.isOwner();
         long start = beginCheckpointEvent(JfrCheckpointType.Flush);
         long poolCountPos = writeCheckpointPoolCountPlaceholder();
         int poolCount = newChunk ? writeSerializers() : 0;
         poolCount += stackTraceRepo.write(this, false);
         poolCount += methodRepo.write(this, false);
         poolCount += oldObjectRepo.write(this, false);
-        poolCount += typeRepo.writePreviousEpoch(this);
+        poolCount += typeRepo.writeAndClearPreviousEpoch(this);
         poolCount += symbolRepo.write(this, false);
         endCheckpointEvent(start, poolCountPos, poolCount);
     }
 
     private void writeThreadCheckpoint() {
+        assert lock.isOwner();
         /* The code below is only atomic enough because the epoch can't change while flushing. */
         if (SubstrateJVM.getThreadRepo().hasUnflushedData()) {
             long start = beginCheckpointEvent(JfrCheckpointType.Threads);
@@ -357,6 +360,7 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
 
     @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Used on OOME for emergency dumps")
     private void writePreviousEpochThreadCheckpoint() {
+        assert lock.isOwner();
         if (threadRepo.hasUnflushedPreviousEpochData()) {
             long start = beginCheckpointEvent(JfrCheckpointType.Threads);
             long poolCountPos = writeCheckpointPoolCountPlaceholder();
@@ -570,20 +574,20 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
             int bufferSize = 64;
             Pointer buffer = StackValue.get(bufferSize);
             Pointer bufferEnd = buffer.add(bufferSize);
-            int charsWritten = 0;
+            int charsProcessed = 0;
             UnsignedWord totalBytesWritten = Word.unsigned(0);
-            while (charsWritten < str.length()) {
+            while (charsProcessed < str.length()) {
                 // Fill up the buffer as much as possible
                 Pointer pos = buffer;
-                while (charsWritten < str.length()) {
-                    int codePoint = UninterruptibleUtils.String.codePointAt(str, charsWritten);
+                while (charsProcessed < str.length()) {
+                    int codePoint = UninterruptibleUtils.String.codePointAt(str, charsProcessed);
                     int nextCharSize = UninterruptibleUtils.String.utf8Length(codePoint);
                     if (pos.add(nextCharSize).aboveThan(bufferEnd)) {
                         // buffer is too full to add the next char
                         break;
                     }
                     pos = UninterruptibleUtils.String.writeUTF8(pos, codePoint);
-                    charsWritten += UninterruptibleUtils.String.charCount(codePoint);
+                    charsProcessed += UninterruptibleUtils.Character.charCount(codePoint);
                 }
                 // Write the contents of the buffer to disk
                 UnsignedWord bytesToDisk = pos.subtract(buffer);
@@ -720,7 +724,7 @@ public final class JfrChunkFileWriter implements JfrChunkWriter {
                 JfrThreadLocal.notifyEventWriter(thread);
             }
 
-            JfrTraceIdEpoch.getInstance().changeEpoch();
+            JfrEpoch.getInstance().changeEpoch();
 
             // Now that the epoch changed, re-register all running threads for the new epoch.
             SubstrateJVM.getThreadRepo().registerRunningThreads();

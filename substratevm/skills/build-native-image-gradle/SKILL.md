@@ -6,7 +6,8 @@ description: Build GraalVM native images using Gradle Native Build Tools. Use th
 # Gradle Native Image Build
 
 ## Prerequisites
-- Set `GRAALVM_HOME` to a GraalVM distribution. If not set, ask the user for the path.
+- Set `JAVA_HOME` to a GraalVM JDK installation so Gradle Native Build Tools can find `native-image`.
+- Do not require `GRAALVM_HOME` in the normal case. Only mention it if the user already relies on it or their environment needs an explicit override.
 - Apply the `application`, `java-library`, or `java` plugin along with `org.graalvm.buildtools.native`.
 
 

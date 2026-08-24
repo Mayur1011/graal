@@ -40,6 +40,7 @@ import java.util.stream.Stream;
 
 import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.c.function.CodePointer;
@@ -51,13 +52,12 @@ import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 
 import com.oracle.graal.pointsto.AbstractAnalysisEngine;
+import com.oracle.graal.pointsto.infrastructure.UniverseMetaAccess;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.svm.core.ArenaIntrinsics;
-import com.oracle.svm.core.FrameAccess;
+import com.oracle.svm.core.AssertionsSupport;
 import com.oracle.svm.core.MissingRegistrationSupport;
-import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.ParsingReason;
-import com.oracle.svm.core.RuntimeAssertionsSupport;
 import com.oracle.svm.core.StaticFieldsSupport;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
@@ -73,24 +73,33 @@ import com.oracle.svm.core.graal.nodes.SubstrateCompressionNode;
 import com.oracle.svm.core.graal.nodes.SubstrateNarrowOopStamp;
 import com.oracle.svm.core.graal.nodes.SubstrateReflectionGetCallerClassNode;
 import com.oracle.svm.core.graal.nodes.TestDeoptimizeNode;
+import com.oracle.svm.core.graal.nodes.WriteCurrentVMThreadNode;
 import com.oracle.svm.core.graal.snippets.SubstrateSharedGraphBuilderPlugins;
 import com.oracle.svm.core.graal.stackvalue.LateStackValueNode;
 import com.oracle.svm.core.graal.stackvalue.StackValueNode;
-import com.oracle.svm.core.graal.stackvalue.UnsafeLateStackValue;
-import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
-import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.ReferenceAccessImpl;
 import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
+import com.oracle.svm.core.imagelayer.AccessImageSingletonFactory;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.imagelayer.LoadImageSingletonFactory;
+import com.oracle.svm.core.jdk.SimdSortSupport;
+import com.oracle.svm.core.jdk.SimdSortSupport.Variant;
 import com.oracle.svm.core.jdk.proxy.DynamicProxyRegistry;
+import com.oracle.svm.core.nodes.CodeSynchronizationNode;
 import com.oracle.svm.core.nodes.foreign.MemoryArenaValidInScopeNode;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.MemoryBarriers;
+import com.oracle.svm.guest.staging.core.graal.MemoryBarriers.BarrierKind;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeLateStackValue;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.hosted.AbstractAnalysisMetadataTrackingNode;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.ReachabilityCallbackNode;
 import com.oracle.svm.hosted.SharedArenaSupport;
+import com.oracle.svm.hosted.c.NativeLibraries;
+import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.code.SubstrateCompilationDirectives;
 import com.oracle.svm.hosted.dynamicaccessinference.DynamicAccessInferenceLog;
 import com.oracle.svm.hosted.dynamicaccessinference.StrictDynamicAccessInferenceFeature;
@@ -98,13 +107,15 @@ import com.oracle.svm.hosted.imagelayer.HostedImageLayerBuildingSupport;
 import com.oracle.svm.hosted.nodes.DeoptProxyNode;
 import com.oracle.svm.hosted.nodes.ReadReservedRegister;
 import com.oracle.svm.hosted.substitute.AnnotationSubstitutionProcessor;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.shared.singletons.LayeredImageSingletonSupport;
 import com.oracle.svm.shared.singletons.traits.LayeredInstallationKindSingletonTrait;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAccess;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.svm.util.dynamicaccess.JVMCIRuntimeReflection;
@@ -118,6 +129,7 @@ import jdk.graal.compiler.java.BytecodeParser;
 import jdk.graal.compiler.java.LambdaUtils;
 import jdk.graal.compiler.nodes.AbstractBeginNode;
 import jdk.graal.compiler.nodes.BeginNode;
+import jdk.graal.compiler.nodes.CallTargetNode.InvokeKind;
 import jdk.graal.compiler.nodes.ConstantNode;
 import jdk.graal.compiler.nodes.DynamicPiNode;
 import jdk.graal.compiler.nodes.FieldLocationIdentity;
@@ -126,18 +138,23 @@ import jdk.graal.compiler.nodes.FixedWithNextNode;
 import jdk.graal.compiler.nodes.FullInfopointNode;
 import jdk.graal.compiler.nodes.LogicNode;
 import jdk.graal.compiler.nodes.NodeView;
+import jdk.graal.compiler.nodes.PauseNode;
 import jdk.graal.compiler.nodes.PiNode;
 import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.calc.NarrowNode;
 import jdk.graal.compiler.nodes.calc.ZeroExtendNode;
 import jdk.graal.compiler.nodes.extended.BytecodeExceptionNode;
 import jdk.graal.compiler.nodes.extended.LoadHubNode;
+import jdk.graal.compiler.nodes.extended.MembarNode;
+import jdk.graal.compiler.nodes.extended.MembarNode.FenceKind;
 import jdk.graal.compiler.nodes.graphbuilderconf.GraphBuilderContext;
+import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.OptionalInvocationPlugin;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.Receiver;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.RequiredInlineOnlyInvocationPlugin;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugin.RequiredInvocationPlugin;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins;
 import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.Registration;
+import jdk.graal.compiler.nodes.graphbuilderconf.InvocationPlugins.TypeSymbol;
 import jdk.graal.compiler.nodes.java.DynamicNewInstanceNode;
 import jdk.graal.compiler.nodes.java.DynamicNewInstanceWithExceptionNode;
 import jdk.graal.compiler.nodes.java.InstanceOfDynamicNode;
@@ -156,8 +173,13 @@ import jdk.graal.compiler.options.LibGraalSupport;
 import jdk.graal.compiler.options.Option;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.AllocateUninitializedArrayPlugin;
+import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.IntegerPolynomialAssignPlugin;
+import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.IntegerPolynomialP256MontgomeryMultPlugin;
+import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.Poly1305ProcessBlocksPlugin;
 import jdk.graal.compiler.replacements.StandardGraphBuilderPlugins.ReachabilityFencePlugin;
 import jdk.graal.compiler.replacements.nodes.AESNode;
+import jdk.graal.compiler.replacements.nodes.CountLeadingZerosNode;
+import jdk.graal.compiler.replacements.nodes.CountTrailingZerosNode;
 import jdk.graal.compiler.replacements.nodes.MacroNode.MacroParams;
 import jdk.graal.compiler.word.WordCastNode;
 import jdk.internal.foreign.MemorySessionImpl;
@@ -199,6 +221,8 @@ public class SubstrateGraphBuilderPlugins {
         registerObjectPlugins(plugins);
         registerUnsafePlugins(plugins);
         registerKnownIntrinsicsPlugins(plugins);
+        registerMemoryBarriersPlugins(plugins);
+        registerUninterruptibleUtilsPlugins(plugins);
         registerStackValuePlugins(plugins);
         registerArrayPlugins(plugins);
         registerClassPlugins(plugins);
@@ -207,10 +231,33 @@ public class SubstrateGraphBuilderPlugins {
         registerSizeOfPlugins(plugins);
         registerReferencePlugins(plugins, parsingReason);
         registerReferenceAccessPlugins(plugins);
+        registerDualPivotQuicksortPlugins(plugins, parsingReason);
         if (supportsStubBasedPlugins) {
             registerAESPlugins(plugins);
             registerArraysSupportPlugins(plugins);
+            registerPoly1305Plugin(plugins);
+            registerIntegerPolynomialPlugins(plugins);
         }
+    }
+
+    private static void registerUninterruptibleUtilsPlugins(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, UninterruptibleUtils.Integer.class);
+        r.register(new RequiredInlineOnlyInvocationPlugin("numberOfLeadingZeros", int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode value) {
+                b.addPush(JavaKind.Int, CountLeadingZerosNode.create(value));
+                return true;
+            }
+        });
+
+        r = new Registration(plugins, UninterruptibleUtils.Long.class);
+        r.register(new RequiredInlineOnlyInvocationPlugin("countTrailingZeros", long.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode value) {
+                b.addPush(JavaKind.Int, CountTrailingZerosNode.create(value));
+                return true;
+            }
+        });
     }
 
     private static void registerArenaPlugins(InvocationPlugins plugins) {
@@ -631,7 +678,8 @@ public class SubstrateGraphBuilderPlugins {
              * It is possible that the returned class is a substitution class, e.g., DynamicHub
              * returned for a Class.class constant. Get the target class of the substitution class.
              */
-            result[index] = annotationSubstitutions == null ? clazz : annotationSubstitutions.getTargetClass(clazz);
+            result[index] = annotationSubstitutions == null ? clazz
+                            : OriginalClassProvider.getJavaClass(annotationSubstitutions.getTargetType(GuestAccess.get().lookupType(clazz)));
         }
         return true;
     }
@@ -914,7 +962,8 @@ public class SubstrateGraphBuilderPlugins {
                 return true;
             }
         });
-        r.register(new RequiredInvocationPlugin("readHub", Object.class) {
+        Registration hubRegistration = new Registration(plugins, DynamicHubIntrinsics.class);
+        hubRegistration.register(new RequiredInvocationPlugin("readHub", Object.class) {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode object) {
                 ValueNode nonNullObject = b.nullCheckedValue(object);
@@ -996,8 +1045,109 @@ public class SubstrateGraphBuilderPlugins {
             }
         });
         r.register(StandardGraphBuilderPlugins.newArrayPlugin("unvalidatedNewArray"));
+        r.register(new RequiredInvocationPlugin("pause") {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
+                b.add(new PauseNode());
+                return true;
+            }
+        });
+        r.register(new RequiredInvocationPlugin("writeCurrentVMThread", IsolateThread.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode thread) {
+                b.add(new WriteCurrentVMThreadNode(thread));
+                return true;
+            }
+        });
+        r.register(new RequiredInvocationPlugin("synchronizeCode") {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver) {
+                b.add(new CodeSynchronizationNode());
+                return true;
+            }
+        });
 
         registerCastExact(r);
+    }
+
+    /** Registers the guest-facing memory-barrier intrinsics. */
+    private static void registerMemoryBarriersPlugins(InvocationPlugins plugins) {
+        assert verifyEnumMapping(FenceKind.class, GuestAccess.get().lookupType(BarrierKind.class));
+        Registration r = new Registration(plugins, MemoryBarriers.class);
+        r.register(new RequiredInvocationPlugin("memoryBarrier", BarrierKind.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode kindNode) {
+                if (!kindNode.isConstant()) {
+                    throw b.bailout("parameter kind is not a compile time constant for call to " + targetMethod.format("%H.%n(%p)") + " in " +
+                                    b.getMethod().asStackTraceElement(b.bci()));
+                }
+                JavaConstant kindConstant = kindNode.asJavaConstant();
+                if (kindConstant.isNull()) {
+                    throw b.bailout("parameter kind is null for call to " + targetMethod.format("%H.%n(%p)") + " in " +
+                                    b.getMethod().asStackTraceElement(b.bci()));
+                }
+                FenceKind fenceKind;
+                try {
+                    fenceKind = asBuilderEnum(b, kindConstant, FenceKind.class);
+                } catch (IllegalArgumentException ex) {
+                    throw b.bailout("parameter kind is invalid for call to " + targetMethod.format("%H.%n(%p)") + " in " +
+                                    b.getMethod().asStackTraceElement(b.bci()) + ": " + ex.getMessage());
+                }
+                b.add(new MembarNode(fenceKind));
+                return true;
+            }
+        });
+    }
+
+    /**
+     * Converts {@code guestValue} to an instance of {@code builderEnum}. Although the
+     * constant semantically represents a guest enum value, its representation belongs to the
+     * current {@link GraphBuilderContext} provider stack. It must therefore be inspected through
+     * that context rather than through {@link GuestAccess}.
+     */
+    private static <B extends Enum<B>> B asBuilderEnum(GraphBuilderContext b, JavaConstant guestValue, Class<B> builderEnum) {
+        ResolvedJavaType enumType = b.getMetaAccess().lookupJavaType(guestValue);
+        if (!enumType.isEnum()) {
+            throw new IllegalArgumentException("Guest value does not represent enum " + builderEnum);
+        }
+        ResolvedJavaField nameField = JVMCIReflectionUtil.getUniqueDeclaredField(enumType.getSuperclass(), "name");
+        JavaConstant nameConstant = b.getConstantReflection().readFieldValue(nameField, guestValue);
+        if (nameConstant == null) {
+            throw new IllegalArgumentException("Cannot read the name of guest enum " + enumType.toJavaName());
+        }
+        String name = b.getSnippetReflection().asObject(String.class, nameConstant);
+        if (name == null) {
+            throw new IllegalArgumentException("Cannot convert the name of guest enum " + enumType.toJavaName());
+        }
+        return Enum.valueOf(builderEnum, name);
+    }
+
+    /**
+     * Verifies that every constant in {@code guestEnum} has an exact-name counterpart in
+     * {@code builderEnum}. Values and names from {@code guestEnum} are obtained exclusively through
+     * JVMCI.
+     */
+    private static <B extends Enum<B>> boolean verifyEnumMapping(Class<B> builderEnum, ResolvedJavaType guestEnum) {
+        assert guestEnum.isEnum() : "Guest type is not an enum: " + guestEnum.toJavaName();
+        GuestAccess access = GuestAccess.get();
+        ResolvedJavaMethod valuesMethod = access.lookupMethod(guestEnum, "values");
+        assert valuesMethod != null : "Cannot find values() for guest enum " + guestEnum.toJavaName();
+        ResolvedJavaMethod nameMethod = access.elements.java_lang_Enum_name;
+        JavaConstant guestValues = access.invokeStatic(valuesMethod);
+        var constantReflection = access.getProviders().getConstantReflection();
+        Integer length = constantReflection.readArrayLength(guestValues);
+        assert length != null : "Cannot read constants of guest enum " + guestEnum.toJavaName();
+        for (int i = 0; i < length; i++) {
+            JavaConstant guestValue = constantReflection.readArrayElement(guestValues, i);
+            assert guestValue != null : "Cannot read constant " + i + " of guest enum " + guestEnum.toJavaName();
+            String name = access.asHostString(access.invoke(nameMethod, guestValue));
+            try {
+                Enum.valueOf(builderEnum, name);
+            } catch (IllegalArgumentException ex) {
+                assert false : "Guest enum " + guestEnum.toJavaName() + " constant " + name + " has no counterpart in builder enum " + builderEnum.getName();
+            }
+        }
+        return true;
     }
 
     public static void registerCastExact(Registration r) {
@@ -1018,7 +1168,7 @@ public class SubstrateGraphBuilderPlugins {
     }
 
     private static void checkNeverInline(GraphBuilderContext b) {
-        if (!AnnotationUtil.isAnnotationPresent(b.getMethod(), NeverInline.class)) {
+        if (!GuestAnnotationAccess.isAnnotationPresent(b.getMethod(), NeverInline.class)) {
             throw VMError.shouldNotReachHere("Accessing the stack pointer or instruction pointer of the caller frame is only safe and deterministic if the method is not inlined. " +
                             "Therefore, the method " + b.getMethod().format("%H.%n(%p)") + " must be annotated with @" + NeverInline.class.getSimpleName());
         }
@@ -1030,7 +1180,16 @@ public class SubstrateGraphBuilderPlugins {
 
     private static void registerStackValuePlugins(InvocationPlugins plugins) {
         registerStackValuePlugins(new Registration(plugins, StackValue.class), true);
-        registerStackValuePlugins(new Registration(plugins, UnsafeStackValue.class), false);
+        Registration unsafeStackValue = new Registration(plugins, UnsafeStackValue.class);
+        registerStackValuePlugins(unsafeStackValue, false);
+        unsafeStackValue.register(new RequiredInvocationPlugin("getShared", int.class) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode sizeNode) {
+                long size = longValue(b, targetMethod, sizeNode, "size");
+                b.addPush(JavaKind.Object, StackValueNode.createShared(1, size, b, false));
+                return true;
+            }
+        });
 
         Registration unsafeLateStackValue = new Registration(plugins, UnsafeLateStackValue.class);
         unsafeLateStackValue.register(new RequiredInvocationPlugin("get", int.class) {
@@ -1088,13 +1247,20 @@ public class SubstrateGraphBuilderPlugins {
         SubstrateSharedGraphBuilderPlugins.registerClassPlugins(plugins, encoder::encodeClass, SubstrateGraphBuilderPlugins::hostedDesiredAssertionStatus);
     }
 
+    /// Gets a hosted assertion status only when the class status is fixed during image building.
     private static Boolean hostedDesiredAssertionStatus(Object clazzOrHub) {
-        if (clazzOrHub instanceof Class<?> clazz) {
-            return RuntimeAssertionsSupport.singleton().desiredAssertionStatus(clazz);
+        Class<?> clazz;
+        if (clazzOrHub instanceof Class<?> javaClass) {
+            clazz = javaClass;
         } else if (clazzOrHub instanceof DynamicHub hub) {
-            return hub.desiredAssertionStatus();
+            clazz = hub.getHostedJavaClass();
+        } else {
+            return null;
         }
-        return null;
+        if (clazz == null) {
+            return null;
+        }
+        return ClassInitializationSupport.singleton().shouldFoldAssertionStatus(clazz) ? AssertionsSupport.singleton().desiredAssertionStatus(clazz) : null;
     }
 
     protected static long longValue(GraphBuilderContext b, ResolvedJavaMethod targetMethod, ValueNode node, String name) {
@@ -1139,11 +1305,12 @@ public class SubstrateGraphBuilderPlugins {
                              */
                             if (sharedLayer && installationKind == SingletonLayeredInstallationKind.APP_LAYER_ONLY) {
                                 /*
-                                 * Ensure application only image singleton is marked as being
-                                 * required to be installed in the application layer.
+                                 * Emit a runtime check against the application-layer singleton table.
+                                 * Creating the node also reserves the singleton slot for the application
+                                 * layer.
                                  */
-                                LoadImageSingletonFactory.loadApplicationOnlyImageSingleton(key, b.getMetaAccess());
-                                result = true;
+                                b.addPush(JavaKind.Boolean, AccessImageSingletonFactory.containsApplicationOnlyImageSingleton(key));
+                                return true;
                             }
                             if (!result && extensionLayer) {
                                 /*
@@ -1173,7 +1340,7 @@ public class SubstrateGraphBuilderPlugins {
                              * This singleton is only installed in the application layer heap. All
                              * other layers looks refer to this singleton.
                              */
-                            b.addPush(JavaKind.Object, LoadImageSingletonFactory.loadApplicationOnlyImageSingleton(key, b.getMetaAccess()));
+                            b.addPush(JavaKind.Object, AccessImageSingletonFactory.loadApplicationOnlyImageSingleton(key, b.getMetaAccess()));
                             return true;
                         }
                         if (extensionLayer && installationKind == SingletonLayeredInstallationKind.INITIAL_LAYER_ONLY) {
@@ -1250,14 +1417,10 @@ public class SubstrateGraphBuilderPlugins {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode objectNode) {
                 receiver.get(true);
-                if (ReferenceAccess.singleton().haveCompressedReferences()) {
-                    ValueNode compressedObj = SubstrateCompressionNode.compress(b.getGraph(), objectNode, ImageSingletons.lookup(CompressEncoding.class));
-                    JavaKind compressedIntKind = JavaKind.fromWordSize(ObjectLayout.singleton().getReferenceSize());
-                    ValueNode compressedValue = b.add(WordCastNode.narrowOopToUntrackedWord(compressedObj, compressedIntKind));
-                    b.addPush(JavaKind.Object, ZeroExtendNode.convertUnsigned(compressedValue, FrameAccess.getWordStamp(), NodeView.DEFAULT));
-                } else {
-                    b.addPush(JavaKind.Object, WordCastNode.objectToUntrackedPointer(objectNode, SubstrateTarget.getWordKind()));
-                }
+                ValueNode compressedObj = SubstrateCompressionNode.compress(b.getGraph(), objectNode, ImageSingletons.lookup(CompressEncoding.class));
+                JavaKind compressedIntKind = JavaKind.fromWordSize(ObjectLayout.singleton().getReferenceSize());
+                ValueNode compressedValue = b.add(WordCastNode.narrowOopToUntrackedWord(compressedObj, compressedIntKind));
+                b.addPush(JavaKind.Object, ZeroExtendNode.convertUnsigned(compressedValue, SubstrateTarget.getWordStamp(), NodeView.DEFAULT));
                 return true;
             }
         });
@@ -1265,16 +1428,12 @@ public class SubstrateGraphBuilderPlugins {
             @Override
             public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode wordNode) {
                 receiver.get(true);
-                if (ReferenceAccess.singleton().haveCompressedReferences()) {
-                    CompressEncoding encoding = ImageSingletons.lookup(CompressEncoding.class);
-                    JavaKind compressedIntKind = JavaKind.fromWordSize(ObjectLayout.singleton().getReferenceSize());
-                    NarrowOopStamp compressedStamp = (NarrowOopStamp) SubstrateNarrowOopStamp.compressed((AbstractObjectStamp) StampFactory.object(), encoding);
-                    ValueNode narrowNode = b.add(NarrowNode.convertUnsigned(wordNode, StampFactory.forKind(compressedIntKind), NodeView.DEFAULT));
-                    WordCastNode compressedObj = b.add(WordCastNode.wordToNarrowObject(narrowNode, compressedStamp));
-                    b.addPush(JavaKind.Object, SubstrateCompressionNode.uncompress(b.getGraph(), compressedObj, encoding));
-                } else {
-                    b.addPush(JavaKind.Object, WordCastNode.wordToObject(wordNode, SubstrateTarget.getWordKind()));
-                }
+                CompressEncoding encoding = ImageSingletons.lookup(CompressEncoding.class);
+                JavaKind compressedIntKind = JavaKind.fromWordSize(ObjectLayout.singleton().getReferenceSize());
+                NarrowOopStamp compressedStamp = (NarrowOopStamp) SubstrateNarrowOopStamp.compressed((AbstractObjectStamp) StampFactory.object(), encoding);
+                ValueNode narrowNode = b.add(NarrowNode.convertUnsigned(wordNode, StampFactory.forKind(compressedIntKind), NodeView.DEFAULT));
+                WordCastNode compressedObj = b.add(WordCastNode.wordToNarrowObject(narrowNode, compressedStamp));
+                b.addPush(JavaKind.Object, SubstrateCompressionNode.uncompress(b.getGraph(), compressedObj, encoding));
                 return true;
             }
         });
@@ -1284,6 +1443,92 @@ public class SubstrateGraphBuilderPlugins {
         InvocationPlugins.Registration r = new InvocationPlugins.Registration(plugins, "jdk.internal.util.ArraysSupport");
         r.register(new StandardGraphBuilderPlugins.VectorizedMismatchInvocationPlugin());
         r.register(new StandardGraphBuilderPlugins.VectorizedHashCodeInvocationPlugin());
+    }
+
+    private static void registerDualPivotQuicksortPlugins(InvocationPlugins plugins, ParsingReason parsingReason) {
+        if (parsingReason != ParsingReason.PointsToAnalysis && parsingReason != ParsingReason.AOTCompilation) {
+            return;
+        }
+        Variant variant = SimdSortSupport.getSupportedVariant();
+        if (variant == Variant.NONE || !NativeLibraries.singleton().hasStaticLibrary("simdsort")) {
+            return;
+        }
+
+        GuestAccess guestAccess = GuestAccess.get();
+        ResolvedJavaType simdSortSupport = guestAccess.lookupType(SimdSortSupport.class);
+        ResolvedJavaMethod sortWrapper = guestAccess.lookupMethod(simdSortSupport, variant.sortWrapperName(), Object.class, int.class, int.class, int.class, Object.class);
+        ResolvedJavaMethod partitionWrapper = guestAccess.lookupMethod(simdSortSupport, variant.partitionWrapperName(), Object.class, int.class, int.class, int.class, int.class, int.class,
+                        Object.class);
+
+        Registration r = new Registration(plugins, "java.util.DualPivotQuicksort");
+        r.register(new OptionalInvocationPlugin("sort", Class.class, Object.class, long.class, int.class, int.class,
+                        new TypeSymbol("java.util.DualPivotQuicksort$SortOperation")) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode elementType, ValueNode array,
+                            ValueNode offset, ValueNode low, ValueNode high, ValueNode sortOperation) {
+                JavaKind elementKind = getSimdSortElementKind(b, variant, elementType, offset);
+                if (elementKind == null) {
+                    return false;
+                }
+                ValueNode arrayNonNull = b.nullCheckedValue(array);
+                ValueNode jvmType = b.add(ConstantNode.forInt(SimdSortSupport.toJVMType(elementKind)));
+                ResolvedJavaMethod wrapper = lookupInCurrentUniverse(b.getMetaAccess(), sortWrapper);
+                b.handleReplacedInvoke(InvokeKind.Static, wrapper, new ValueNode[]{arrayNonNull, jvmType, low, high, sortOperation}, false);
+                return true;
+            }
+        });
+        r.register(new OptionalInvocationPlugin("partition", Class.class, Object.class, long.class, int.class, int.class, int.class, int.class,
+                        new TypeSymbol("java.util.DualPivotQuicksort$PartitionOperation")) {
+            @Override
+            public boolean apply(GraphBuilderContext b, ResolvedJavaMethod targetMethod, Receiver receiver, ValueNode elementType, ValueNode array,
+                            ValueNode offset, ValueNode low, ValueNode high, ValueNode pivotIndex1, ValueNode pivotIndex2, ValueNode partitionOperation) {
+                JavaKind elementKind = getSimdSortElementKind(b, variant, elementType, offset);
+                if (elementKind == null) {
+                    return false;
+                }
+                ValueNode arrayNonNull = b.nullCheckedValue(array);
+                ValueNode jvmType = b.add(ConstantNode.forInt(SimdSortSupport.toJVMType(elementKind)));
+                ResolvedJavaMethod wrapper = lookupInCurrentUniverse(b.getMetaAccess(), partitionWrapper);
+                b.handleReplacedInvoke(InvokeKind.Static, wrapper, new ValueNode[]{arrayNonNull, jvmType, low, high, pivotIndex1, pivotIndex2, partitionOperation}, false);
+                return true;
+            }
+        });
+    }
+
+    private static ResolvedJavaMethod lookupInCurrentUniverse(MetaAccessProvider metaAccess, ResolvedJavaMethod method) {
+        if (metaAccess instanceof UniverseMetaAccess universeMetaAccess) {
+            ResolvedJavaMethod wrappedMethod = lookupInCurrentUniverse(universeMetaAccess.getWrapped(), method);
+            return universeMetaAccess.getUniverse().lookup(wrappedMethod);
+        }
+        return method;
+    }
+
+    private static JavaKind getSimdSortElementKind(GraphBuilderContext b, Variant variant, ValueNode elementType, ValueNode offset) {
+        if (!elementType.isConstant()) {
+            return null;
+        }
+        JavaKind elementKind = SimdSortSupport.getSupportedJavaKind(variant, b.getConstantReflection().asJavaType(elementType.asJavaConstant()));
+        if (elementKind == null) {
+            return null;
+        }
+        if (!offset.isJavaConstant() || offset.asJavaConstant().asLong() != ObjectLayout.singleton().getArrayBaseOffset(elementKind)) {
+            /* The native routines expect indices relative to the first array element. */
+            return null;
+        }
+        return elementKind;
+    }
+
+    private static void registerPoly1305Plugin(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "com.sun.crypto.provider.Poly1305");
+        r.register(new Poly1305ProcessBlocksPlugin());
+    }
+
+    private static void registerIntegerPolynomialPlugins(InvocationPlugins plugins) {
+        Registration r = new Registration(plugins, "sun.security.util.math.intpoly.MontgomeryIntegerPolynomialP256");
+        r.register(new IntegerPolynomialP256MontgomeryMultPlugin());
+
+        r = new Registration(plugins, "sun.security.util.math.intpoly.IntegerPolynomial");
+        r.register(new IntegerPolynomialAssignPlugin());
     }
 
     public static class SubstrateCipherBlockChainingCryptPlugin extends StandardGraphBuilderPlugins.CipherBlockChainingCryptPlugin {
@@ -1319,6 +1564,37 @@ public class SubstrateGraphBuilderPlugins {
         protected ResolvedJavaType getTypeAESCrypt(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
             Class<?> classAESCrypt = ReflectionUtil.lookupClass("com.sun.crypto.provider.AESCrypt");
             return metaAccess.lookupJavaType(classAESCrypt);
+        }
+    }
+
+    public static class SubstrateGaloisCounterModeCryptPlugin extends StandardGraphBuilderPlugins.GaloisCounterModeCryptPlugin {
+
+        @Override
+        protected boolean canApply(GraphBuilderContext b) {
+            return b instanceof BytecodeParser;
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeAESCrypt(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classAESCrypt = ReflectionUtil.lookupClass("com.sun.crypto.provider.AESCrypt");
+            return metaAccess.lookupJavaType(classAESCrypt);
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeGCTR(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classGCTR = ReflectionUtil.lookupClass("com.sun.crypto.provider.GCTR");
+            return metaAccess.lookupJavaType(classGCTR);
+        }
+
+        @Override
+        protected ResolvedJavaType getTypeGHASH(MetaAccessProvider metaAccess, ResolvedJavaType context) throws ClassNotFoundException {
+            Class<?> classGHASH = ReflectionUtil.lookupClass("com.sun.crypto.provider.GHASH");
+            return metaAccess.lookupJavaType(classGHASH);
+        }
+
+        @Override
+        public boolean isRuntimeChecked(Architecture arch) {
+            return false;
         }
     }
 
@@ -1376,6 +1652,9 @@ public class SubstrateGraphBuilderPlugins {
                 return false;
             }
         });
+
+        r = new Registration(plugins, "com.sun.crypto.provider.GaloisCounterMode");
+        r.register(new SubstrateGaloisCounterModeCryptPlugin());
     }
 
     private static <T> T constantObjectParameter(GraphBuilderContext b, ResolvedJavaMethod targetMethod, int parameterIndex, Class<T> declaredType, ValueNode classNode) {

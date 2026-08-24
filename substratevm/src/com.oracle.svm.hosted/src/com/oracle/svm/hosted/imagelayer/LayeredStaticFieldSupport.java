@@ -42,10 +42,8 @@ import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.util.AnalysisError;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.StaticFieldsSupport;
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
-import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.BuildingImageLayerPredicate;
 import com.oracle.svm.core.imagelayer.DynamicImageLayerInfo;
@@ -55,12 +53,14 @@ import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.meta.HostedField;
 import com.oracle.svm.hosted.meta.HostedUniverse;
 import com.oracle.svm.hosted.meta.UniverseBuilder;
+import com.oracle.svm.hosted.snapshot.elements.PersistedAnalysisFieldData;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.ImageSingletonLoader;
 import com.oracle.svm.shared.singletons.ImageSingletonWriter;
 import com.oracle.svm.shared.singletons.LayeredPersistFlags;
 import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.LayeredCallbacksSingletonTrait;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredCallbacksSupplier;
@@ -168,7 +168,7 @@ public class LayeredStaticFieldSupport extends LayeredClassInitialization {
         }
     }
 
-    public void ensureInitializedFromFieldData(AnalysisField aField, SharedLayerSnapshotCapnProtoSchemaHolder.PersistedAnalysisField.Reader fieldData) {
+    public void ensureInitializedFromFieldData(AnalysisField aField, PersistedAnalysisFieldData.Loader fieldData) {
         Integer priorInstalledLayerNum = fieldData.getPriorInstalledLayerNum();
         Object result = priorInstalledLayerMap.computeIfAbsent(aField, _ -> priorInstalledLayerNum);
         assert priorInstalledLayerNum.equals(result) : result;
@@ -408,7 +408,7 @@ public class LayeredStaticFieldSupport extends LayeredClassInitialization {
                     writer.writeInt("appLayerPrimitiveFieldStartingOffset", singleton.appLayerStaticFieldOffsets.nextPrimitiveField);
                     writer.writeInt("appLayerObjectFieldStartingOffset", singleton.appLayerStaticFieldOffsets.nextObjectField);
 
-                    HostedUniverse hUniverse = ((SVMImageLayerWriter.ImageSingletonWriterImpl) writer).getHostedUniverse();
+                    HostedUniverse hUniverse = ((SVMImageSingletonWriter) writer).getHostedUniverse();
                     List<Integer> knownLocations = new ArrayList<>();
                     singleton.appLayerFields.forEach(obj -> {
                         AnalysisField aField = getAnalysisField(obj);
@@ -451,7 +451,6 @@ public class LayeredStaticFieldSupport extends LayeredClassInitialization {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 class LayeredStaticFieldSupportBaseLayerFeature implements InternalFeature {
     @Override
     public boolean isInConfiguration(IsInConfigurationAccess access) {
@@ -476,7 +475,6 @@ class LayeredStaticFieldSupportBaseLayerFeature implements InternalFeature {
 }
 
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 class LayeredStaticFieldSupportAppLayerFeature implements InternalFeature {
     @Override
     public boolean isInConfiguration(IsInConfigurationAccess access) {

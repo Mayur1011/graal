@@ -34,7 +34,7 @@ import java.util.function.Supplier;
 import com.oracle.svm.core.graal.code.CGlobalDataInfo;
 import com.oracle.svm.guest.staging.c.CGlobalDataImpl;
 import com.oracle.svm.hosted.imagelayer.CodeLocation;
-import com.oracle.svm.hosted.imagelayer.SharedLayerSnapshotCapnProtoSchemaHolder;
+import com.oracle.svm.hosted.snapshot.c.CGlobalDataInfoData;
 import com.oracle.svm.shared.util.VMError;
 
 /**
@@ -74,7 +74,7 @@ public class InitialLayerCGlobalTracking {
                         .toArray(CGlobalDataInfo[]::new);
     }
 
-    public void persistCGlobalInfo(CGlobalDataInfo info, Supplier<SharedLayerSnapshotCapnProtoSchemaHolder.CGlobalDataInfo.Builder> builderSupplier) {
+    public void persistCGlobalInfo(CGlobalDataInfo info, Supplier<CGlobalDataInfoData.Writer> builderSupplier) {
         String layeredSymbolName = toPersistLayeredSymbolNameMap.get(info);
         assert layeredSymbolName != null;
         var builder = builderSupplier.get();
@@ -130,7 +130,7 @@ public class InitialLayerCGlobalTracking {
                     // create symbol name
                     layeredSymbolName = String.format("%s_%s", LAYERED_CGLOBAL_SYMBOL_PREFIX, symbolCount);
                     symbolCount++;
-                    createSymbol.apply(info.getOffset(), layeredSymbolName, true);
+                    createSymbol.apply(info.getOffset(), layeredSymbolName, true, false);
                 }
             }
             var prev = toPersistLayeredSymbolNameMap.put(info, layeredSymbolName);

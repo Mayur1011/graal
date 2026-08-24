@@ -50,9 +50,12 @@ import org.graalvm.wasm.SymbolTable;
 import org.graalvm.wasm.WasmType;
 import org.graalvm.wasm.collection.IntArrayList;
 import org.graalvm.wasm.constants.Bytecode;
+import org.graalvm.wasm.constants.ExceptionHandlerType;
 import org.graalvm.wasm.exception.Failure;
 import org.graalvm.wasm.exception.WasmException;
+import org.graalvm.wasm.parser.bytecode.BytecodeFixup;
 import org.graalvm.wasm.parser.bytecode.RuntimeBytecodeGen;
+import org.graalvm.wasm.parser.bytecode.RuntimeBytecodeGen.BranchHint;
 import org.graalvm.wasm.parser.bytecode.RuntimeBytecodeGen.BranchOp;
 import org.graalvm.wasm.vector.Vector128;
 
@@ -65,9 +68,12 @@ public class ParserState {
     private final ControlStack controlStack;
     private final RuntimeBytecodeGen bytecode;
     private final ArrayList<ExceptionTable> exceptionTables;
+    private final IntArrayList exceptionTableContinuationFixupIndices;
+    private final ArrayList<BytecodeFixup> exceptionTableContinuationFixups;
     private final SymbolTable symbolTable;
 
     private int maxStackSize;
+    private int maxLegacyCatchDepth;
     private boolean usesMemoryZero;
 
     public ParserState(RuntimeBytecodeGen bytecode, SymbolTable symbolTable) {
@@ -75,9 +81,12 @@ public class ParserState {
         this.controlStack = new ControlStack();
         this.bytecode = bytecode;
         this.exceptionTables = new ArrayList<>();
+        this.exceptionTableContinuationFixupIndices = new IntArrayList();
+        this.exceptionTableContinuationFixups = new ArrayList<>();
         this.symbolTable = symbolTable;
 
         this.maxStackSize = 0;
+        this.maxLegacyCatchDepth = 0;
     }
 
     /**
@@ -304,8 +313,9 @@ public class ParserState {
      * @param resultTypes The result types of the loop that was entered.
      */
     public void enterLoop(int[] paramTypes, int[] resultTypes) {
-        final int label = bytecode.addLoopLabel(paramTypes.length, valueStack.size(), WasmType.getCommonValueType(resultTypes));
-        ControlFrame frame = new LoopFrame(paramTypes, resultTypes, valueStack.size(), controlStack.peek(), label);
+        final ControlFrame parentFrame = controlStack.peek();
+        final int label = bytecode.addLoopLabel(paramTypes.length, valueStack.size(), WasmType.getCommonValueType(resultTypes), parentFrame.legacyCatchDepth());
+        ControlFrame frame = new LoopFrame(paramTypes, resultTypes, valueStack.size(), parentFrame, label);
         controlStack.push(frame);
         pushAll(paramTypes);
     }
@@ -316,9 +326,10 @@ public class ParserState {
      *
      * @param paramTypes The param types of the if and else branch that was entered.
      * @param resultTypes The result type of the if and else branch that was entered.
+     * @param branchHint Optional branch hint used to initialize the branch profile.
      */
-    public void enterIf(int[] paramTypes, int[] resultTypes) {
-        final int fixupLocation = bytecode.addIfLocation();
+    public void enterIf(int[] paramTypes, int[] resultTypes, BranchHint branchHint) {
+        final int fixupLocation = bytecode.addIfLocation(branchHint);
         ControlFrame frame = new IfFrame(paramTypes, resultTypes, valueStack.size(), controlStack.peek(), fixupLocation);
         controlStack.push(frame);
         pushAll(paramTypes);
@@ -329,8 +340,11 @@ public class ParserState {
      */
     public void enterElse() {
         ControlFrame frame = controlStack.peek();
-        frame.enterElse(this, bytecode);
-        pushAll(frame.paramTypes());
+        if (!(frame instanceof IfFrame ifFrame)) {
+            throw WasmException.create(Failure.TYPE_MISMATCH, "Expected then branch. Else branch requires preceding then branch.");
+        }
+        ifFrame.enterElse(this, bytecode);
+        pushAll(ifFrame.paramTypes());
     }
 
     /**
@@ -345,7 +359,12 @@ public class ParserState {
         final TryTableFrame frame = new TryTableFrame(paramTypes, resultTypes, valueStack.size(), controlStack.peek(), bytecode.location(), handlers);
         controlStack.push(frame);
         pushAll(paramTypes);
-        exceptionTables.add(frame.table());
+    }
+
+    public void enterLegacyTry(int[] paramTypes, int[] resultTypes) {
+        final LegacyTryFrame frame = new LegacyTryFrame(paramTypes, resultTypes, valueStack.size(), controlStack.peek(), bytecode.location());
+        controlStack.push(frame);
+        pushAll(paramTypes);
     }
 
     /**
@@ -362,11 +381,64 @@ public class ParserState {
         checkLabelExists(label);
         final ControlFrame labelFrame = getFrame(label);
         // we reuse the block frame, instead of introducing a new catch frame.
-        final ControlFrame frame = new BlockFrame(WasmType.VOID_TYPE_ARRAY, labelFrame.labelTypes(), labelFrame.initialStackSize(), controlStack.peek());
+        final ControlFrame frame = new BlockFrame(WasmType.VOID_TYPE_ARRAY, labelFrame.labelTypes(), valueStack.size(), controlStack.peek());
         controlStack.push(frame);
         final ExceptionHandler e = new ExceptionHandler(opcode, tag);
-        labelFrame.addExceptionHandler(e);
+        labelFrame.addLabelFixup(e);
         return e;
+    }
+
+    public int[] enterLegacyCatch(int opcode, int tag, int[] paramTypes, boolean multiValue) {
+        final ControlFrame currentFrame = controlStack.peek();
+        if (!(currentFrame instanceof LegacyTryFrame tryFrame)) {
+            throw WasmException.create(Failure.TYPE_MISMATCH, "Expected try block. Catch clause requires preceding try block.");
+        }
+        tryFrame.enterCatchClause(this, bytecode, opcode, tag, paramTypes);
+        maxLegacyCatchDepth = Math.max(maxLegacyCatchDepth, tryFrame.legacyCatchDepth());
+        pushAll(paramTypes);
+        if (!multiValue) {
+            Assert.assertIntLessOrEqual(tryFrame.resultTypeLength(), 1, Failure.INVALID_RESULT_ARITY);
+        }
+        return tryFrame.resultTypes();
+    }
+
+    public int[] legacyDelegate(int delegateLabel, boolean multiValue) {
+        final ControlFrame currentFrame = controlStack.peek();
+        if (!(currentFrame instanceof LegacyTryFrame tryFrame && !tryFrame.inCatchClause())) {
+            throw WasmException.create(Failure.UNSPECIFIED_MALFORMED, "Expected try block. Delegate clause requires preceding try block with no catch clauses.");
+        }
+        // delegateLabel is relative to the scope outside the current try (i.e. delegateLabel == 0
+        // corresponds to the label outside the current try). In our implementation, the frame at
+        // level 0 is the legacy-try frame and the innermost label is the frame at level 1, so we
+        // need to increment the delegateLabel by 1 before reading from our control stack.
+        final int targetLabel = delegateLabel + 1;
+        checkLabelExists(targetLabel);
+        final ExceptionHandler handler = new ExceptionHandler(ExceptionHandlerType.LEGACY_DELEGATE, -1);
+        getFrame(targetLabel).addDelegateFixup(handler);
+        tryFrame.addProtectedRegionHandler(handler);
+        return exit(multiValue);
+    }
+
+    public int getLegacyRethrowDepth(int label) {
+        checkLabelExists(label);
+        int visibleLabel = -1;
+        int catchDepth = -1;
+        for (int i = 0; i < controlStack.size(); i++) {
+            final ControlFrame frame = getFrame(i);
+            if (frame instanceof LegacyTryFrame tryFrame && tryFrame.inCatchClause()) {
+                visibleLabel++;
+                catchDepth++;
+                if (visibleLabel == label) {
+                    return catchDepth;
+                }
+                continue;
+            }
+            visibleLabel++;
+            if (visibleLabel == label) {
+                throw WasmException.format(Failure.INVALID_RETHROW_LABEL, null, "Rethrow label %d does not target a catch label.", label);
+            }
+        }
+        throw WasmException.format(Failure.INVALID_RETHROW_LABEL, null, "Rethrow label %d does not target a catch label.", label);
     }
 
     /**
@@ -376,17 +448,43 @@ public class ParserState {
         return !exceptionTables.isEmpty();
     }
 
+    public int registerExceptionTable(ExceptionTable table) {
+        final int tableIndex = exceptionTables.size();
+        this.exceptionTables.add(table);
+        return tableIndex;
+    }
+
+    public void addExceptionTableContinuationFixup(int tableIndex, BytecodeFixup fixup) {
+        final int targetTableIndex = tableIndex == -1 ? exceptionTables.size() : tableIndex;
+        assert targetTableIndex >= 0 && targetTableIndex <= exceptionTables.size() : "Invalid exception-table continuation index";
+        exceptionTableContinuationFixupIndices.add(targetTableIndex);
+        exceptionTableContinuationFixups.add(fixup);
+    }
+
     /**
      * Generates an exception table at the current location in the bytecode. The exception table has
      * entries in the format:
      * 
      * <pre>
-     *     from (4 byte) | to (4 byte) | opcode (1 byte) | tag (4 byte) (optional) | target (4 byte)
+     *     from (4 byte) | to (4 byte) | type (1 byte) | tag (4 byte) | target (4 byte)
      * </pre>
      *
      * The exception table has a single 4 byte entry (0xffff_ffff) to indicate the end of the table.
      */
     public void generateExceptionTable() {
+        final int[] tableOffsets = new int[exceptionTables.size()];
+        int tableOffset = bytecode.location();
+        for (int i = 0; i < exceptionTables.size(); i++) {
+            final ExceptionTable table = exceptionTables.get(i);
+            tableOffsets[i] = tableOffset;
+            tableOffset += table.handlerCount() * ExceptionHandler.SIZE;
+        }
+        final int tableEndOffset = tableOffset;
+        for (int i = 0; i < exceptionTableContinuationFixups.size(); i++) {
+            final int tableIndex = exceptionTableContinuationFixupIndices.get(i);
+            final int target = tableIndex == exceptionTables.size() ? tableEndOffset : tableOffsets[tableIndex];
+            exceptionTableContinuationFixups.get(i).patch(target);
+        }
         for (ExceptionTable table : exceptionTables) {
             table.generateExceptionTable(bytecode);
         }
@@ -407,14 +505,15 @@ public class ParserState {
      * data array.
      *
      * @param branchLabel The target label.
+     * @param branchHint Optional branch hint used to initialize the branch profile.
      */
-    public void addConditionalBranch(int branchLabel) {
+    public void addConditionalBranch(int branchLabel, BranchHint branchHint) {
         checkLabelExists(branchLabel);
         ControlFrame frame = getFrame(branchLabel);
         final int[] labelTypes = frame.labelTypes();
         popAll(labelTypes);
         pushAll(labelTypes);
-        frame.addBranch(bytecode, BranchOp.BR_IF);
+        frame.addLabelFixup(createBranchFixup(BranchOp.BR_IF, branchHint));
     }
 
     /**
@@ -428,7 +527,7 @@ public class ParserState {
         ControlFrame frame = getFrame(branchLabel);
         final int[] labelTypes = frame.labelTypes();
         popAll(labelTypes);
-        frame.addBranch(bytecode, BranchOp.BR);
+        frame.addLabelFixup(createBranchFixup(BranchOp.BR));
     }
 
     public void addBranchOnNull(int branchLabel) {
@@ -437,7 +536,7 @@ public class ParserState {
         final int[] labelTypes = frame.labelTypes();
         popAll(labelTypes);
         pushAll(labelTypes);
-        frame.addBranch(bytecode, BranchOp.BR_ON_NULL);
+        frame.addLabelFixup(createBranchFixup(BranchOp.BR_ON_NULL));
     }
 
     public void addBranchOnNonNull(int branchLabel, int referenceType) {
@@ -456,7 +555,7 @@ public class ParserState {
         for (int i = 0; i < labelTypes.length - 1; i++) {
             push(labelTypes[i]);
         }
-        frame.addBranch(bytecode, BranchOp.BR_ON_NON_NULL);
+        frame.addLabelFixup(createBranchFixup(BranchOp.BR_ON_NON_NULL));
     }
 
     public void addBranchOnCast(int branchLabel, int topReferenceType, int jumpReferenceType, int noJumpReferenceType, BranchOp branchOp) {
@@ -478,7 +577,7 @@ public class ParserState {
             push(labelTypes[i]);
         }
         push(noJumpReferenceType);
-        frame.addBranch(bytecode, branchOp);
+        frame.addLabelFixup(createBranchFixup(branchOp));
     }
 
     /**
@@ -506,9 +605,23 @@ public class ParserState {
             } catch (WasmException e) {
                 throw ValidationErrors.createLabelTypesMismatch(branchLabelReturnTypes, otherBranchLabelReturnTypes);
             }
-            frame.addBranchTableItem(bytecode);
+            frame.addLabelFixup(createBranchTableItemFixup());
         }
         popAll(branchLabelReturnTypes);
+    }
+
+    public BytecodeFixup createBranchFixup(BranchOp branchOp) {
+        return createBranchFixup(branchOp, BranchHint.NONE);
+    }
+
+    public BytecodeFixup createBranchFixup(BranchOp branchOp, BranchHint branchHint) {
+        final int location = bytecode.addBranchLocation(branchOp, branchHint);
+        return targetOffset -> bytecode.patchLocation(location, targetOffset);
+    }
+
+    private BytecodeFixup createBranchTableItemFixup() {
+        final int location = bytecode.addBranchTableItemLocation();
+        return targetOffset -> bytecode.patchLocation(location, targetOffset);
     }
 
     /**
@@ -558,6 +671,44 @@ public class ParserState {
      */
     public void addCall(int nodeIndex, int functionIndex) {
         bytecode.addCall(nodeIndex, functionIndex);
+    }
+
+    /**
+     * Adds a reference return-call instruction to the bytecode, along with its immediate argument and the
+     * call node index.
+     *
+     * @param typeIndex The index of the defined function type.
+     */
+    public void addRefReturnCall(int typeIndex) {
+        bytecode.addRefReturnCall(typeIndex);
+    }
+
+    /**
+     * Adds an indirect return-call instruction to the bytecode, along with its immediate arguments
+     * and the call node index.
+     *
+     * @param typeIndex The index of the defined function type.
+     * @param tableIndex The index of the table in which the function will be looked up.
+     */
+    public void addIndirectReturnCall(int typeIndex, int tableIndex) {
+        bytecode.addIndirectReturnCall(typeIndex, tableIndex);
+    }
+
+    /**
+     * Adds a direct return-call instruction to the bytecode, along with its immediate argument
+     * and the call node index.
+     *
+     * @param functionIndex The index of the defined function.
+     */
+    public void addReturnCall(int functionIndex) {
+        bytecode.addReturnCall(functionIndex);
+    }
+
+    /**
+     * Adds a return-call branch instruction targeting the function entry point to the bytecode.
+     */
+    public void addReturnCallBranch() {
+        bytecode.addReturnCallBranch();
     }
 
     /**
@@ -666,6 +817,17 @@ public class ParserState {
     }
 
     /**
+     * Adds the u8 or i32-with-misc version of the given instruction to the bytecode based on the give immediate value.
+     * If the value fits into a u8 value, the u8 instruction and a u8 value are added.
+     * Otherwise, the misc flag, the i32 instruction, and an i32 value are added.
+     * @param instruction The u8 version of the instruction (must be equivalent to the i32 version)
+     * @param value The immediate value.
+     */
+    public void addUnsignedInstructionWithMisc(int instruction, int value) {
+        bytecode.addUnsignedWithMisc(instruction, value);
+    }
+
+    /**
      * Adds a memory instruction based on the given values and index type.
      *
      * @param baseInstruction The base version of the memory instruction
@@ -737,10 +899,10 @@ public class ParserState {
      */
     public int[] exit(boolean multiValue) {
         Assert.assertTrue(!controlStack.isEmpty(), Failure.UNEXPECTED_END_OF_BLOCK);
-        ControlFrame frame = controlStack.peek();
-        int[] resultTypes = frame.resultTypes();
-        frame.exit(bytecode);
-        checkStackAfterFrameExit(frame, resultTypes);
+        final ControlFrame currentFrame = controlStack.peek();
+        final int[] resultTypes = currentFrame.resultTypes();
+        currentFrame.exit(this, bytecode);
+        checkStackAfterFrameExit(currentFrame);
 
         controlStack.pop();
         if (!multiValue) {
@@ -753,9 +915,9 @@ public class ParserState {
      * Checks that the expected return types are actually on the value stack.
      *
      * @param frame The frame that is exited.
-     * @param resultTypes The expected return types of the frame.
      */
-    void checkStackAfterFrameExit(ControlFrame frame, int[] resultTypes) {
+    void checkStackAfterFrameExit(ControlFrame frame) {
+        final int[] resultTypes = frame.resultTypes();
         if (availableStackSize() > resultTypes.length) {
             int[] actualTypes = popAvailableUnchecked();
             if (isTypeMismatch(resultTypes, actualTypes)) {
@@ -857,6 +1019,10 @@ public class ParserState {
 
     public int maxStackSize() {
         return maxStackSize;
+    }
+
+    public int maxLegacyCatchDepth() {
+        return maxLegacyCatchDepth;
     }
 
     private void markMemoryUsed(int memoryIndex) {

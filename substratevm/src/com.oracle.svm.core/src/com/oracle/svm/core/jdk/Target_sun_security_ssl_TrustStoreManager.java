@@ -41,8 +41,6 @@ import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.RuntimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
@@ -51,6 +49,34 @@ import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.shared.util.ReflectionUtil;
 
 import sun.security.ssl.SSLLogger;
+
+@TargetClass(className = TrustStoreManagerFeature.TRUST_STORE_MANAGER_CLASS_NAME)
+final class Target_sun_security_ssl_TrustStoreManager {
+    /*
+     * This singleton object caches the last retrieved trusted KeyStore and set of trusted
+     * certificates.
+     */
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = TrustStoreManagerFeature.TRUST_STORE_MANAGER_CLASS_NAME +
+                    "$TrustAnchorManager") private static Target_sun_security_ssl_TrustStoreManager_TrustAnchorManager tam;
+
+    @Substitute
+    private static Set<X509Certificate> getTrustedCerts() throws Exception {
+        Target_sun_security_ssl_TrustStoreManager_TrustStoreDescriptor runtimeDescriptor = TrustStoreManagerSupport.getRuntimeTrustStoreDescriptor();
+        if (runtimeDescriptor == null) {
+            return ImageSingletons.lookup(TrustStoreManagerSupport.class).buildtimeTrustedCerts;
+        }
+        return tam.getTrustedCerts(runtimeDescriptor);
+    }
+
+    @Substitute
+    private static KeyStore getTrustedKeyStore() throws Exception {
+        Target_sun_security_ssl_TrustStoreManager_TrustStoreDescriptor runtimeDescriptor = TrustStoreManagerSupport.getRuntimeTrustStoreDescriptor();
+        if (runtimeDescriptor == null) {
+            return ImageSingletons.lookup(TrustStoreManagerSupport.class).buildtimeTrustedKeyStore;
+        }
+        return tam.getKeyStore(runtimeDescriptor);
+    }
+}
 
 /**
  * Root certificates in native image are fixed/embedded into the image, at image build time, based
@@ -69,7 +95,6 @@ import sun.security.ssl.SSLLogger;
  * class is non-public) and returning the frozen values using a substitution.
  */
 @AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
 final class TrustStoreManagerFeature implements InternalFeature {
 
     static final String TRUST_STORE_MANAGER_CLASS_NAME = "sun.security.ssl.TrustStoreManager";
@@ -209,34 +234,6 @@ final class TrustStoreManagerSupport {
                         storePropPassword, temporaryFile, temporaryTime);
     }
 
-}
-
-@TargetClass(className = TrustStoreManagerFeature.TRUST_STORE_MANAGER_CLASS_NAME)
-final class Target_sun_security_ssl_TrustStoreManager {
-    /*
-     * This singleton object caches the last retrieved trusted KeyStore and set of trusted
-     * certificates.
-     */
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = TrustStoreManagerFeature.TRUST_STORE_MANAGER_CLASS_NAME +
-                    "$TrustAnchorManager") private static Target_sun_security_ssl_TrustStoreManager_TrustAnchorManager tam;
-
-    @Substitute
-    private static Set<X509Certificate> getTrustedCerts() throws Exception {
-        Target_sun_security_ssl_TrustStoreManager_TrustStoreDescriptor runtimeDescriptor = TrustStoreManagerSupport.getRuntimeTrustStoreDescriptor();
-        if (runtimeDescriptor == null) {
-            return ImageSingletons.lookup(TrustStoreManagerSupport.class).buildtimeTrustedCerts;
-        }
-        return tam.getTrustedCerts(runtimeDescriptor);
-    }
-
-    @Substitute
-    private static KeyStore getTrustedKeyStore() throws Exception {
-        Target_sun_security_ssl_TrustStoreManager_TrustStoreDescriptor runtimeDescriptor = TrustStoreManagerSupport.getRuntimeTrustStoreDescriptor();
-        if (runtimeDescriptor == null) {
-            return ImageSingletons.lookup(TrustStoreManagerSupport.class).buildtimeTrustedKeyStore;
-        }
-        return tam.getKeyStore(runtimeDescriptor);
-    }
 }
 
 @TargetClass(className = TrustStoreManagerFeature.TRUST_STORE_MANAGER_CLASS_NAME, innerClass = "TrustStoreDescriptor")

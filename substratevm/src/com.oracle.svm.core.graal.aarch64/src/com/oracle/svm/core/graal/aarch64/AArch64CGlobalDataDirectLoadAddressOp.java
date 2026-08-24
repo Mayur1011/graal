@@ -27,13 +27,14 @@ package com.oracle.svm.core.graal.aarch64;
 import static jdk.graal.compiler.lir.LIRInstruction.OperandFlag.REG;
 import static jdk.vm.ci.code.ValueUtil.asRegister;
 
-import com.oracle.svm.core.graal.code.CGlobalDataDirectReference;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
+import com.oracle.svm.core.graal.code.CGlobalDataDirectReference;
 import com.oracle.svm.core.graal.code.CGlobalDataInfo;
 
 import jdk.graal.compiler.asm.aarch64.AArch64MacroAssembler;
+import jdk.graal.compiler.asm.aarch64.AArch64MacroAssembler.ScratchRegister;
 import jdk.graal.compiler.lir.LIRInstructionClass;
 import jdk.graal.compiler.lir.aarch64.AArch64LIRInstruction;
 import jdk.graal.compiler.lir.asm.CompilationResultBuilder;
@@ -41,17 +42,27 @@ import jdk.vm.ci.code.Register;
 import jdk.vm.ci.meta.AllocatableValue;
 
 @Platforms(Platform.HOSTED_ONLY.class)
-public final class AArch64CGlobalDataDirectLoadAddressOp extends AArch64LIRInstruction {
+public sealed class AArch64CGlobalDataDirectLoadAddressOp extends AArch64LIRInstruction permits AArch64LoadLayeredMethodOffsetConstantOp {
     public static final LIRInstructionClass<AArch64CGlobalDataDirectLoadAddressOp> TYPE = LIRInstructionClass.create(AArch64CGlobalDataDirectLoadAddressOp.class);
 
-    @Def(REG) private AllocatableValue result;
+    @Def(REG) protected AllocatableValue result;
 
     private final CGlobalDataInfo dataInfo;
+    private final int addend;
 
     AArch64CGlobalDataDirectLoadAddressOp(CGlobalDataInfo dataInfo, AllocatableValue result) {
-        super(TYPE);
+        this(dataInfo, result, 0);
+    }
+
+    AArch64CGlobalDataDirectLoadAddressOp(CGlobalDataInfo dataInfo, AllocatableValue result, int addend) {
+        this(TYPE, dataInfo, result, addend);
+    }
+
+    protected AArch64CGlobalDataDirectLoadAddressOp(LIRInstructionClass<? extends AArch64CGlobalDataDirectLoadAddressOp> type, CGlobalDataInfo dataInfo, AllocatableValue result, int addend) {
+        super(type);
         this.dataInfo = dataInfo;
         this.result = result;
+        this.addend = addend;
     }
 
     @Override
@@ -67,6 +78,11 @@ public final class AArch64CGlobalDataDirectLoadAddressOp extends AArch64LIRInstr
         } else {
             // Data: load its address
             masm.adrpAdd(resultRegister);
+        }
+        if (addend != 0) {
+            try (ScratchRegister scratch = masm.getScratchRegister()) {
+                masm.add(64, resultRegister, resultRegister, addend, scratch.getRegister());
+            }
         }
     }
 }

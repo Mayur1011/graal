@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -215,38 +215,40 @@ final class ProcessIsolateThreadSupport {
             try (SocketChannel s = local.accept()) {
                 String peerAddress = readConnectRequest(s);
                 peer = UnixDomainSocketAddress.of(peerAddress);
+                listenThread = Thread.currentThread();
+                state = State.CONNECTED;
+                return true;
             } catch (CloseException ce) {
                 handleClose();
                 throw ce;
             }
         } else {
             // isolate subprocess
+            listenThread = Thread.currentThread();
+            state = State.CONNECTED;
+            installParentProcessWatchDog();
             try (SocketChannel s = SocketChannel.open(peer)) {
                 writeConnectRequest(s, getLocalAddress().toString());
+                return state == State.CONNECTED;
+            } catch (Throwable t) {
+                state = State.CLOSED;
+                throw t;
             }
-            installParentProcessWatchDog();
         }
-        listenThread = Thread.currentThread();
-        state = State.CONNECTED;
-        return true;
     }
 
-    private void installParentProcessWatchDog() {
+    private static void installParentProcessWatchDog() {
         Optional<ProcessHandle> parentOpt = ProcessHandle.current().parent();
         if (parentOpt.isPresent()) {
             ProcessHandle parent = parentOpt.get();
             CompletableFuture<ProcessHandle> onExit = parent.onExit();
-            onExit.thenRun(() -> {
-                try {
-                    handleClose();
-                } catch (IOException ioe) {
-                    /*
-                     * Exiting because the parent process has already terminated. At this point,
-                     * exceptions are no longer relevant, we only need to terminate the child
-                     * process, which has been re-parented to init (systemd).
-                     */
-                }
-            });
+            /*
+             * Process isolates are owned by their parent host process. Once the host exits, the
+             * isolate subprocess has been re-parented to init (systemd) and cannot make further
+             * progress through the native bridge. Do not try a graceful close here: worker threads
+             * may be executing guest code and can block indefinitely during cancellation.
+             */
+            onExit.thenRun(() -> Runtime.getRuntime().halt(0));
         }
     }
 

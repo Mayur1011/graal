@@ -425,6 +425,20 @@ public final class Engine implements AutoCloseable {
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * @since 25.3
+     */
+    @Override
+    public String toString() {
+        try {
+            return dispatch.toString(receiver, System.identityHashCode(this), null);
+        } finally {
+            Reference.reachabilityFence(creatorEngine);
+        }
+    }
+
+    /**
      * Creates a new engine instance with default configuration. This method is a shortcut for
      * {@link #newBuilder(String...) newBuilder().build()}.
      *
@@ -538,6 +552,22 @@ public final class Engine implements AutoCloseable {
         return getImpl().copyResources(targetFolder, components);
     }
 
+    /**
+     * Returns whether the current runtime supports optimizing guest language execution.
+     * <p>
+     * When this method returns {@code false}, guest code runs on the fallback runtime unless a
+     * polyglot isolate is used. Embedders can use this method to decide whether to enable isolate
+     * execution, for example with
+     * {@code Context.newBuilder().spawnIsolate(!Engine.supportsCompilation())}.
+     *
+     * @return {@code true} if guest language execution can be optimized at run time;
+     *         {@code false} if only the fallback runtime is available
+     * @since 25.1
+     */
+    public static boolean supportsCompilation() {
+        return getImpl().supportsCompilation();
+    }
+
     static AbstractPolyglotImpl getImpl() {
         try {
             return ImplHolder.IMPL;
@@ -625,6 +655,7 @@ public final class Engine implements AutoCloseable {
         private Object customLogHandler;
         private String[] permittedLanguages;
         private SandboxPolicy sandboxPolicy;
+        private Boolean spawnIsolate;
 
         Builder(String[] permittedLanguages) {
             sandboxPolicy = SandboxPolicy.TRUSTED;
@@ -910,6 +941,83 @@ public final class Engine implements AutoCloseable {
         }
 
         /**
+         * Specifies whether this engine should run guest languages in a polyglot isolate.
+         * <p>
+         * A polyglot isolate executes guest languages with an isolated heap. This can be useful for
+         * sandboxing and for running guest languages as native images when the current runtime does
+         * not support optimizing guest language execution. If enabled, all languages permitted by
+         * this engine are run in the isolate. If {@code value} is {@code true}, this builder must
+         * have been created with an explicit permitted languages list, for example using
+         * {@code Engine.newBuilder("js")}.
+         * <p>
+         * This setting is equivalent to setting the {@code engine.SpawnIsolate} engine option to
+         * {@code true} or {@code false}. If both are set to conflicting values, {@link #build()}
+         * fails with {@link IllegalArgumentException}.
+         *
+         * @param value {@code true} to spawn a polyglot isolate
+         * @see Context.Builder#spawnIsolate(boolean)
+         * @see Engine#supportsCompilation()
+         * @see <a href="https://www.graalvm.org/latest/reference-manual/embed-languages/#polyglot-isolates">
+         *      Polyglot Isolates documentation</a>
+         * @since 25.1
+         */
+        public Builder spawnIsolate(boolean value) {
+            spawnIsolate = value;
+            return this;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @since 25.3
+         */
+        @Override
+        public String toString() {
+            StringBuilder b = new StringBuilder("Engine.newBuilder(");
+            String separator = "";
+            for (String language : permittedLanguages) {
+                b.append(separator);
+                b.append(ToStringSupport.quote(language));
+                separator = ", ";
+            }
+            b.append(')');
+            if (out != System.out) {
+                ToStringSupport.appendCall(b, "out", out);
+            }
+            if (err != System.err) {
+                ToStringSupport.appendCall(b, "err", err);
+            }
+            if (in != null) {
+                ToStringSupport.appendCall(b, "in", in);
+            }
+            for (Map.Entry<String, String> entry : options.entrySet()) {
+                ToStringSupport.appendCall(b, "option", ToStringSupport.quote(entry.getKey()), ToStringSupport.quote(entry.getValue()));
+            }
+            if (allowExperimentalOptions) {
+                ToStringSupport.appendCall(b, "allowExperimentalOptions", true);
+            }
+            if (!useSystemProperties) {
+                ToStringSupport.appendCall(b, "useSystemProperties", false);
+            }
+            if (sandboxPolicy != SandboxPolicy.TRUSTED) {
+                ToStringSupport.appendCall(b, "sandbox", "SandboxPolicy." + sandboxPolicy);
+            }
+            if (messageTransport != null) {
+                ToStringSupport.appendCall(b, "serverTransport", messageTransport);
+            }
+            if (exceptionHandler != null) {
+                ToStringSupport.appendCall(b, "exceptionHandler", exceptionHandler);
+            }
+            if (customLogHandler != null) {
+                ToStringSupport.appendCall(b, "logHandler", customLogHandler);
+            }
+            if (spawnIsolate != null) {
+                ToStringSupport.appendCall(b, "spawnIsolate", spawnIsolate);
+            }
+            return b.toString();
+        }
+
+        /**
          * Creates a new engine instance from the configuration provided in the builder. The same
          * engine builder can be used to create multiple engine instances.
          *
@@ -933,7 +1041,7 @@ public final class Engine implements AutoCloseable {
             Map<String, String> systemPropertiesOptions = readOptionsFromSystemProperties();
             boolean useAllowExperimentalOptions = allowExperimentalOptions || readAllowExperimentalOptionsFromSystemProperties();
             Engine engine = polyglot.buildEngine(permittedLanguages, sandboxPolicy, out, err, useIn, options, systemPropertiesOptions, useSystemProperties, useAllowExperimentalOptions,
-                            boundEngine, messageTransport, logHandler, polyglot.createHostLanguage(polyglot.createHostAccess()), false, true, null, exceptionHandler);
+                            boundEngine, spawnIsolate, messageTransport, logHandler, polyglot.createHostLanguage(polyglot.createHostAccess()), false, true, null, exceptionHandler);
             return engine;
         }
 
@@ -1018,7 +1126,7 @@ public final class Engine implements AutoCloseable {
             Objects.requireNonNull(fix);
             String spawnIsolateHelp;
             if (sandboxPolicy.isStricterOrEqual(SandboxPolicy.ISOLATED)) {
-                spawnIsolateHelp = " If you switch to a less strict sandbox policy you can still spawn an isolate with an isolated heap using Builder.option(\"engine.SpawnIsolate\",\"true\").";
+                spawnIsolateHelp = " If you switch to a less strict sandbox policy you can still spawn an isolate with an isolated heap using Builder.spawnIsolate(true).";
             } else {
                 spawnIsolateHelp = "";
             }
@@ -1897,7 +2005,7 @@ public final class Engine implements AutoCloseable {
         @Override
         public Engine buildEngine(String[] permittedLanguages, SandboxPolicy sandboxPolicy, OutputStream out, OutputStream err, InputStream in,
                         Map<String, String> options, Map<String, String> systemPropertiesOptions, boolean useSystemProperties,
-                        boolean allowExperimentalOptions, boolean boundEngine, MessageTransport messageInterceptor, Object logHandler, Object hostLanguage,
+                        boolean allowExperimentalOptions, boolean boundEngine, Boolean useIsolatedEngine, MessageTransport messageInterceptor, Object logHandler, Object hostLanguage,
                         boolean hostLanguageOnly, boolean registerInActiveEngines, Object polyglotHostService, Consumer<PolyglotException> exceptionHandler) {
             throw noPolyglotImplementationFound();
         }
@@ -1966,7 +2074,7 @@ public final class Engine implements AutoCloseable {
         }
 
         @Override
-        public FileSystem allowInternalResourceAccess(FileSystem fileSystem) {
+        public FileSystem allowInternalResourceAccess(FileSystem fileSystem, boolean readOnlyResources) {
             throw noPolyglotImplementationFound();
         }
 
@@ -2041,6 +2149,11 @@ public final class Engine implements AutoCloseable {
         @Override
         public String getTruffleVersion() {
             return getPolyglotVersion().toString();
+        }
+
+        @Override
+        public boolean supportsCompilation() {
+            return false;
         }
     }
 
@@ -2133,5 +2246,84 @@ public final class Engine implements AutoCloseable {
          * @since 25.1
          */
         boolean shouldCancel();
+    }
+
+    static final class ToStringSupport {
+
+        private ToStringSupport() {
+        }
+
+        static void appendCall(StringBuilder b, String methodName, Object... arguments) {
+            b.append('\n');
+            b.append("  .");
+            b.append(methodName);
+            b.append('(');
+            String separator = "";
+            for (Object argument : arguments) {
+                b.append(separator);
+                b.append(String.valueOf(argument));
+                separator = ", ";
+            }
+            b.append(')');
+        }
+
+        static String quote(String value) {
+            if (value == null) {
+                return "null";
+            }
+            StringBuilder b = new StringBuilder(value.length() + 2);
+            b.append('"');
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                switch (c) {
+                    case '\\':
+                        b.append("\\\\");
+                        break;
+                    case '"':
+                        b.append("\\\"");
+                        break;
+                    case '\n':
+                        b.append("\\n");
+                        break;
+                    case '\r':
+                        b.append("\\r");
+                        break;
+                    case '\t':
+                        b.append("\\t");
+                        break;
+                    case '\b':
+                        b.append("\\b");
+                        break;
+                    case '\f':
+                        b.append("\\f");
+                        break;
+                    default:
+                        if (Character.isISOControl(c)) {
+                            b.append(String.format("\\u%04x", (int) c));
+                        } else {
+                            b.append(c);
+                        }
+                }
+            }
+            b.append('"');
+            return b.toString();
+        }
+
+        static String stringArray(String[] values) {
+            StringBuilder b = new StringBuilder("new String[]{");
+            String separator = "";
+            for (String value : values) {
+                b.append(separator);
+                b.append(quote(value));
+                separator = ", ";
+            }
+            b.append('}');
+            return b.toString();
+        }
+
+        static String classLiteral(Class<?> type) {
+            String name = type.getSimpleName();
+            return (name.isEmpty() ? type.getName() : name) + ".class";
+        }
     }
 }

@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.heap.dump;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 
 import java.io.IOException;
 
@@ -34,25 +34,25 @@ import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.c.struct.RawField;
 import org.graalvm.nativeimage.c.struct.RawStructure;
 import org.graalvm.nativeimage.c.struct.SizeOf;
-import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.core.VMInspectionOptions;
-import com.oracle.svm.core.c.struct.PinnedObjectField;
+import com.oracle.svm.guest.staging.core.c.struct.PinnedObjectField;
 import com.oracle.svm.core.heap.GCCause;
 import com.oracle.svm.core.heap.Heap;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.heap.dump.HeapDumpWriter.HeapDumpError;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.locks.VMMutex;
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.memory.UntrackedNullableNativeMemory;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.guest.staging.core.memory.UntrackedNullableNativeMemory;
 import com.oracle.svm.core.os.RawFileOperationSupport;
 import com.oracle.svm.core.os.RawFileOperationSupport.FileCreationMode;
 import com.oracle.svm.core.os.RawFileOperationSupport.RawFileDescriptor;
+import com.oracle.svm.core.os.RawFileOperationSupport.RawFilePath;
 import com.oracle.svm.core.thread.NativeVMOperation;
 import com.oracle.svm.core.thread.NativeVMOperationData;
 import com.oracle.svm.core.thread.VMOperation;
@@ -60,7 +60,7 @@ import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
-import com.oracle.svm.core.util.TimeUtils;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.shared.util.VMError;
 
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
@@ -69,7 +69,8 @@ public class HeapDumpSupportImpl extends HeapDumping {
     private final HeapDumpOperation heapDumpOperation;
     private final VMMutex outOfMemoryHeapDumpMutex = new VMMutex("outOfMemoryHeapDump");
 
-    private CCharPointer outOfMemoryHeapDumpPath;
+    private RawFilePath outOfMemoryHeapDumpPath;
+    private String outOfMemoryHeapDumpPathText;
     private boolean outOfMemoryHeapDumpAttempted;
 
     @Platforms(Platform.HOSTED_ONLY.class)
@@ -83,13 +84,15 @@ public class HeapDumpSupportImpl extends HeapDumping {
         assert outOfMemoryHeapDumpPath.isNull();
         String defaultFilename = getDefaultHeapDumpFilename("OOME");
         String heapDumpPath = getHeapDumpPath(defaultFilename);
-        outOfMemoryHeapDumpPath = getFileSupport().allocateCPath(heapDumpPath);
+        outOfMemoryHeapDumpPathText = heapDumpPath;
+        outOfMemoryHeapDumpPath = getFileSupport().allocatePath(heapDumpPath);
     }
 
     @Override
     public void teardownDumpHeapOnOutOfMemoryError() {
         UntrackedNullableNativeMemory.free(outOfMemoryHeapDumpPath);
         outOfMemoryHeapDumpPath = Word.nullPointer();
+        outOfMemoryHeapDumpPathText = null;
     }
 
     @Override
@@ -112,7 +115,7 @@ public class HeapDumpSupportImpl extends HeapDumping {
     }
 
     private void dumpHeapOnOutOfMemoryError0() {
-        CCharPointer path = outOfMemoryHeapDumpPath;
+        RawFilePath path = outOfMemoryHeapDumpPath;
         if (path.isNull()) {
             Log.log().string("Out-of-memory heap dumping failed because the heap dump file path could not be allocated.").newline();
             return;
@@ -120,12 +123,12 @@ public class HeapDumpSupportImpl extends HeapDumping {
 
         RawFileDescriptor fd = getFileSupport().create(path, FileCreationMode.CREATE_OR_REPLACE, RawFileOperationSupport.FileAccessMode.READ_WRITE);
         if (!getFileSupport().isValid(fd)) {
-            Log.log().string("Out-of-memory heap dumping failed because the heap dump file could not be created: ").string(path).newline();
+            Log.log().string("Out-of-memory heap dumping failed because the heap dump file could not be created: ").string(outOfMemoryHeapDumpPathText).newline();
             return;
         }
 
         try {
-            Log.log().string("Dumping heap to ").string(path).string(" ...").newline();
+            Log.log().string("Dumping heap to ").string(outOfMemoryHeapDumpPathText).string(" ...").newline();
             long start = System.nanoTime();
             HeapDumpError error = dumpHeap(fd, false);
             if (error == null) {
@@ -215,7 +218,7 @@ public class HeapDumpSupportImpl extends HeapDumping {
         protected void operate(NativeVMOperationData d) {
             HeapDumpVMOperationData data = (HeapDumpVMOperationData) d;
             if (data.getGCBefore()) {
-                Heap.getHeap().getGC().collectCompletely(GCCause.HeapDump);
+                Heap.getHeap().getGC().collect(GCCause.HeapDump);
             }
             dumpHeap(data);
         }

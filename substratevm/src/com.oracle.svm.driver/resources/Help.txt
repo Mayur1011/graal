@@ -43,6 +43,13 @@ where options include:
 ||--diagnostics-mode||enable diagnostics output: class initialization, substitutions, etc.|Flag||false|
     --enable-preview      allow classes to depend on preview features of this release
 ||--enable-preview||allow classes to depend on preview features of this release|Flag||false|
+    --sun-misc-unsafe-memory-access=<value>
+                          allow or deny usage of unsupported API sun.misc.Unsafe
+                          <value> is one of "allow", "warn", "debug", or "deny".
+                          The default value is "warn".
+||--sun-misc-unsafe-memory-access|=<value>|allow or deny usage of unsupported API sun.misc.Unsafe|String||false|
+||> <value> is one of "allow", "warn", "debug", or "deny".|
+||> The default value is "warn".|
     --verbose             enable verbose output
 ||--verbose||enable verbose output|Flag||false|
     --version             print product version and exit

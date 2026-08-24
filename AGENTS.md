@@ -7,9 +7,13 @@
 ## Build & Quality
 - Run `mx` from the relevant suite directory. Default to the `vm` suite when no better target is obvious, for example `mx -p vm build`.
 - Common commands: `mx build`, `mx clean`, `mx unittest`, `mx help`, and `mx help <command>`.
+- Unless explicitly asked otherwise, run `mx build` with `--build-logs=silent`.
+- Never run multiple `mx build` or `mx checkstyle` commands concurrently in the same workspace. They can race on shared `mx build` outputs and produce misleading failures or corrupt intermediate artifacts.
 
 ## Docs
 - Documentation sources live under `docs/`. Update the matching page for user-facing changes.
+- When working on documentation or editing Markdown files, consult `docs/AGENTS.md` for GraalVM documentation terminology, style, and Markdown conventions.
+- Apply `docs/AGENTS.md` to new or modified content only; do not refactor existing documentation in bulk just to match it.
 
 ## Before Submitting
 - [ ] Ensure formatting and checkstyle pass (`mx checkstyle`).

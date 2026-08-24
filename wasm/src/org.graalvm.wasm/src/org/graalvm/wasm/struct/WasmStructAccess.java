@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,38 @@
  */
 package org.graalvm.wasm.struct;
 
+import org.graalvm.wasm.WasmLanguage;
+import org.graalvm.wasm.constants.Mutability;
+import org.graalvm.wasm.types.FieldType;
+import org.graalvm.wasm.types.StructType;
+
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.staticobject.DefaultStaticProperty;
 import com.oracle.truffle.api.staticobject.StaticProperty;
 import com.oracle.truffle.api.staticobject.StaticShape;
 
 public record WasmStructAccess(StaticShape<WasmStructFactory> shape,
                 @CompilerDirectives.CompilationFinal(dimensions = 1) StaticProperty[] properties) {
+
+    public static WasmStructAccess create(StructType structType, WasmStructAccess superTypeAccess, WasmLanguage language) {
+        StaticShape.Builder shapeBuilder = StaticShape.newBuilder(language).safetyChecks(false);
+        FieldType[] fieldTypes = structType.fieldTypes();
+        StaticProperty[] properties = new StaticProperty[fieldTypes.length];
+        int superFieldCount = superTypeAccess != null ? superTypeAccess.properties().length : 0;
+        for (int i = 0; i < fieldTypes.length; i++) {
+            if (i < superFieldCount) {
+                properties[i] = superTypeAccess.properties()[i];
+            } else {
+                properties[i] = new DefaultStaticProperty(Integer.toString(i));
+                shapeBuilder.property(properties[i], fieldTypes[i].javaClass(), fieldTypes[i].mutability() == Mutability.CONSTANT);
+            }
+        }
+        StaticShape<WasmStructFactory> shape;
+        if (superTypeAccess != null) {
+            shape = shapeBuilder.build(superTypeAccess.shape());
+        } else {
+            shape = shapeBuilder.build(WasmStruct.class, WasmStructFactory.class);
+        }
+        return new WasmStructAccess(shape, properties);
+    }
 }

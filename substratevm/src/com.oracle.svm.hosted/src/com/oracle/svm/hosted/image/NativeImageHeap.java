@@ -70,8 +70,8 @@ import com.oracle.svm.core.hub.DynamicHubCompanion;
 import com.oracle.svm.core.hub.DynamicHubSupport;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.image.ImageHeap;
-import com.oracle.svm.core.image.ImageHeapLayoutInfo;
 import com.oracle.svm.core.image.ImageHeapLayouter;
+import com.oracle.svm.core.image.ImageHeapLayoutInfo;
 import com.oracle.svm.core.image.ImageHeapObject;
 import com.oracle.svm.core.image.ImageHeapPartition;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
@@ -247,14 +247,16 @@ public final class NativeImageHeap implements ImageHeap {
         return streamObjects().distinct().count() != getObjectCount();
     }
 
+    /**
+     * Determines how references are represented in the serialized image heap. Normal native
+     * images use a nonzero base and can store heap-base-relative offsets directly. Web Image uses
+     * a zero-base encoding and places its heap at a nonzero address in linear memory, so
+     * {@link NativeImageHeapWriter} must instead emit relocations that Web Image resolves after
+     * choosing the heap address.
+     */
     @Fold
-    static boolean useHeapBase() {
-        return SubstrateOptions.SpawnIsolates.getValue() && ImageSingletons.lookup(CompressEncoding.class).hasBase();
-    }
-
-    @Fold
-    static boolean spawnIsolates() {
-        return SubstrateOptions.SpawnIsolates.getValue() && useHeapBase();
+    static boolean usesHeapBase() {
+        return ImageSingletons.lookup(CompressEncoding.class).hasBase();
     }
 
     public void addInitialObjects() {
@@ -559,7 +561,7 @@ public final class NativeImageHeap implements ImageHeap {
         boolean immutable = immutableFromParent || isKnownImmutableConstant(constant);
         boolean written = false;
         boolean references = false;
-        boolean relocatable = false; /* always false when !spawnIsolates() */
+        boolean relocatable = false;
         boolean patched = false; /* always false when !layeredBuild */
 
         if (!type.isInstantiated()) {
@@ -617,15 +619,13 @@ public final class NativeImageHeap implements ImageHeap {
                 }
 
                 /*
-                 * The hybrid array is written within the hybrid object. If the hybrid object
-                 * declares that they can never be duplicated, i.e. written as a separate object, we
-                 * ensure that they are never duplicated. We use the blacklist to check that.
+                 * The hybrid array is written within the hybrid object, so ensure that it is not
+                 * also written as a separate object.
                  */
-                boolean shouldBlacklist = !HybridLayout.canHybridFieldsBeDuplicated(clazz);
                 HostedField hybridArrayField = hybridLayout.getArrayField();
                 hybridArray = readInlinedField(hybridArrayField, constant);
                 ignoredFields = Set.of(hybridArrayField);
-                if (hybridArray != null && shouldBlacklist) {
+                if (hybridArray != null) {
                     blacklist.add(hybridArray);
                     written = true;
                 }
@@ -650,7 +650,7 @@ public final class NativeImageHeap implements ImageHeap {
                 for (HostedField field : clazz.getInstanceFields(true)) {
                     boolean fieldPatchable = false;
                     if (layeredFieldValueTransformerSupport != null) {
-                        fieldPatchable = layeredFieldValueTransformerSupport.finalizeFieldValue(field, constant);
+                        fieldPatchable = layeredFieldValueTransformerSupport.isFieldValueUpdatable(field, constant);
                     }
                     boolean fieldRelocatable = false;
                     /*
@@ -669,7 +669,7 @@ public final class NativeImageHeap implements ImageHeap {
                             assert field.hasLocation();
                             JavaConstant fieldValueConstant = hConstantReflection.readConstantField(field, constant);
                             if (fieldValueConstant.getJavaKind() == JavaKind.Object) {
-                                if (spawnIsolates()) {
+                                if (usesHeapBase()) {
                                     fieldRelocatable = isRelocatableConstant(fieldValueConstant);
                                 }
                                 if (fieldValueConstant instanceof ImageHeapRelocatableConstant) {
@@ -883,7 +883,7 @@ public final class NativeImageHeap implements ImageHeap {
         for (int idx = 0; idx < array.length; idx++) {
             Object element = array[idx];
             Object value = aUniverse.replaceObject(element);
-            if (spawnIsolates()) {
+            if (usesHeapBase()) {
                 relocatable = relocatable || isRelocatableValue(value);
             }
             Object elementReason = reasonSupport.arrayAccess(reason, idx);
@@ -902,7 +902,7 @@ public final class NativeImageHeap implements ImageHeap {
         for (int idx = 0; idx < length; idx++) {
             JavaConstant value = hConstantReflection.readArrayElement(array, idx);
             /* Object replacement is done as part as constant refection. */
-            if (spawnIsolates()) {
+            if (usesHeapBase()) {
                 relocatable = relocatable || isRelocatableConstant(value);
             }
             if (value instanceof ImageHeapRelocatableConstant) {

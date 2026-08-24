@@ -30,7 +30,6 @@ import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoDecoder;
@@ -42,10 +41,13 @@ import com.oracle.svm.core.code.UntetheredCodeInfo;
 import com.oracle.svm.core.deopt.DeoptimizationSupport;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
 import com.oracle.svm.core.deopt.VirtualFrame;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.interpreter.InterpreterSupport;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.shared.Uninterruptible;
+
+import jdk.vm.ci.code.BytecodeFrame;
 
 public class ThreadStackPrinter {
     /**
@@ -57,10 +59,11 @@ public class ThreadStackPrinter {
      * <p>
      * See {@code InterpreterFeature.checkPreAllocatedValueInfos} for code that checks that this
      * number is sufficiently large. Note that different optimization level might have different
-     * requirements. At the time of writing, {@code -O3} is the most demanding, requiring 29 value
-     * infos, while other optimization levels only requires 25.
+     * requirements. At the time of writing, preserving the threaded interpreter handler arguments
+     * requires 31 value infos. If {@code InterpreterFeature.checkPreAllocatedValueInfos} fails
+     * again, this number needs to be updated accordingly.
      */
-    public static final int NUM_INTERPRETER_PREALLOCATED_VALUE_INFO = 30;
+    public static final int NUM_INTERPRETER_PREALLOCATED_VALUE_INFO = 31;
 
     @Uninterruptible(reason = "Prevent deoptimization of stack frames while in this method.")
     public static boolean printStacktrace(IsolateThread thread, Pointer initialSP, CodePointer initialIP, StackFramePrintVisitor printVisitor, Log log) {
@@ -83,7 +86,7 @@ public class ThreadStackPrinter {
 
         JavaStackWalk walk = StackValue.get(JavaStackWalker.sizeOfJavaStackWalk());
         JavaStackWalker.initialize(walk, thread, sp, ip);
-        return JavaStackWalker.doWalk(walk, thread, printVisitor, log);
+        return JavaStackWalker.doWalkThread(walk, thread, printVisitor, log);
     }
 
     @Uninterruptible(reason = "IP is not within Java code, so there is no risk that it gets invalidated.", calleeMustBe = false)
@@ -109,6 +112,8 @@ public class ThreadStackPrinter {
         private static final int MAX_STACK_FRAMES_PER_THREAD_TO_PRINT = 100_000;
 
         private final CodeInfoDecoder.FrameInfoCursor frameInfoCursor;
+        /** BCI carried from a threaded handler frame to its corresponding interpreter root. */
+        private int threadedHandlerBCI;
         private int invocationCount;
         private int printedFrames;
         private Pointer expectedSP;
@@ -123,6 +128,7 @@ public class ThreadStackPrinter {
             this.invocationCount = invocationCount;
             this.printedFrames = 0;
             this.expectedSP = Word.nullPointer();
+            this.threadedHandlerBCI = BytecodeFrame.UNKNOWN_BCI;
             return this;
         }
 
@@ -288,8 +294,16 @@ public class ThreadStackPrinter {
                 log.string("[").string(runtimeMethodInfoName).string("] ");
             }
             frameInfo.log(log);
-            if (InterpreterSupport.isEnabled() && invocationCount == 1 && InterpreterSupport.singleton().isInterpreterRoot(frameInfo)) {
-                InterpreterSupport.singleton().logInterpreterFrame(log, frameInfo, sp);
+            if (InterpreterSupport.isEnabled() && invocationCount == 1) {
+                InterpreterSupport interpreterSupport = InterpreterSupport.singleton();
+                int currentThreadedHandlerBCI = interpreterSupport.getThreadedHandlerBCIForCrashLog(frameInfo, sp);
+                if (currentThreadedHandlerBCI != BytecodeFrame.UNKNOWN_BCI) {
+                    threadedHandlerBCI = currentThreadedHandlerBCI;
+                }
+                if (interpreterSupport.isInterpreterRoot(frameInfo)) {
+                    interpreterSupport.logInterpreterFrame(log, frameInfo, sp, threadedHandlerBCI);
+                    threadedHandlerBCI = BytecodeFrame.UNKNOWN_BCI;
+                }
             }
         }
 

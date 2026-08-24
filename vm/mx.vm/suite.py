@@ -1,8 +1,8 @@
 suite = {
     "name": "vm",
-    "version" : "25.1.0",
     "mxversion": "7.67.0",
-    "release" : False,
+    "version_from" : "sdk",
+    "release_from" : "sdk",
     "groupId" : "org.graalvm",
 
     "url" : "http://www.graalvm.org/",
@@ -34,7 +34,7 @@ suite = {
                 "name": "graal-nodejs",
                 "subdir": True,
                 "dynamic": True,
-                "version": "d4e6c4172e839014bcd3cc68e0a30957c8e71e9b",
+                "version": "a669535616e2f9668d32314c329c33598528770a",
                 "urls" : [
                     {"url" : "https://github.com/graalvm/graaljs.git", "kind" : "git"},
                 ]
@@ -43,22 +43,14 @@ suite = {
                 "name": "graal-js",
                 "subdir": True,
                 "dynamic": True,
-                "version": "d4e6c4172e839014bcd3cc68e0a30957c8e71e9b",
+                "version": "a669535616e2f9668d32314c329c33598528770a",
                 "urls": [
                     {"url": "https://github.com/graalvm/graaljs.git", "kind" : "git"},
                 ]
             },
             {
-                "name": "fastr",
-                "version": "6e5e07a23c5dce133a07701d6c49afcfd9cee86c",
-                "dynamic": True,
-                "urls": [
-                    {"url": "https://github.com/oracle/fastr.git", "kind": "git"},
-                ]
-            },
-            {
                 "name": "graalpython",
-                "version": "c63af28d14c4e934a9b381ec5ac7e1e61bcc9124",
+                "version": "9820abaee77e8249e27a0021db0cb36ef0a5eeb1",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/graalpython.git", "kind": "git"},
@@ -66,7 +58,7 @@ suite = {
             },
             {
                 "name": "polybenchmarks",
-                "version": "a04259d72ab94b6245d3ce775833c8e8a3af42fa",
+                "version": "692ba4ccdb4ca317525ea342940cf96c45806c6e",
                 "dynamic": True,
                 "urls": [
                     {"url": "https://github.com/graalvm/polybenchmarks.git", "kind": "git"},
@@ -76,7 +68,7 @@ suite = {
             {
                 "name": "barista",
                 "subdir": False,
-                "version": "0.6.5",
+                "version": "0.7.9",
                 "foreign": True, # barista is not an mx suite
                 "dynamic": True,
                 "urls": [

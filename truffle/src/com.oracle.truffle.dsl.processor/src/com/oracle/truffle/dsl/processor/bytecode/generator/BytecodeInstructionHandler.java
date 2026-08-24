@@ -154,6 +154,9 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
         }
         parent.initializeInstructionHandler(this, returnType, "handle" + firstLetterUpperCase(instruction.getInternalName()));
+        if (handlerLayout.isTailCall() && handlerKind == HandlerKind.BRANCH_BACKWARD) {
+            getThrownTypes().add(parent.parent.abstractBytecodeNode.branchBackwardReturnException.asType());
+        }
 
         if (instruction.isInliningCutoff()) {
             this.addAnnotationMirror(new CodeAnnotationMirror(types.HostCompilerDirectives_InliningCutoff));
@@ -387,6 +390,11 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
         b.end();
     }
 
+    private void declareRelativeBytecodeIndex(CodeTreeBuilder b, String indexName, String offsetName, InstructionImmediate immediate) {
+        b.declaration(type(byte.class), offsetName, BytecodeRootNodeElement.readImmediate("bc", "bci", immediate));
+        b.declaration(type(int.class), indexName, BytecodeRootNodeElement.decodeRelativeBytecodeIndex("(int) bci", offsetName));
+    }
+
     private void emitBranchFalseCondition(CodeTreeBuilder b) {
         // custom return and stack effect
         if (getTier().isUncached()) {
@@ -544,7 +552,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 case NEXT:
                 case BRANCH_FALSE:
                 case BRANCH:
-                    boolean bciReturn = ElementUtils.typeEquals(type(int.class), this.getReturnType());
+                    boolean bciReturn = !ElementUtils.typeEquals(type(void.class), this.getReturnType());
                     if (bciReturn) {
                         b.startAssign("bci");
                         emitCallHandler(b);
@@ -576,6 +584,10 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 return emitCustomShortCircuit(b);
             case LOAD_ARGUMENT:
                 return emitLoadArgument(b, resultLocalName, mode);
+            case LOAD_STACKVALUE:
+                return emitLoadStackValue(b, resultLocalName);
+            case STORE_STACKVALUE:
+                return emitStoreStackValue(b);
             case BRANCH:
                 b.statement("return " + BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.getImmediate(ImmediateKind.BYTECODE_INDEX)));
                 return null;
@@ -623,8 +635,9 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             case TAG_ENTER:
                 return emitTagEnter(b);
             case TAG_YIELD:
-            case TAG_YIELD_NULL:
                 return emitTagYield(b);
+            case TAG_YIELD_NULL:
+                return emitTagYieldNull(b);
             case TAG_LEAVE:
                 return emitTagLeave(b, mode);
             case TAG_LEAVE_VOID:
@@ -992,8 +1005,8 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
         if (mode.isFastPath()) {
             b.startDeclaration(instruction.signature.returnType(), resultLocalName).string(value.localName()).end();
         } else {
-            InstructionImmediate operand0 = instruction.getImmediates(ImmediateKind.BYTECODE_INDEX).get(0);
-            InstructionImmediate operand1 = instruction.getImmediates(ImmediateKind.BYTECODE_INDEX).get(1);
+            InstructionImmediate operand0 = instruction.getImmediates(ImmediateKind.RELATIVE_BYTECODE_INDEX).get(0);
+            InstructionImmediate operand1 = instruction.getImmediates(ImmediateKind.RELATIVE_BYTECODE_INDEX).get(1);
 
             b.declaration(type(short.class), "newInstruction");
             b.declaration(type(short.class), "newOperand");
@@ -1002,11 +1015,15 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.declaration(type(int.class), "otherOperandIndex");
 
             b.startIf().string(condition.localName()).end().startBlock();
-            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand0)).end();
-            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand1)).end();
+            b.declaration(type(byte.class), "operandOffset", BytecodeRootNodeElement.readImmediate("bc", "bci", operand0));
+            b.declaration(type(byte.class), "otherOperandOffset", BytecodeRootNodeElement.readImmediate("bc", "bci", operand1));
+            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.decodeRelativeBytecodeIndex("(int) bci", "operandOffset")).end();
+            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.decodeRelativeBytecodeIndex("(int) bci", "otherOperandOffset")).end();
             b.end().startElseBlock();
-            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand1)).end();
-            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", operand0)).end();
+            b.declaration(type(byte.class), "operandOffset", BytecodeRootNodeElement.readImmediate("bc", "bci", operand1));
+            b.declaration(type(byte.class), "otherOperandOffset", BytecodeRootNodeElement.readImmediate("bc", "bci", operand0));
+            b.startAssign("operandIndex").tree(BytecodeRootNodeElement.decodeRelativeBytecodeIndex("(int) bci", "operandOffset")).end();
+            b.startAssign("otherOperandIndex").tree(BytecodeRootNodeElement.decodeRelativeBytecodeIndex("(int) bci", "otherOperandOffset")).end();
             b.end();
 
             b.startIf().string("operandIndex != -1 && otherOperandIndex != -1").end().startBlock();
@@ -1041,6 +1058,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 b.end();
                 b.caseDefault();
                 b.startCaseBlock();
+                b.statement("newOperand = undoQuickening(operand)");
                 b.statement("newOtherOperand = undoQuickening(otherOperand)");
                 b.startAssign("newInstruction").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
                 b.statement("break");
@@ -1051,7 +1069,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             }
 
             b.startElseBlock(elseIf);
-            b.statement("newOperand = operand");
+            b.statement("newOperand = undoQuickening(operand)");
             b.statement("newOtherOperand = undoQuickening(otherOperand)");
             b.startAssign("newInstruction").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
             b.end();
@@ -1522,6 +1540,30 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
         return type(Throwable.class);
     }
 
+    private void emitOutgoingValue(CodeTreeBuilder b, String value) {
+        if (model().interceptOutgoingValue == null) {
+            b.string(value);
+        } else {
+            b.startCall("getRoot()", model().interceptOutgoingValue).string(value).end();
+        }
+    }
+
+    private TypeMirror emitLoadStackValue(CodeTreeBuilder b, String resultLocalName) {
+        b.startDeclaration(type(Object.class), resultLocalName);
+        BytecodeRootNodeElement.startGetFrameUnsafe(b, "frame", type(Object.class));
+        b.startGroup().string("sp - 1 - ").tree(BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.findImmediate(ImmediateKind.SHORT, "offset"))).end();
+        b.end(); // getFrameUnsafe
+        b.end(); // declaration
+        return type(Object.class);
+    }
+
+    private TypeMirror emitStoreStackValue(CodeTreeBuilder b) {
+        b.declaration(type(int.class), "offset", BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.findImmediate(ImmediateKind.SHORT, "offset")));
+        b.declaration(parent.getStackPointerType(), "targetIndex", "sp - 1 - offset");
+        b.statement(BytecodeRootNodeElement.setFrameObject("targetIndex", instruction.signature.singleDynamicOperand().localName()));
+        return null;
+    }
+
     private TypeMirror emitTagLeave(CodeTreeBuilder b, ExecutionMode mode) {
         Operand valueOperand = instruction.signature.singleDynamicOperand();
         if (mode.isFastPath()) {
@@ -1531,7 +1573,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end();
             b.startStatement().startCall("tagNode.findProbe().onReturnValue");
             b.string(parent.localFrame());
-            b.string(valueOperand.localName());
+            emitOutgoingValue(b, valueOperand.localName());
             b.end().end();
         } else { // slow-path
 
@@ -1550,9 +1592,13 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 }
             }
 
+            declareRelativeBytecodeIndex(b, "operandIndex", "operandOffset", instruction.getImmediate(ImmediateKind.RELATIVE_BYTECODE_INDEX));
+
             b.declaration(type(short.class), "newInstruction");
+
+            b.startIf().string("operandIndex != -1").end().startBlock();
+
             b.declaration(type(short.class), "newOperand");
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.getImmediate(ImmediateKind.BYTECODE_INDEX)));
             b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
 
             boolean elseIf = false;
@@ -1565,7 +1611,6 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
                 InstructionModel specialization = entry.getValue();
                 b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(specialization)).end();
-                b.end(); // else block
                 b.end(); // if block
             }
 
@@ -1575,6 +1620,13 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end();
 
             parent.parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
+
+            b.end(); // end if operandIndex != -1
+
+            b.startElseBlock();
+            b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
+            b.end();
+
             parent.parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
 
             InstructionImmediate imm = instruction.getImmediate(ImmediateKind.TAG_NODE);
@@ -1583,7 +1635,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end();
             b.startStatement().startCall("tagNode.findProbe().onReturnValue");
             b.string(parent.localFrame());
-            b.string(valueOperand.localName());
+            emitOutgoingValue(b, valueOperand.localName());
             b.end(2);
         }
         return null;
@@ -1600,13 +1652,26 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
         return null;
     }
 
-    private TypeMirror emitTagYield(CodeTreeBuilder b) throws AssertionError {
-        Operand operand = switch (instruction.kind) {
-            case TAG_YIELD -> instruction.signature.singleDynamicOperand();
-            case TAG_YIELD_NULL -> null;
-            default -> throw new AssertionError("unexpected tag yield instruction " + instruction);
-        };
+    private TypeMirror emitTagYield(CodeTreeBuilder b) {
+        InstructionImmediate imm = instruction.getImmediate(ImmediateKind.TAG_NODE);
+        b.startDeclaration(parent.parent.tagNode.asType(), "tagNode");
+        b.tree(BytecodeRootNodeElement.readTagNode(parent.parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", imm)));
+        b.end();
 
+        String resultStackOffset = readResultStackOffset(instruction);
+        String stackPointer = handlerLayout.isTailCall() ? VirtualStateElement.LOCAL_NAME + ".sp" : "sp";
+        b.startDeclaration(type(Object.class), "result_");
+        b.string(BytecodeRootNodeElement.uncheckedGetFrameObject(stackPointer + " - " + resultStackOffset));
+        b.end();
+
+        b.startStatement().startCall("tagNode.findProbe().onYield");
+        b.string(parent.localFrame());
+        emitOutgoingValue(b, "result_");
+        b.end(2);
+        return null;
+    }
+
+    private TypeMirror emitTagYieldNull(CodeTreeBuilder b) {
         InstructionImmediate imm = instruction.getImmediate(ImmediateKind.TAG_NODE);
         b.startDeclaration(parent.parent.tagNode.asType(), "tagNode");
         b.tree(BytecodeRootNodeElement.readTagNode(parent.parent.tagNode.asType(), BytecodeRootNodeElement.readImmediate("bc", "bci", imm)));
@@ -1614,11 +1679,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
         b.startStatement().startCall("tagNode.findProbe().onYield");
         b.string(parent.localFrame());
-        if (operand != null) {
-            b.string(operand.localName());
-        } else {
-            b.string("null");
-        }
+        b.string("null");
         b.end().end();
         return null;
     }
@@ -1689,9 +1750,8 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
             b.tree(GeneratorUtils.createTransferToInterpreterAndInvalidate());
             b.declaration(type(short.class), "newInstruction");
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.getImmediate(ImmediateKind.BYTECODE_INDEX)));
+            declareRelativeBytecodeIndex(b, "operandIndex", "operandOffset", instruction.getImmediate(ImmediateKind.RELATIVE_BYTECODE_INDEX));
 
-            // Pop may not have a valid child bci.
             b.startIf().string("operandIndex != -1").end().startBlock();
 
             b.declaration(type(short.class), "newOperand");
@@ -1862,6 +1922,9 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 b.startStatement();
                 emitCallSlowPath(b, name -> name, null);
                 b.end(); // statement
+                if (handlerLayout.isTailCall()) {
+                    parent.emitStackEffect(b, instruction.getStackEffect());
+                }
                 b.statement("return bci + ", String.valueOf(instruction.getInstructionLength()));
 
                 b.end(); // catch
@@ -1960,6 +2023,26 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
                 // If an UnexpectedResultException occurs, specialize to the generic
                 // version.
+                if (model().defaultLocalValue != null) {
+                    /*
+                     * Explicitly generalize the cached tag to object here. Normally, we can rely on
+                     * each store operation updating the cached tag, but when a default local value
+                     * is used, a load.local may observe an object without the cached tag ever being
+                     * set to object. To prevent entering this slow path again, we need to
+                     * generalize the tag so that all stores switch to object.
+                     */
+                    b.startIf().string("tag != ").staticReference(parent.parent.frameTagsElement.getObject()).end().startBlock();
+                    b.startStatement().startCall(bytecodeNode, "setCachedLocalTagInternal");
+                    if (materialized) {
+                        b.startCall(bytecodeNode, "getLocalTags").end();
+                    } else {
+                        b.string("localTags");
+                    }
+                    b.tree(localIndex);
+                    b.staticReference(parent.parent.frameTagsElement.getObject());
+                    b.end(2);
+                    b.end(); // if cached tag != Object
+                }
                 b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(genericTypeInstruction)).end();
                 parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "LoadLocal$" + genericTypeInstruction.getQuickeningName());
                 b.startStatement();
@@ -2144,9 +2227,11 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             }
             return null;
         } else { // slow-path
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.getImmediate(ImmediateKind.BYTECODE_INDEX)));
-            b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
+            declareRelativeBytecodeIndex(b, "operandIndex", "operandOffset", instruction.getImmediate(ImmediateKind.RELATIVE_BYTECODE_INDEX));
 
+            b.declaration(type(short.class), "newInstruction");
+
+            b.declaration(type(byte.class), "newTag");
             b.startDeclaration(type(byte.class), "oldTag");
             b.startCall(bytecodeNode, "getCachedLocalTagInternal");
             if (materialized) {
@@ -2158,9 +2243,11 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end(); // call
             b.end(); // declaration
 
-            b.declaration(type(short.class), "newInstruction");
+            b.startIf().string("operandIndex != -1").end().startBlock();
+
+            b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
+
             b.declaration(type(short.class), "newOperand");
-            b.declaration(type(byte.class), "newTag");
 
             InstructionModel genericInstruction = instruction.findQuickening(QuickeningKind.GENERIC, null, false);
 
@@ -2207,7 +2294,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
                 b.startStatement().string("newOperand = ").startCall("undoQuickening").string("operand").end().end();
                 b.startStatement().string("newTag = ").staticReference(parent.parent.frameTagsElement.getObject()).end();
-                parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQualifiedQuickeningName());
+                parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQuickeningName());
                 b.startStatement();
                 BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string(localsFrame).string("slot").string(value.localName()).end();
                 b.end();
@@ -2226,7 +2313,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
             b.startStatement().string("newOperand = ").startCall("undoQuickening").string("operand").end().end();
             b.startStatement().string("newTag = ").staticReference(parent.parent.frameTagsElement.getObject()).end();
-            parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQualifiedQuickeningName());
+            parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQuickeningName());
             b.startStatement();
             BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string(localsFrame).string("slot").string(value.localName()).end();
             b.end();
@@ -2245,6 +2332,31 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end(); // if newTag != oldTag
 
             parent.parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
+
+            b.end(); // end if operandIndex != -1
+
+            // case operandIndex == -1
+            b.startElseBlock();
+            b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(genericInstruction)).end();
+            b.startStatement().string("newTag = ").staticReference(parent.parent.frameTagsElement.getObject()).end();
+            parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "StoreLocal$" + genericInstruction.getQuickeningName());
+            b.startStatement();
+            BytecodeRootNodeElement.startSetFrame(b, type(Object.class)).string(localsFrame).string("slot").string(value.localName()).end();
+            b.end();
+
+            b.startIf().string("newTag != oldTag").end().startBlock();
+            b.startStatement().startCall(bytecodeNode, "setCachedLocalTagInternal");
+            if (materialized) {
+                b.startCall(bytecodeNode, "getLocalTags").end();
+            } else {
+                b.string("localTags");
+            }
+            b.tree(localIndex);
+            b.string("newTag");
+            b.end(2);
+            b.end(); // if newTag != oldTag
+            b.end(); // end else operandIndex == -1
+
             parent.parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
 
             return null;
@@ -2268,9 +2380,10 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             }
 
             b.declaration(type(short.class), "newInstruction");
-            b.declaration(type(short.class), "newOperand");
-            b.declaration(type(int.class), "operandIndex", BytecodeRootNodeElement.readImmediate("bc", "bci", instruction.findChildBciImmediate(0)));
+            declareRelativeBytecodeIndex(b, "operandIndex", "operandOffset", instruction.findChildBciImmediate(0));
+            b.startIf().string("operandIndex != -1").end().startBlock();
             b.declaration(type(short.class), "operand", BytecodeRootNodeElement.readInstruction("bc", "operandIndex"));
+            b.declaration(type(short.class), "newOperand");
 
             b.startIf().string("(newOperand = ").startCall(BytecodeRootNodeElement.createApplyQuickeningName(boxingType)).string("operand").end().string(") != -1").end().startBlock();
             b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(unboxedInstruction)).end();
@@ -2282,6 +2395,13 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
             b.end(); // else block
 
             parent.parent.emitQuickeningOperand(b, "this", "bc", "bci", null, 0, "operandIndex", "operand", "newOperand");
+            b.end(); // if not -1 block
+
+            b.startElseBlock();
+            b.startStatement().string("newInstruction = ").tree(parent.parent.createInstructionConstant(boxedInstruction)).end();
+            parent.parent.emitOnSpecialize(b, "this", "bci", BytecodeRootNodeElement.readInstruction("bc", "bci"), "BranchFalse$" + boxedInstruction.getQuickeningName());
+            b.end();
+
             parent.parent.emitQuickening(b, "this", "bc", "bci", null, "newInstruction");
 
             b.statement("return ", operandValue);
@@ -2429,8 +2549,33 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
     }
 
-    private static String createStackIndex(InstructionModel instruction, Operand operand) {
-        return "sp - " + (instruction.signature.dynamicOperandCount() - operand.dynamicIndex());
+    private static String createOperandStackIndex(InstructionModel instr, Operand operand) {
+        if (instr.kind == InstructionKind.TAG_LEAVE || instr.isEpilogReturn()) {
+            // special cases: load from the stack slot of the return result operand
+            return "sp - " + readResultStackOffset(instr);
+        }
+        return "sp - " + (instr.signature.dynamicOperandCount() - operand.dynamicIndex());
+    }
+
+    private static String createResultStackIndex(InstructionModel instr) {
+        int dynamicOperandCount = instr.signature.dynamicOperandCount();
+        if (dynamicOperandCount == 0) {
+            // push on the top of stack
+            return "sp";
+        } else if (instr.kind == InstructionKind.TAG_LEAVE || instr.isEpilogReturn()) {
+            // special case: write to the stack slot of the return result operand
+            return "sp - " + readResultStackOffset(instr);
+        }
+        // overwrite the first dynamic operand
+        return createOperandStackIndex(instr, instr.signature.dynamicOperands().get(0));
+    }
+
+    private static String readResultStackOffset(InstructionModel instr) {
+        InstructionImmediate imm = instr.findImmediate(ImmediateKind.SHORT, "result_stack_offset");
+        if (imm == null) {
+            throw new AssertionError("Missing result stack offset: " + instr);
+        }
+        return BytecodeRootNodeElement.readImmediate("bc", "bci", imm).toString();
     }
 
     private static boolean isEmitLoadOperand(InstructionModel instr, Operand operand, ExecutionMode mode) {
@@ -2599,7 +2744,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 b.cast(targetType);
             }
 
-            String stackIndex = createStackIndex(useInstruction, operand);
+            String stackIndex = createOperandStackIndex(useInstruction, operand);
             Operand singleUnexpected = findSingleUnexpectedOperand();
             boolean hasUnexpected = unexpectedResult != null && singleUnexpected.dynamicIndex() == operand.dynamicIndex();
             if (hasUnexpected) {
@@ -2668,13 +2813,13 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
 
         for (Operand operand : toClear) {
             // unconditional clear in both interpreter and compiled
-            b.statement(BytecodeRootNodeElement.clearFrame("frame", createStackIndex(useInstruction, operand)));
+            b.statement(BytecodeRootNodeElement.clearFrame("frame", createOperandStackIndex(useInstruction, operand)));
         }
 
         if (!compiledClear.isEmpty() && !mode.isSlowPath() && getTier().isCached()) {
             b.startIf().startStaticCall(types.CompilerDirectives, "inCompiledCode").end().end().startBlock();
             for (Operand operand : compiledClear) {
-                b.statement(BytecodeRootNodeElement.clearFrame("frame", createStackIndex(useInstruction, operand)));
+                b.statement(BytecodeRootNodeElement.clearFrame("frame", createOperandStackIndex(useInstruction, operand)));
             }
             b.end();
         }
@@ -2806,7 +2951,7 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
         if (instr.hasVariableStackEffect()) {
             returnIndex = "sp - stackSize";
         } else {
-            returnIndex = instr.getStackEffect() == 1 ? "sp" : ("sp - " + (1 - instr.getStackEffect()));
+            returnIndex = createResultStackIndex(instr);
         }
 
         // Update the stack.
@@ -2999,6 +3144,8 @@ final class BytecodeInstructionHandler extends CodeExecutableElement implements 
                 case CUSTOM:
                     if (instruction.operation.kind == OperationKind.CUSTOM_YIELD) {
                         return HandlerKind.YIELD;
+                    } else if (instruction.operation.kind == OperationKind.CUSTOM_RETURN) {
+                        return HandlerKind.RETURN;
                     } else {
                         return HandlerKind.NEXT;
                     }

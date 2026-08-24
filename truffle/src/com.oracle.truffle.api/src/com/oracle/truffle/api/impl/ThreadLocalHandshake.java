@@ -181,6 +181,9 @@ public abstract class ThreadLocalHandshake {
         if (current == null) {
             return t;
         }
+        if (current == t) {
+            return current;
+        }
         if (t instanceof ThreadDeath) {
             t.addSuppressed(current);
             return t;
@@ -559,6 +562,10 @@ public abstract class ThreadLocalHandshake {
 
     protected final TruffleSafepointImpl getThreadState(Thread thread) {
         return SAFEPOINTS.computeIfAbsent(thread, (t) -> new TruffleSafepointImpl(this));
+    }
+
+    protected static boolean isCurrentPolyglotContextEntered() {
+        return DefaultRuntimeAccessor.ENGINE.getCurrentPolyglotEngine() != null;
     }
 
     /** One per {@link Thread}, see {@link #SAFEPOINTS}. */

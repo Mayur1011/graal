@@ -46,7 +46,7 @@ import com.oracle.svm.core.memory.NullableNativeMemory;
 import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.os.CommittedMemoryProvider;
 import com.oracle.svm.core.os.VirtualMemoryProvider;
-import com.oracle.svm.core.util.DuplicatedInNativeCode;
+import com.oracle.svm.shared.util.DuplicatedInNativeCode;
 import com.oracle.svm.shared.util.VMError;
 import org.graalvm.word.impl.Word;
 
@@ -79,6 +79,7 @@ public final class RuntimeCodeInfoAccess {
         impl.setCodeAndDataMemorySize(Word.unsigned(codeAndDataMemorySize));
         impl.setTier(tier);
         impl.setCodeObserverHandles(observerHandles);
+        impl.setCodeInfoIndexEntriesPerBlock(1);
         impl.setAllObjectsAreInImageHeap(allObjectsAreInImageHeap);
     }
 
@@ -168,7 +169,7 @@ public final class RuntimeCodeInfoAccess {
     public static void walkWeakReferences(CodeInfo info, ObjectReferenceVisitor visitor) {
         CodeInfoImpl impl = cast(info);
         NonmovableArrays.walkUnmanagedObjectArray(impl.getObjectFields(), visitor, CodeInfoImpl.FIRST_WEAKLY_REFERENCED_OBJFIELD, CodeInfoImpl.WEAKLY_REFERENCED_OBJFIELD_COUNT);
-        if (CodeInfoAccess.isAliveState(impl.getState())) {
+        if (CodeInfoAccess.hasLiveCodeConstants(impl)) {
             CodeReferenceMapDecoder.walkOffsetsFromPointer(impl.getCodeStart(), impl.getCodeConstantsReferenceMapEncoding(), impl.getCodeConstantsReferenceMapIndex(), visitor, null);
         }
         NonmovableArrays.walkUnmanagedObjectArray(impl.getObjectConstants(), visitor);
@@ -311,6 +312,7 @@ public final class RuntimeCodeInfoAccess {
         CodeInfoImpl impl = cast(info);
         action.apply(impl.getCodeInfoIndex());
         action.apply(impl.getCodeInfoEncodings());
+        action.apply(impl.getCodeInfoDefaultFrameInfoIndexes());
         action.apply(impl.getStackReferenceMapEncoding());
         action.apply(impl.getFrameInfoEncodings());
         action.apply(impl.getDeoptimizationStartOffsets());

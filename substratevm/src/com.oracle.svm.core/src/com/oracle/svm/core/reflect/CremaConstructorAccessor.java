@@ -24,37 +24,24 @@
  */
 package com.oracle.svm.core.reflect;
 
-import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Modifier;
 
-import com.oracle.svm.core.hub.crema.CremaSupport;
-import com.oracle.svm.espresso.shared.resolver.CallKind;
-import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
+import com.oracle.svm.core.hub.DynamicHub;
 
-import jdk.internal.reflect.ConstructorAccessor;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
-@InternalVMMethod
-public final class CremaConstructorAccessor extends AbstractCremaAccessor implements ConstructorAccessor {
+public final class CremaConstructorAccessor extends AbstractCremaConstructorAccessor {
+
+    private static boolean isAbstract(Class<?> declaringClass) {
+        return Modifier.isAbstract(DynamicHub.fromClass(declaringClass).getInterpreterType().getModifiers());
+    }
 
     public CremaConstructorAccessor(ResolvedJavaMethod targetMethod, Class<?> declaringClass, Class<?>[] parameterTypes) {
-        super(targetMethod, declaringClass, parameterTypes);
+        super(targetMethod, declaringClass, parameterTypes, isAbstract(declaringClass));
     }
 
     @Override
-    public Object newInstance(Object[] initialArguments) throws InstantiationException, InvocationTargetException {
-        Object[] args = initialArguments == null ? NO_ARGS : initialArguments;
-        verifyArguments(args);
-        ensureDeclaringClassInitialized();
-
-        Object newReference = CremaSupport.singleton().allocateInstance(targetMethod.getDeclaringClass());
-        Object[] finalArgs = new Object[args.length + 1];
-        finalArgs[0] = newReference;
-        System.arraycopy(args, 0, finalArgs, 1, args.length);
-        try {
-            CremaSupport.singleton().execute(targetMethod, finalArgs, CallKind.DIRECT);
-        } catch (Throwable t) {
-            throw new InvocationTargetException(t);
-        }
-        return newReference;
+    protected Class<?> getInstantiatedClass() {
+        return getDeclaringClass();
     }
 }

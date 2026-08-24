@@ -40,6 +40,7 @@ import com.oracle.svm.core.genscavenge.StackVerifier.VerifyFrameReferencesVisito
 import com.oracle.svm.core.genscavenge.UnalignedHeapChunk.UnalignedHeader;
 import com.oracle.svm.core.genscavenge.metaspace.MetaspaceImpl;
 import com.oracle.svm.core.genscavenge.remset.RememberedSet;
+import com.oracle.svm.core.heap.DerivedReferenceSupport;
 import com.oracle.svm.core.heap.Heap;
 import com.oracle.svm.core.heap.ObjectHeader;
 import com.oracle.svm.core.heap.ObjectReferenceVisitor;
@@ -48,9 +49,10 @@ import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.ReferenceInternals;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.InteriorObjRefWalker;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.hub.LayoutEncoding;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.metaspace.Metaspace;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
@@ -288,12 +290,10 @@ public class HeapVerifier {
 
         assert aChunk.isNonNull() ^ uChunk.isNonNull();
         HeapChunk.Header<?> chunk = aChunk.isNonNull() ? aChunk : uChunk;
-        if (HeapImpl.isImageHeapAligned() || !HeapImpl.getHeapImpl().isInImageHeap(obj)) {
-            HeapChunk.Header<?> enclosingHeapChunk = HeapChunk.getEnclosingHeapChunk(obj);
-            if (chunk.notEqual(enclosingHeapChunk)) {
-                Log.log().string("Object ").zhex(ptr).string(" should have ").zhex(chunk).string(" as its enclosing chunk but getEnclosingHeapChunk returned ").zhex(enclosingHeapChunk).newline();
-                return false;
-            }
+        HeapChunk.Header<?> enclosingHeapChunk = HeapChunk.getEnclosingHeapChunk(obj);
+        if (chunk.notEqual(enclosingHeapChunk)) {
+            Log.log().string("Object ").zhex(ptr).string(" should have ").zhex(chunk).string(" as its enclosing chunk but getEnclosingHeapChunk returned ").zhex(enclosingHeapChunk).newline();
+            return false;
         }
 
         Pointer chunkStart = HeapChunk.asPointer(chunk);
@@ -350,7 +350,7 @@ public class HeapVerifier {
         InteriorObjRefWalker.walkObject(obj, REFERENCE_VERIFIER);
 
         boolean success = REFERENCE_VERIFIER.result;
-        DynamicHub hub = KnownIntrinsics.readHub(obj);
+        DynamicHub hub = DynamicHubIntrinsics.readHub(obj);
         if (hub.isReferenceInstanceClass()) {
             // The referent field of java.lang.Reference is excluded from the reference map, so we
             // need to verify it separately.
@@ -367,6 +367,35 @@ public class HeapVerifier {
     public static boolean verifyReference(Object parentObject, Pointer objRef, boolean compressed) {
         Pointer ptr = ReferenceAccess.singleton().readObjectAsUntrackedPointer(objRef, compressed);
         return verifyReference(parentObject, objRef, ptr);
+    }
+
+    public static boolean verifyDerivedReference(Object parentObject, Pointer baseObjRef, Pointer derivedObjRef, boolean compressed) {
+        Pointer base = DerivedReferenceSupport.readReferenceAsPointer(baseObjRef, compressed);
+        Pointer derived = DerivedReferenceSupport.readReferenceAsPointer(derivedObjRef, compressed);
+        if (derived.isNull()) {
+            return true;
+        }
+
+        if (base.isNull()) {
+            Log.log().string("Derived object reference at ").zhex(derivedObjRef).string(" is non-null but the base reference at ").zhex(baseObjRef).string(" is null: ").zhex(derived).string(". ");
+            printParent(parentObject);
+            return false;
+        }
+
+        if (!verifyReference(parentObject, baseObjRef, base)) {
+            return false;
+        }
+
+        Object baseObject = base.toObject();
+        Pointer baseEnd = base.add(LayoutEncoding.getSizeFromObjectInGC(baseObject));
+        if (derived.belowThan(base) || derived.aboveOrEqual(baseEnd)) {
+            Log.log().string("Derived object reference at ").zhex(derivedObjRef).string(" points outside its base object: derived=").zhex(derived).string(", base=").zhex(base)
+                            .string(", baseEnd=").zhex(baseEnd).string(". ");
+            printParent(parentObject);
+            return false;
+        }
+
+        return true;
     }
 
     // This method is executed exactly once for each object reference in the heap and on the stack.
@@ -471,6 +500,11 @@ public class HeapVerifier {
 
         private void visitObjectReference(Pointer objRef, boolean compressed, Object holderObject) {
             result &= verifyReference(holderObject, objRef, compressed);
+        }
+
+        @Override
+        public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+            result &= verifyDerivedReference(holderObject, baseObjRef, derivedObjRef, compressed);
         }
     }
 

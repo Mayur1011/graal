@@ -84,17 +84,38 @@
       "${BENCH_RESULTS_FILE_PATH}",
       "--machine-name=${MACHINE_NAME}"] +
       (if std.objectHasAll(self.environment, 'MX_TRACKER') then ["--tracker=" + self.environment['MX_TRACKER']] else []),
+    crema_libjvm_file_size_cmd::
+      ["mx",
+      "--kill-with-sigquit",
+      "benchmark",
+      "--results-file",
+      "${BENCH_RESULTS_FILE_PATH}",
+      "--append-results",
+      "--machine-name=${MACHINE_NAME}",
+      "--tracker=none",
+      "file-size:lib:jvm",
+      "--",
+      "--jvm=${JVM}",
+      "--jvm-config=${JVM_CONFIG}"],
     restrict_threads:: null,  # can be overridden to restrict the benchmark to the given number of threads. If null, will use one full NUMA node
     benchmark_cmd:: if self.should_use_hwloc then bench_common.hwloc_cmd(self.plain_benchmark_cmd, self.restrict_threads, self.default_numa_node, self.hyperthreading, self.threads_per_node) else self.plain_benchmark_cmd,
     min_heap_size:: if std.objectHasAll(self.environment, 'XMS') then ["-Xms${XMS}"] else [],
     max_heap_size:: if std.objectHasAll(self.environment, 'XMX') then ["-Xmx${XMX}"] else [],
+    diagnostic_vm_args:: if std.objectHasAll(self.environment, "JVM") && self.environment["JVM"] == "crema" then [
+      "-Djdk.graal.CompilationFailureAction=Diagnose",
+      // TODO GR-75784: These diagnostic options are not supported by Crema yet.
+      // "-XX:+PrintConcurrentLocks",
+      // "-XX:+CITime",
+    ] else [
+      "-XX:+PrintConcurrentLocks",
+      "-Djdk.graal.CompilationFailureAction=Diagnose",
+      "-XX:+CITime",
+    ],
     extra_vm_args::
       ["--profiler=${MX_PROFILER}",
       "--jvm=${JVM}",
-      "--jvm-config=${JVM_CONFIG}",
-      "-XX:+PrintConcurrentLocks",
-      "-Djdk.graal.CompilationFailureAction=Diagnose",
-      "-XX:+CITime"] +
+      "--jvm-config=${JVM_CONFIG}"] +
+      self.diagnostic_vm_args +
       self.min_heap_size +
       self.max_heap_size,
     should_mx_build:: true,
@@ -155,6 +176,40 @@
       "MX_PRIMARY_SUITE_PATH": "../" + config.compiler.vm_suite,
       "MX_ENV_PATH": config.compiler.libgraal_env_file
     }
+  },
+
+  crema:: {
+    local edition = config.graalvm_edition,
+    local mx_env_path = if edition == "ce" then "ce-next" else "crema-" + edition,
+    platform:: "crema-" + edition,
+    tags+: {opt_post_merge: ["bench-crema"]},
+    environment+: {
+      "JVM": "crema",
+      "JVM_CONFIG": "default-" + edition,
+      "MX_PRIMARY_SUITE_PATH": "../" + config.compiler.vm_suite,
+      "MX_ENV_PATH": mx_env_path
+    }
+  },
+
+  crema_xint:: self.crema + {
+    local edition = config.graalvm_edition,
+    platform:: "crema-xint-" + edition,
+    environment+: {
+      "JVM_CONFIG": "xint-" + edition
+    }
+  },
+
+  crema_no_profiling:: self.crema + {
+    local edition = config.graalvm_edition,
+    local mx_env_path = "crema-no-profiling-" + edition,
+    platform+:: "-no-profiling",
+    diagnostic_vm_args:: [],
+    environment+: {
+      // Build lib:jvm with Ristretto disabled. The interpreter profiling branches are guarded by
+      // SubstrateOptions.useRistretto(), so this removes profiling at image build time.
+      "JVM_CONFIG": "no-profiling-" + edition,
+      "MX_ENV_PATH": mx_env_path,
+    },
   },
 
   economy_mode:: {

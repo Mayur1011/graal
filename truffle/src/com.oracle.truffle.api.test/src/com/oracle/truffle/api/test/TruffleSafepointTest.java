@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -359,7 +359,6 @@ public class TruffleSafepointTest extends AbstractThreadedPolyglotTest {
     }
 
     @Test
-    @Ignore("GR-64260")
     public void testSynchronous() {
         forEachConfig((threads, events) -> {
             try (TestSetup setup = setupSafepointLoop(threads, (s, node) -> {
@@ -638,7 +637,6 @@ public class TruffleSafepointTest extends AbstractThreadedPolyglotTest {
     }
 
     @Test
-    @Ignore("GR-64260")
     public void testStackTrace() {
         Assume.assumeFalse("JaCoCo break expected graph structure", TestUtils.isJaCoCoAttached());
         forEachConfig((threads, events) -> {
@@ -978,6 +976,58 @@ public class TruffleSafepointTest extends AbstractThreadedPolyglotTest {
     @TruffleBoundary
     private static void releaseSemaphore(Semaphore semaphore) {
         semaphore.release();
+    }
+
+    @Test
+    public void testBlockedSameThreadLocalActionPerformException() {
+        Semaphore submitActions = new Semaphore(0);
+        Semaphore enterBlocked = new Semaphore(0);
+        Semaphore blocked = new Semaphore(0);
+        RuntimeException actionException = new RuntimeException("action exception");
+        AtomicBoolean firstAttempt = new AtomicBoolean(true);
+        List<Throwable> exceptions = Collections.synchronizedList(new ArrayList<>());
+
+        class ThrowingThreadLocalAction extends ThreadLocalAction {
+            ThrowingThreadLocalAction() {
+                super(true, false);
+            }
+
+            @Override
+            protected void perform(Access access) {
+                throw actionException;
+            }
+        }
+
+        Future<?> first = null;
+        Future<?> second = null;
+        try (TestSetup setup = setupSafepointLoop(1, (s, node) -> {
+            if (!firstAttempt.compareAndSet(true, false)) {
+                return true;
+            }
+            submitActions.release();
+            acquire(enterBlocked);
+            TruffleSafepoint.setBlockedThreadInterruptible(node, Semaphore::acquire, blocked);
+            return true;
+        }, exceptions::add)) {
+            try {
+                acquire(submitActions);
+                first = setup.env.submitThreadLocal(null, new ThrowingThreadLocalAction());
+                second = setup.env.submitThreadLocal(null, new ThrowingThreadLocalAction());
+
+                enterBlocked.release();
+                setup.stopAndAwait();
+
+                assertEquals(1, exceptions.size());
+                assertSame(actionException, exceptions.get(0));
+            } finally {
+                if (first != null) {
+                    first.cancel(true);
+                }
+                if (second != null) {
+                    second.cancel(true);
+                }
+            }
+        }
     }
 
     private static Semaphore[] createSemaphores(int count, int permits) {
@@ -1875,11 +1925,14 @@ public class TruffleSafepointTest extends AbstractThreadedPolyglotTest {
     }
 
     private static void printAllThreads() {
-        for (Thread thread : runningThreads) {
+        Set<Thread> threads = new HashSet<>();
+        Collections.addAll(threads, ThreadUtils.getAllThreads());
+        threads.addAll(runningThreads);
+        for (Thread thread : threads) {
             StackTraceElement[] stackTrace = thread.getStackTrace();
-            Exception ex = new Exception(thread.toString());
+            Exception ex = new Exception(thread + " state=" + thread.getState() + " testThread=" + runningThreads.contains(thread));
             ex.setStackTrace(stackTrace);
-            ex.printStackTrace();
+            ex.printStackTrace(System.out);
         }
     }
 

@@ -24,6 +24,8 @@
  */
 package com.oracle.svm.core.hub.crema;
 
+import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
 import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
 
@@ -37,13 +39,17 @@ import com.oracle.svm.core.hub.RuntimeClassLoading.ClassDefinitionInfo;
 import com.oracle.svm.core.hub.registry.SymbolsSupport;
 import com.oracle.svm.core.invoke.ResolvedMember;
 import com.oracle.svm.core.invoke.Target_java_lang_invoke_MemberName;
+import com.oracle.svm.core.jni.CallVariant;
+import com.oracle.svm.core.jni.headers.JNIFieldId;
 import com.oracle.svm.espresso.classfile.ConstantPool;
 import com.oracle.svm.espresso.classfile.ParserKlass;
 import com.oracle.svm.espresso.classfile.descriptors.ByteSequence;
+import com.oracle.svm.espresso.classfile.descriptors.Name;
 import com.oracle.svm.espresso.classfile.descriptors.Signature;
 import com.oracle.svm.espresso.classfile.descriptors.Symbol;
 import com.oracle.svm.espresso.classfile.descriptors.Type;
 import com.oracle.svm.espresso.shared.resolver.CallKind;
+import com.oracle.svm.shared.Uninterruptible;
 
 import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
@@ -59,6 +65,24 @@ public interface CremaSupport {
     <T extends ResolvedJavaMethod & ResolvedMember> T toJVMCI(Executable executable);
 
     <T extends ResolvedJavaField & ResolvedMember> T toJVMCI(Field field);
+
+    /**
+     * Returns any JDK-internal flag that should be added to the modifiers and reference kind to
+     * form the {@code flags} of a {@code java.lang.invoke.MemmberName} denoting the {@code field}
+     * given as argument.
+     *
+     * @see com.oracle.svm.core.methodhandles.Target_java_lang_invoke_MethodHandleNatives_Constants
+     */
+    int getExtraFieldMemberNameFlags(ResolvedJavaField field);
+
+    /**
+     * Returns any JDK-internal flag that should be added to the modifiers and reference kind to
+     * form the {@code flags} of a {@code java.lang.invoke.MemmberName} denoting the {@code method}
+     * given as argument.
+     *
+     * @see com.oracle.svm.core.methodhandles.Target_java_lang_invoke_MethodHandleNatives_Constants
+     */
+    int getExtraMethodMemberNameFlags(ResolvedJavaMethod method);
 
     Object invokeBasic(Target_java_lang_invoke_MemberName memberName, Object methodHandle, Object[] args);
 
@@ -91,8 +115,6 @@ public interface CremaSupport {
 
     Object execute(ResolvedJavaMethod targetMethod, Object[] args, CallKind callKind);
 
-    Class<?> toClass(ResolvedJavaType resolvedJavaType);
-
     default Class<?> resolveOrThrow(UnresolvedJavaType unresolvedJavaType, ResolvedJavaType accessingClass) {
         ByteSequence type = ByteSequence.create(unresolvedJavaType.getName());
         Symbol<Type> symbolicType = SymbolsSupport.getTypes().getOrCreateValidType(type);
@@ -120,6 +142,19 @@ public interface CremaSupport {
     Class<?> findLoadedClass(Symbol<Type> type, ClassLoader loader);
 
     Object getStaticStorage(Class<?> cls, boolean primitives, int layerNum);
+
+    /** Gets a field declared by a runtime-loaded {@code clazz} with {@code name}, {@code signature}, and {@code isStatic}. */
+    ResolvedJavaField lookupFieldForRuntimeClass(Class<?> clazz, String name, String signature, boolean isStatic);
+
+    /** Gets the field metadata encoded by {@code fieldId} in the context of a runtime-loaded {@code clazz}. */
+    CremaResolvedJavaField getCremaField(Class<?> clazz, JNIFieldId fieldId, boolean isStatic);
+
+    /** Gets the static storage base encoded by a runtime-loaded static JNI field id. */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    Object getCremaStaticFieldBase(JNIFieldId fieldId, boolean primitive);
+
+    /** Gets a method declared by runtime-loaded {@code clazz} with {@code name}, {@code signature}. */
+    ResolvedJavaMethod lookupMethodForRuntimeClass(Class<?> clazz, String name, String signature);
 
     ResolvedJavaMethod findMethodHandleIntrinsic(ResolvedJavaMethod signaturePolymorphicMethod, Symbol<Signature> signature);
 
@@ -157,17 +192,45 @@ public interface CremaSupport {
 
     // endregion linking
 
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     static CremaSupport singleton() {
         return ImageSingletons.lookup(CremaSupport.class);
     }
 
     CFunctionPointer getEnterDirectInterpreterStubEntryPoint();
 
+    /** Gets the JNI method-call wrapper entry point for {@code variant} and {@code nonVirtual}. */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    CFunctionPointer getCremaJNIMethodCallWrapperEntryPoint(CallVariant variant, boolean nonVirtual);
+
     @Platforms(Platform.HOSTED_ONLY.class)
     void setEnterDirectInterpreterStubEntryPoint(CFunctionPointer stubEntryPoint);
 
+    /** Sets the JNI method-call wrapper entry points for all JNI call variants to perform a JNI upcall on a runtime-loaded method. */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    void setCremaJNIMethodCallWrapperEntryPoints(CFunctionPointer varargsVirtual, CFunctionPointer arrayVirtual, CFunctionPointer vaListVirtual, CFunctionPointer varargsNonVirtual,
+                    CFunctionPointer arrayNonVirtual,
+                    CFunctionPointer vaListNonVirtual);
+
     <T extends ConstantPool & jdk.vm.ci.meta.ConstantPool> T getConstantPool(DynamicHub hub);
 
-    void verifySuperAccesses(String externalName, ClassLoader loader, ByteSequence pkgName, Module module,
+    /**
+     * Verifies that a runtime-defined class can access and legally inherit from its direct
+     * supertypes.
+     *
+     * @param externalName the binary name of the runtime-defined class
+     * @param internalName the internal class-file name of the runtime-defined class
+     * @param classModifiers the parsed access flags of the runtime-defined class
+     * @param loader the defining class loader of the runtime-defined class
+     * @param pkgName the runtime package of the runtime-defined class
+     * @param module the runtime module of the runtime-defined class
+     * @param superClass the already-loaded direct superclass
+     * @param superInterfaces the already-loaded direct superinterfaces
+     * @throws IllegalAccessError if a direct supertype is not accessible to the runtime-defined
+     *             class
+     * @throws IncompatibleClassChangeError if a direct supertype cannot legally be extended or
+     *             implemented by the runtime-defined class
+     */
+    void verifySuperAccesses(String externalName, Symbol<Name> internalName, int classModifiers, ClassLoader loader, ByteSequence pkgName, Module module,
                     Class<?> superClass, Class<?>[] superInterfaces);
 }

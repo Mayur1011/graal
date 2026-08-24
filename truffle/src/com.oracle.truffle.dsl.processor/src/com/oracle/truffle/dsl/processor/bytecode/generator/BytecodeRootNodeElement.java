@@ -96,6 +96,7 @@ import com.oracle.truffle.dsl.processor.bytecode.model.BytecodeDSLModel.LoadIlle
 import com.oracle.truffle.dsl.processor.bytecode.model.CustomOperationModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateKind;
+import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.ImmediateWidth;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionImmediate;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionImmediateEncoding;
 import com.oracle.truffle.dsl.processor.bytecode.model.InstructionModel.InstructionKind;
@@ -142,7 +143,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
 
     // !Important: Keep these in sync with InstructionBytecodeSizeTest!
     // Estimated number of Java bytecodes per instruction.
-    private static final int ESTIMATED_CUSTOM_INSTRUCTION_SIZE = 24;
+    private static final int ESTIMATED_CUSTOM_INSTRUCTION_SIZE = 27;
     private static final int ESTIMATED_EXTRACTED_INSTRUCTION_SIZE = 20;
     // Estimated number of bytecodes needed if they are just part of the switch table.
     private static final int GROUP_DISPATCH_SIZE = 40;
@@ -200,6 +201,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     BytecodeConfigEncoderImplElement configEncoder;
     OldBytecodesBoxElement oldBytecodesBoxElement;
     AbstractBytecodeNodeElement abstractBytecodeNode;
+    BytecodeNodeElement cachedBytecodeNode;
+    BytecodeNodeElement cachedTailCallBytecodeNode;
 
     TagNodeElement tagNode;
     TagRootNodeElement tagRootNode;
@@ -312,25 +315,34 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             dataClasses.add(createCachedDataClass(instr, consts));
         }
         if (model.epilogExceptional != null) {
-            dataClasses.add(createCachedDataClass(model.epilogExceptional.operation.instruction, consts));
+            dataClasses.add(createCachedDataClass(model.epilogExceptional.operation.instruction(), consts));
         }
         consts.addElementsTo(this);
 
         instructionsElement.lazyInit();
 
         // Define the interpreter implementations.
-        BytecodeNodeElement cachedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.CACHED));
+        cachedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.CACHED, "CachedBytecodeNode", BytecodeNodeElement.HandlerLayout.DEFAULT));
         abstractBytecodeNode.getPermittedSubclasses().add(cachedBytecodeNode.asType());
+        if (model.enableTailCallHandlers) {
+            cachedTailCallBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.CACHED, "CachedBytecodeNodeTailCall", BytecodeNodeElement.HandlerLayout.TAIL_CALL));
+            abstractBytecodeNode.getPermittedSubclasses().add(cachedTailCallBytecodeNode.asType());
+        }
 
         this.add(bytecodeTransitionImplElement);
 
         CodeTypeElement initialBytecodeNode;
+        CodeTypeElement tailCallInitialBytecodeNode = null;
         if (model.enableUncachedInterpreter) {
-            CodeTypeElement uncachedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.UNCACHED));
+            CodeTypeElement uncachedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.UNCACHED, "UncachedBytecodeNode", BytecodeNodeElement.HandlerLayout.DEFAULT));
             abstractBytecodeNode.getPermittedSubclasses().add(uncachedBytecodeNode.asType());
             initialBytecodeNode = uncachedBytecodeNode;
+            if (model.enableTailCallHandlers) {
+                tailCallInitialBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.UNCACHED, "UncachedBytecodeNodeTailCall", BytecodeNodeElement.HandlerLayout.TAIL_CALL));
+                abstractBytecodeNode.getPermittedSubclasses().add(tailCallInitialBytecodeNode.asType());
+            }
         } else {
-            CodeTypeElement uninitializedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.UNINITIALIZED));
+            CodeTypeElement uninitializedBytecodeNode = this.add(new BytecodeNodeElement(this, InterpreterTier.UNINITIALIZED, "UninitializedBytecodeNode", BytecodeNodeElement.HandlerLayout.DEFAULT));
             abstractBytecodeNode.getPermittedSubclasses().add(uninitializedBytecodeNode.asType());
             initialBytecodeNode = uninitializedBytecodeNode;
         }
@@ -402,6 +414,9 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
             CodeVariableElement var = this.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(Object.class), "DEFAULT_LOCAL_VALUE"));
             var.createInitBuilder().tree(DSLExpressionGenerator.write(model.defaultLocalValueExpression, null, Map.of()));
+        } else {
+            CodeVariableElement var = this.add(new CodeVariableElement(Set.of(PRIVATE, STATIC, FINAL), type(Object.class), "EXPECTED_FRAME_DESCRIPTOR_DEFAULT_VALUE"));
+            var.createInitBuilder().startStaticCall(types.FrameDescriptor, "newBuilder().defaultValueIllegal().build().getDefaultValue").end();
         }
 
         if (model.variadicStackLimitExpression != null) {
@@ -420,7 +435,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         }
 
         // Define the generated node's constructor.
-        this.add(createConstructor(initialBytecodeNode));
+        this.add(createConstructor(initialBytecodeNode, tailCallInitialBytecodeNode));
 
         // Define the execute method.
         this.add(createExecute());
@@ -569,7 +584,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         return validateVariadicStackLimit;
     }
 
-    private CodeExecutableElement createConstructor(CodeTypeElement initialBytecodeNode) {
+    private CodeExecutableElement createConstructor(CodeTypeElement initialBytecodeNode, CodeTypeElement tailCallInitialBytecodeNode) {
         CodeExecutableElement ctor = new CodeExecutableElement(Set.of(PRIVATE), null, this.getSimpleName().toString());
         ctor.addParameter(new CodeVariableElement(model.languageClass, "language"));
         ctor.addParameter(new CodeVariableElement(types.FrameDescriptor_Builder, "builder"));
@@ -596,24 +611,38 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         }
         b.end(2);
 
+        String expectedFrameDescriptorValue = model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE ? "DEFAULT_LOCAL_VALUE" : "EXPECTED_FRAME_DESCRIPTOR_DEFAULT_VALUE";
+        b.startIf().string("getFrameDescriptor().getDefaultValue() != ").string(expectedFrameDescriptorValue).end().startBlock();
+        b.startThrow().startNew(type(IllegalStateException.class)).doubleQuote("The frame descriptor default value must not be changed by the bytecode root node constructor.").end().end();
+        b.end();
+
         b.statement("this.nodes = nodes");
         b.statement("this.stackBase = stackBase");
         if (model.usesBoxingElimination()) {
             b.statement("this.numLocals = numLocals");
         }
         b.statement("this.buildIndex = buildIndex");
-        b.startStatement();
-        b.string("this.bytecode = ");
-        b.startCall("insert");
-        b.startNew(initialBytecodeNode.asType());
-
-        for (VariableElement var : ElementFilter.fieldsIn(abstractBytecodeNode.getEnclosedElements())) {
-            b.string(var.getSimpleName().toString());
+        if (tailCallInitialBytecodeNode != null) {
+            b.startIf().staticReference(types.TruffleOptions, "AOT").end().startBlock();
+            b.startStatement().string("this.bytecode = ").startCall("insert").startStaticCall(tailCallInitialBytecodeNode.asType(), "create");
+            for (VariableElement var : ElementFilter.fieldsIn(abstractBytecodeNode.getEnclosedElements())) {
+                b.string(var.getSimpleName().toString());
+            }
+            b.end().end().end();
+            b.end().startElseBlock();
+            b.startStatement().string("this.bytecode = ").startCall("insert").startStaticCall(initialBytecodeNode.asType(), "create");
+            for (VariableElement var : ElementFilter.fieldsIn(abstractBytecodeNode.getEnclosedElements())) {
+                b.string(var.getSimpleName().toString());
+            }
+            b.end().end().end();
+            b.end();
+        } else {
+            b.startStatement().string("this.bytecode = ").startCall("insert").startStaticCall(initialBytecodeNode.asType(), "create");
+            for (VariableElement var : ElementFilter.fieldsIn(abstractBytecodeNode.getEnclosedElements())) {
+                b.string(var.getSimpleName().toString());
+            }
+            b.end().end().end();
         }
-
-        b.end(); // new
-        b.end(); // insert
-        b.end(); // statement
 
         return ctor;
     }
@@ -738,23 +767,23 @@ public final class BytecodeRootNodeElement extends AbstractElement {
      * transition, and on continuation resumption (if enabled). The encoding is as follows:
      *
      * <pre>
-     * 00000000 00000000 SSSSSSSS SSSSSSSS BBBBBBBBB BBBBBBBBB BBBBBBBBB BBBBBBBBB
+     * SSSSSSSS SSSSSSSS SSSSSSSS SSSSSSSS BBBBBBBBB BBBBBBBBB BBBBBBBBB BBBBBBBBB
      * </pre>
      *
      * Where {@code B} represents the bci and {@code S} represents the sp.
      */
     static String encodeState(String bci, String sp) {
-        return String.format("((%s & 0xFFFFL) << 32) | (%s & 0xFFFFFFFFL)", sp, bci);
+        return String.format("((%s & 0xFFFFFFFFL) << 32) | (%s & 0xFFFFFFFFL)", sp, bci);
     }
 
     static final String RETURN_BCI = "0xFFFFFFFF";
 
     static String encodeReturnState(String sp) {
-        return String.format("((%s & 0xFFFFL) << 32) | %sL", sp, RETURN_BCI);
+        return String.format("((%s & 0xFFFFFFFFL) << 32) | %sL", sp, RETURN_BCI);
     }
 
     static String encodeNewBci(String bci, String state) {
-        return String.format("(%s & 0xFFFF00000000L) | (%s & 0xFFFFFFFFL)", state, bci);
+        return String.format("(%s & 0xFFFFFFFF00000000L) | (%s & 0xFFFFFFFFL)", state, bci);
     }
 
     static String decodeBci(String state) {
@@ -762,7 +791,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     }
 
     static String decodeSp(String state) {
-        return String.format("(short) (%s >>> 32)", state);
+        return String.format("((int) (%s >>> 32))", state);
     }
 
     CodeTreeBuilder emitCastBytecodeIndexToInt(CodeTreeBuilder b) {
@@ -796,11 +825,11 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     }
 
     TypeMirror getBytecodeIndexType() {
-        return model.enableTailCallHandlers ? type(long.class) : type(int.class);
+        return type(long.class);
     }
 
     TypeMirror getStackPointerType() {
-        return model.enableTailCallHandlers ? type(long.class) : type(int.class);
+        return type(long.class);
     }
 
     void emitWriteBytecodeIndexToFrame(CodeTreeBuilder b, String frame, String value) {
@@ -835,7 +864,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         if (model.overridesBytecodeDebugListenerMethod("beforeRootExecute")) {
             b.startStatement();
             b.startCall("beforeRootExecute");
-            emitParseInstruction(b, "bc", "bci", CodeTreeBuilder.singleString(castBytecodeIndexToInt("bc.readValidBytecode(bc.bytecodes, bci)")));
+            emitParseInstruction(b, "bc", "bci", CodeTreeBuilder.singleString("bc.readValidBytecode(bc.bytecodes, bci)"));
             b.end();
             b.end();
         }
@@ -851,6 +880,9 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.string("this");
         b.string("frame");
         b.string("state");
+        if (model.hasYieldOperation()) {
+            b.string("continuationRootNode");
+        }
         b.end();
         b.end();
 
@@ -956,8 +988,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         CodeTreeBuilder b = ex.createBuilder();
         b.startDeclaration(types.BytecodeNode, "bc").startStaticCall(types.BytecodeNode, "get").string("callNode").end().end();
         b.startIf().string("bc == null || !(bc instanceof AbstractBytecodeNode bytecodeNode)").end().startBlock();
-        ExecutableElement superImpl = ElementUtils.findMethodInClassHierarchy(ElementUtils.findMethod(types.RootNode, "findInstrumentableCallNode"), model.templateType);
-        if (superImpl.getModifiers().contains(ABSTRACT)) {
+        ExecutableElement parentImpl = findImplementedRootNodeMethod("findInstrumentableCallNode", 3);
+        if (parentImpl == null) {
             // edge case: root node could redeclare findInstrumentableCallNode as abstract.
             b.startReturn().string("null").end();
         } else {
@@ -1650,7 +1682,12 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         CodeExecutableElement ex = overrideImplementRootNodeMethod(model, "isInstrumentable");
         CodeTreeBuilder b = ex.createBuilder();
         if (model.enableTagInstrumentation) {
-            b.statement("return true");
+            ExecutableElement parentImpl = findImplementedRootNodeMethod("isInstrumentable", 0);
+            if (parentImpl != null) {
+                b.startReturn().string("super.isInstrumentable()").end();
+            } else {
+                b.statement("return true");
+            }
         } else {
             b.statement("return false");
         }
@@ -1670,6 +1707,11 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.string("this");
         b.end();
         b.end();
+
+        ExecutableElement parentImpl = findImplementedRootNodeMethod("prepareForCall", 0);
+        if (parentImpl != null) {
+            b.statement("super.prepareForCall()");
+        }
         return ex;
     }
 
@@ -1690,6 +1732,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.end();
 
         b.statement("getRootNodes().update(b.build())");
+        ExecutableElement parentImpl = findImplementedRootNodeMethod("prepareForInstrumentation", 1);
+        if (parentImpl != null) {
+            b.statement("super.prepareForInstrumentation(materializedTags)");
+        }
         return ex;
     }
 
@@ -1706,13 +1752,21 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         // Disable compilation for the uncached interpreter.
         b.string("bytecode.getTier() != ").staticReference(types.BytecodeTier, "UNCACHED");
 
-        ExecutableElement parentImpl = ElementUtils.findMethodInClassHierarchy(ElementUtils.findMethod(types.RootNode, "prepareForCompilation", 3), model.templateType);
-        if (parentImpl != null && !parentImpl.getModifiers().contains(ABSTRACT)) {
+        ExecutableElement parentImpl = findImplementedRootNodeMethod("prepareForCompilation", 3);
+        if (parentImpl != null) {
             // Delegate to the parent impl.
             b.string(" && ").startCall("super.prepareForCompilation").variables(ex.getParameters()).end();
         }
         b.end();
         return ex;
+    }
+
+    private ExecutableElement findImplementedRootNodeMethod(String name, int parameterCount) {
+        ExecutableElement parentImpl = ElementUtils.findMethodInClassHierarchy(ElementUtils.findMethod(types.RootNode, name, parameterCount), model.templateType);
+        if (parentImpl == null || parentImpl.getModifiers().contains(ABSTRACT)) {
+            return null;
+        }
+        return parentImpl;
     }
 
     /**
@@ -1730,7 +1784,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.declaration(arrayOf(type(byte.class)), "copy", "Arrays.copyOf(original, original.length)");
 
         Map<Boolean, List<InstructionModel>> partitionedByIsQuickening = model.getInstructions().stream() //
-                        .sorted((e1, e2) -> e1.name.compareTo(e2.name)).collect(Collectors.partitioningBy(InstructionModel::isQuickening));
+                        .sorted(Comparator.comparing(InstructionModel::getName)).collect(Collectors.partitioningBy(InstructionModel::isQuickening));
 
         List<Entry<Integer, List<InstructionModel>>> regularGroupedByLength = partitionedByIsQuickening.get(false).stream() //
                         .collect(deterministicGroupingBy(InstructionModel::getInstructionLength)).entrySet() //
@@ -1943,7 +1997,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             // we share execute methods with return type quickenings.
             return executeMethodName(instruction.quickeningBase, tier);
         }
-        return "execute" + instruction.getQualifiedQuickeningName() + (tier.isUncached() ? "$uncached" : "");
+        return "execute" + instruction.getQuickeningName() + (tier.isUncached() ? "$uncached" : "");
     }
 
     /**
@@ -2174,7 +2228,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             List<InstructionModel> topLevelInstructions = new ArrayList<>();
             List<InstructionModel> partitionableInstructions = new ArrayList<>();
             for (InstructionModel instruction : instructions) {
-                if (instruction.kind != InstructionKind.CUSTOM || instruction.operation.kind == OperationKind.CUSTOM_YIELD) {
+                if (instruction.kind != InstructionKind.CUSTOM || instruction.operation.kind == OperationKind.CUSTOM_YIELD ||
+                                instruction.operation.kind == OperationKind.CUSTOM_RETURN) {
                     topLevelInstructions.add(instruction);
                 } else {
                     partitionableInstructions.add(instruction);
@@ -2275,6 +2330,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         return String.format("safeCastShort(%s)", value);
     }
 
+    static String safeCastUnsignedShort(String value) {
+        return String.format("safeCastUnsignedShort(%s)", value);
+    }
+
     // Helpers to generate common strings
     static CodeTree readInstruction(String bc, String bci) {
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
@@ -2318,7 +2377,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
             case CONSTANT_LONG, CONSTANT_INT, CONSTANT_SHORT -> value;
             case CONSTANT_DOUBLE -> CodeTreeBuilder.createBuilder().startCall("Double.longBitsToDouble").tree(value).end().build();
             case CONSTANT_FLOAT -> CodeTreeBuilder.createBuilder().startCall("Float.intBitsToFloat").tree(value).end().build();
-            case CONSTANT_CHAR -> CodeTreeBuilder.createBuilder().startGroup().cast(type(char.class)).startParantheses().tree(value).string(" + " + (1 << 15)).end(2).build();
+            case CONSTANT_CHAR -> CodeTreeBuilder.createBuilder().startGroup().cast(type(char.class)).startParentheses().tree(value).string(" + " + (1 << 15)).end(2).build();
             case CONSTANT_BYTE -> CodeTreeBuilder.createBuilder().startGroup().cast(type(byte.class)).tree(value).end().build();
             case CONSTANT_BOOL -> CodeTreeBuilder.createBuilder().startGroup().tree(value).string(" != 0").end().build();
             default -> {
@@ -2327,18 +2386,41 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         };
     }
 
+    static CodeTree decodeRelativeBytecodeIndex(String bci, String rawOffset) {
+        CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
+        b.startGroup();
+        b.string(rawOffset);
+        b.string(" == (byte) 0xff ? -1 : ");
+        b.string(bci);
+        b.string(" - ((0xff & ");
+        b.string(rawOffset);
+        b.string(") << 1)");
+        b.end();
+        return b.build();
+    }
+
     static CodeTree readImmediate(String bc, String bci, InstructionImmediate immediate) {
         return readImmediateWithOffset(bc, bci, immediate, immediate.offset());
     }
 
     static CodeTree readImmediateWithOffset(String bc, String bci, InstructionImmediate immediate, int offset) {
+        if (immediate.fixedValue().isPresent()) {
+            return immediate.fixedValue().get().tree();
+        }
+        if (!immediate.isEncoded()) {
+            throw new AssertionError("Tried to read an immediate that is neither fixed nor encoded in the instruction: " + immediate);
+        }
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         String accessor = switch (immediate.kind().width) {
+            case NONE -> throw new AssertionError("Non-encoded immediates cannot be read.");
             case BYTE -> "getByte";
             case SHORT -> "getShort";
             case INT -> "getIntUnaligned";
             case LONG -> "getLongUnaligned";
         };
+        if (immediate.kind().isUnsigned()) {
+            b.startParentheses();
+        }
         b.startCall("BYTES", accessor);
         b.string(bc);
         b.startGroup();
@@ -2352,6 +2434,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         b.startComment().string(" imm ", immediate.name(), " ").end();
         b.end();
         b.end();
+        if (immediate.kind().isUnsigned()) {
+            b.string(" & 0xffff");
+            b.end();
+        }
         return b.build();
     }
 
@@ -2368,8 +2454,12 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     }
 
     static CodeTree writeImmediate(String bc, String bci, CodeTree value, InstructionImmediateEncoding immediate) {
+        if (immediate.width() == ImmediateWidth.NONE) {
+            throw new AssertionError("Non-encoded immediates cannot be written.");
+        }
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         String accessor = switch (immediate.width()) {
+            case NONE -> throw new AssertionError("Non-encoded immediates cannot be written.");
             case BYTE -> "putByte";
             case SHORT -> "putShort";
             case INT -> "putInt";
@@ -2440,6 +2530,10 @@ public final class BytecodeRootNodeElement extends AbstractElement {
 
     static String readShortSafe(String array, String index) {
         return String.format("SAFE_BYTES.getShort(%s, %s)", array, index);
+    }
+
+    static String readUnsignedShortSafe(String array, String index) {
+        return String.format("(SAFE_BYTES.getShort(%s, %s) & 0xffff)", array, index);
     }
 
     static String readByteSafe(String array, String index) {
@@ -2686,7 +2780,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
     CodeTree hasContinuationFrame(String frameName) {
         CodeTreeBuilder b = CodeTreeBuilder.createBuilder();
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
-            b.startParantheses();
+            b.startParentheses();
         }
         b.startCall(frameName, "isObject").string(BytecodeRootNodeElement.CONTINUATION_FRAME_INDEX).end();
         if (model.loadIllegalLocalStrategy == LoadIllegalLocalStrategy.DEFAULT_VALUE) {
@@ -2782,7 +2876,7 @@ public final class BytecodeRootNodeElement extends AbstractElement {
                     b.startNew("LocalVariableImpl");
                     b.tree(localBytecodeNode);
                     b.startGroup();
-                    b.startParantheses().tree(localIndex).end();
+                    b.startParentheses().tree(localIndex).end();
                     b.string(" * LOCALS_LENGTH");
                     b.end();
                     b.end();
@@ -2804,8 +2898,8 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         return switch (instr.kind) {
             case RETURN, YIELD, TAG_ENTER, TAG_LEAVE, TAG_LEAVE_VOID, TAG_RESUME, TAG_YIELD, TAG_YIELD_NULL -> true;
             case CUSTOM -> {
-                if (instr.operation.kind == OperationKind.CUSTOM_YIELD) {
-                    // custom yield always needs to set the bci
+                if (instr.operation.kind == OperationKind.CUSTOM_YIELD || instr.operation.kind == OperationKind.CUSTOM_RETURN) {
+                    // custom yield/return always need to set the bci
                     yield true;
                 }
                 CustomOperationModel custom = instr.operation.customModel;
@@ -2872,6 +2966,11 @@ public final class BytecodeRootNodeElement extends AbstractElement {
      * with the source info table.
      */
     final class SourceInfoTable {
+        /*
+         * A table entry needs enough attributes to encode all source section kinds. For suffix
+         * sections, an unresolved entry also needs two attributes to encode a link in the patch
+         * list (node id + table index).
+         */
         static final int NUM_ATTRIBUTES = Math.max(SourceSectionKind.MAX_ATTRIBUTES, 2);
 
         private final List<CodeVariableElement> constants;
@@ -2879,11 +2978,6 @@ public final class BytecodeRootNodeElement extends AbstractElement {
         final CodeVariableElement sourceOffset;
         final CodeVariableElement startBciOffset;
         final CodeVariableElement endBciOffset;
-        /*
-         * A table entry needs enough attributes to encode all source section kinds. For suffix
-         * sections, an entry needs enough attributes to encode a link in the patch list (node id +
-         * table index).
-         */
         final List<CodeVariableElement> attributeOffsets;
         final int entryLength;
         final CodeVariableElement entryLengthVariable;

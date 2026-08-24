@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 
 import org.graalvm.nativeimage.CurrentIsolate;
+import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
@@ -47,7 +48,6 @@ import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.Isolates;
-import com.oracle.svm.core.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.code.CodeInfo;
@@ -70,13 +70,11 @@ import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.SuspendSerialGCMaxHeapSize;
 import com.oracle.svm.core.heap.VMOperationInfos;
 import com.oracle.svm.core.interpreter.InterpreterSupport;
-import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.log.StringBuilderLog;
 import com.oracle.svm.core.meta.SubstrateObjectConstant;
 import com.oracle.svm.core.monitor.MonitorSupport;
-import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.snippets.ExceptionUnwind;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaFrame;
 import com.oracle.svm.core.stack.JavaStackWalker;
 import com.oracle.svm.core.stack.StackFrameVisitor;
@@ -85,9 +83,12 @@ import com.oracle.svm.core.thread.JavaVMOperation;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.util.PointerUtils;
-import com.oracle.svm.core.util.TimeUtils;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.option.HostedOptionKey;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Fold;
@@ -666,8 +667,9 @@ public final class Deoptimizer {
      * Invalidates the {@link InstalledCode} of the method of the given frame. The method must be a
      * runtime compiled method, since there is no {@link InstalledCode} for AOT-compiled methods.
      */
-    public static void invalidateMethodOfFrame(IsolateThread thread, Pointer sp, SpeculationReason speculation, boolean reprofile) {
+    public static void invalidateMethodOfFrame(IsolateThread thread, Pointer sp, SpeculationReason speculation, DeoptimizationReason reason, boolean reprofile) {
         VMError.guarantee(thread == CurrentIsolate.getCurrentThread());
+        DeoptimizationReason nonNullReason = reason != null ? reason : DeoptimizationReason.None;
 
         CodePointer ip = FrameAccess.singleton().readReturnAddress(thread, sp);
         if (checkLazyDeoptimized(ip)) {
@@ -700,6 +702,7 @@ public final class Deoptimizer {
         }
         registerSpeculationFailure(installedCode, speculation);
         VMOperation.guaranteeNotInProgress("invalidateMethodOfFrame: running user code that can block");
+        installedCode.recordDeoptimization(nonNullReason);
         if (reprofile) {
             installedCode.reprofile();
         }
@@ -777,6 +780,15 @@ public final class Deoptimizer {
         InterpreterEnterStub,
 
         /**
+         * Custom prologue: adapt incoming JNI arguments to match the wrapper's signature. For
+         * varargs calls, we will save all native ABI argument registers onto the stack.
+         * <p>
+         * Custom epilogue: copy the raw return bits from the general-purpose return register to the
+         * floating-point return register.
+         */
+        InterpreterJNIUpcallStub,
+
+        /**
          * Custom prologue: store arguments to stack and allocate variable sized frame.
          * <p>
          * Custom epilogue: prepare stack layout and ABI registers for outgoing call.
@@ -784,12 +796,17 @@ public final class Deoptimizer {
         InterpreterLeaveStub,
 
         /**
+         * Like {@link #InterpreterLeaveStub}, but calls a JNI native entry point.
+         */
+        InterpreterJNIDowncallStub,
+
+        /**
          * Custom prologue: move gp return register to first argument register.
          */
         InterpreterDeoptEntryPointStub;
 
         public boolean isInterpreterStub() {
-            return equals(InterpreterEnterStub) || equals(InterpreterLeaveStub);
+            return equals(InterpreterEnterStub) || equals(InterpreterJNIUpcallStub) || equals(InterpreterLeaveStub) || equals(InterpreterJNIDowncallStub);
         }
     }
 
@@ -801,18 +818,11 @@ public final class Deoptimizer {
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static boolean isNonNullObjectValue(UnsignedWord pointer) {
-        if (SubstrateOptions.SpawnIsolates.getValue()) {
-            /*
-             * KnownIntrinsics.heapBase() can represent null objects, but we cannot convert the heap
-             * base value to an object.
-             */
-            return pointer != Word.nullPointer() && pointer != KnownIntrinsics.heapBase();
-        }
         /*
-         * With spawn isolates option disabled (which is a legacy mode), the heap base may represent
-         * a valid heap object.
+         * KnownIntrinsics.heapBase() can represent null objects, but we cannot convert the heap
+         * base value to an object.
          */
-        return pointer != Word.nullPointer();
+        return pointer != Word.nullPointer() && pointer != KnownIntrinsics.heapBase();
     }
 
     /**
@@ -943,7 +953,8 @@ public final class Deoptimizer {
 
         if (SubstrateOptions.useRistretto() && deoptFrame.getTargetTier() == DeoptimizedFrame.DeoptTargetTier.Interpreter) {
             VMError.guarantee(SubstrateOptions.useRistretto(), "Interpreter deopt target requires Ristretto");
-            return InterpreterSupport.singleton().continueInterpreterDeoptimization(deoptFrame, originalStackPointer, gpReturnValue, fpReturnValue, hasException);
+            UnsignedWord interpreterGpReturnValue = gpReturnValueObject == null ? gpReturnValue : Word.zero();
+            return InterpreterSupport.singleton().continueInterpreterDeoptimization(deoptFrame, originalStackPointer, interpreterGpReturnValue, fpReturnValue, hasException, gpReturnValueObject);
         }
 
         VMError.guarantee(deoptFrame.getTargetTier() == DeoptTargetTier.BaselineCompiledCode && deoptFrame instanceof DeoptimizedBaselineCompiledFrame,
@@ -1039,7 +1050,7 @@ public final class Deoptimizer {
 
             if (SubstrateOptions.useRistretto() && frame.getTargetTier() == DeoptimizedFrame.DeoptTargetTier.Interpreter) {
                 VMError.guarantee(SubstrateOptions.useRistretto(), "Interpreter deopt target requires Ristretto");
-                return InterpreterSupport.singleton().continueInterpreterDeoptimization(frame, originalStackPointer, gpReturnValue, fpReturnValue, false);
+                return InterpreterSupport.singleton().continueInterpreterDeoptimization(frame, originalStackPointer, gpReturnValue, fpReturnValue, false, null);
             }
 
             VMError.guarantee(frame.getTargetTier() == DeoptTargetTier.BaselineCompiledCode && frame instanceof DeoptimizedBaselineCompiledFrame,
@@ -1110,7 +1121,7 @@ public final class Deoptimizer {
      */
     @Fold
     public static int savedBasePointerSize() {
-        if (SubstrateOptions.hasFramePointer()) {
+        if (SubstrateOptions.hasFramePointerSlot()) {
             return SubstrateTarget.getWordSize();
         } else {
             VMError.guarantee(Platform.includedIn(Platform.AMD64.class));
@@ -1136,21 +1147,45 @@ public final class Deoptimizer {
             return;
         }
 
-        FrameInfoQueryResult frameInfo = sourceChunk.getFrameInfo();
-
-        CFunctionPointer lazyStub = getLazyDeoptStub(frameInfo, pc, ignoreNonDeoptimizable);
+        CFunctionPointer lazyStub = getLazyDeoptStub(sourceChunk, pc, ignoreNonDeoptimizable);
         if (lazyStub.isNull()) {
             return;
         }
         installLazyDeoptStubReturnAddress(lazyStub, deoptState.sourceSp, deoptState.targetThread);
     }
 
-    private static CFunctionPointer getLazyDeoptStub(FrameInfoQueryResult frameInfo, CodePointer pc, boolean ignoreNonDeoptimizable) {
-        SharedRuntimeMethod interpreterDeoptTargetMethod = getInstalledCodeInterpreterDeoptTargetMethod(pc);
-        if (interpreterDeoptTargetMethod != null) {
-            return selectLazyDeoptStub(interpreterDeoptTargetMethod.getSignature().getReturnKind().isObject());
+    private static CFunctionPointer getLazyDeoptStub(CodeInfoQueryResult sourceChunk, CodePointer pc, boolean ignoreNonDeoptimizable) {
+        if (InterpreterSupport.isEnabled() && hasInstalledCodeInterpreterDeoptTarget(pc)) {
+            /*
+             * Do not use sourceChunk.getDeoptReturnValueIsObject() here. That bit describes an AOT
+             * deoptimization-entry call site, while Ristretto code deoptimizes to a Crema
+             * interpreter frame. It can therefore be false even when the ABI return register
+             * contains an object.
+             *
+             * This can happen for an AfterPop frame at an invoke BCI. The callee has returned and
+             * the caller has consumed the arguments, but the result still exists only in the ABI
+             * return register. It belongs to the invoke at the decoded BCI, possibly in an inlined
+             * frame, rather than to the compiled method's declared return type.
+             *
+             * The correct stub must be selected before the DeoptimizedFrame is constructed,
+             * because construction can allocate and trigger a moving GC. The object-return stub
+             * exposes the register as a GC root so that GC can update it. The primitive stub
+             * preserves only an UnsignedWord, which could leave a stale address if the register
+             * contains an object.
+             *
+             * For this reason, classify the return value only for an AfterPop frame at an invoke
+             * in a Ristretto method. Determine its kind from existing interpreter linkage without
+             * linking during deoptimization. All other states use the primitive stub. The AOT path
+             * below continues to use the target deoptimization entry's CodeInfo bit.
+             */
+            boolean objectReturnValueIsObject = InterpreterSupport.singleton().isInterpreterDeoptReturnValueObject(sourceChunk.getFrameInfo());
+            if (ImageSingletons.contains(LazyDeoptStubSelectionRecorder.class)) {
+                ImageSingletons.lookup(LazyDeoptStubSelectionRecorder.class).recordLazyDeoptStubSelection(sourceChunk, pc, objectReturnValueIsObject);
+            }
+            return selectLazyDeoptStub(objectReturnValueIsObject);
         }
 
+        FrameInfoQueryResult frameInfo = sourceChunk.getFrameInfo();
         if (!hasAOTDeoptTargetMethod(frameInfo)) {
             if (ignoreNonDeoptimizable) {
                 return Word.nullPointer();
@@ -1162,16 +1197,16 @@ public final class Deoptimizer {
         return selectLazyDeoptStub(targetInfo.getDeoptReturnValueIsObject());
     }
 
-    private static SharedRuntimeMethod getInstalledCodeInterpreterDeoptTargetMethod(CodePointer pc) {
+    private static boolean hasInstalledCodeInterpreterDeoptTarget(CodePointer pc) {
         if (!SubstrateOptions.useRistretto()) {
-            return null;
+            return false;
         }
 
         SubstrateInstalledCode installedCode = CodeInfoTable.lookupInstalledCode(pc);
         if (installedCode != null && installedCode.getMethod() instanceof SharedRuntimeMethod sharedMethod && sharedMethod.getDeoptTargetTier() == DeoptTargetTier.Interpreter) {
-            return sharedMethod;
+            return true;
         }
-        return null;
+        return false;
     }
 
     private static CFunctionPointer selectLazyDeoptStub(boolean objectReturnValueIsObject) {
@@ -1180,8 +1215,16 @@ public final class Deoptimizer {
                         : DeoptimizationSupport.getLazyDeoptStubPrimitiveReturnPointer();
     }
 
+    public static boolean canEagerlyDeoptimize(FrameInfoQueryResult frameInfo, CodePointer pc) {
+        /*
+         * Eager deoptimization needs either complete AOT deopt target metadata or a Ristretto
+         * interpreter deopt target for installed code.
+         */
+        return hasAOTDeoptTargetMethod(frameInfo) || hasInstalledCodeInterpreterDeoptTarget(pc);
+    }
+
     private DeoptimizedFrame deoptSourceFrameEagerly(CodePointer pc, boolean ignoreNonDeoptimizable) {
-        if (!hasAOTDeoptTargetMethod(sourceChunk.getFrameInfo()) && getInstalledCodeInterpreterDeoptTargetMethod(pc) == null) {
+        if (!canEagerlyDeoptimize(sourceChunk.getFrameInfo(), pc)) {
             if (ignoreNonDeoptimizable) {
                 return null;
             } else {
@@ -1842,6 +1885,11 @@ public final class Deoptimizer {
             current = current.getCaller();
         }
         throw VMError.shouldNotReachHere(sb.toString());
+    }
+
+    /** Test-only observer for lazy-deoptimization stub selection. */
+    public interface LazyDeoptStubSelectionRecorder {
+        void recordLazyDeoptStubSelection(CodeInfoQueryResult sourceChunk, CodePointer pc, boolean objectReturnValueIsObject);
     }
 
 }

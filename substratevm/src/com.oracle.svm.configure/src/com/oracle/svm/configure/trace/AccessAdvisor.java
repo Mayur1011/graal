@@ -84,8 +84,13 @@ public final class AccessAdvisor {
         internalCallerFilter.addOrGetChildren("java.lang.Module", ConfigurationFilter.Inclusion.Include);
         internalCallerFilter.addOrGetChildren("java.math.**", ConfigurationFilter.Inclusion.Exclude);
         internalCallerFilter.addOrGetChildren("java.net.**", ConfigurationFilter.Inclusion.Exclude);
-        // URLConnection.lookupContentHandlerClassFor calls Class.forName
+
+        // Calls Class.forName
         internalCallerFilter.addOrGetChildren("java.net.URLConnection", ConfigurationFilter.Inclusion.Include);
+        internalCallerFilter.addOrGetChildren("java.net.URL$DefaultFactory", ConfigurationFilter.Inclusion.Include);
+        // URL calls java.net.URL.DefaultFactory.createURLStreamHandler
+        internalCallerFilter.addOrGetChildren("java.net.URL", ConfigurationFilter.Inclusion.Include);
+
         internalCallerFilter.addOrGetChildren("java.nio.**", ConfigurationFilter.Inclusion.Exclude);
         internalCallerFilter.addOrGetChildren("java.text.**", ConfigurationFilter.Inclusion.Exclude);
         internalCallerFilter.addOrGetChildren("java.time.**", ConfigurationFilter.Inclusion.Exclude);
@@ -151,8 +156,7 @@ public final class AccessAdvisor {
 
     /*
      * Exclude selection of packages distributed with GraalVM which are not unconditionally exported
-     * by their module and should not be accessible from application code. Generate all with:
-     * native-image-utils generate-filters --exclude-unexported-packages-from-modules [--reduce]
+     * by their module and should not be accessible from application code.
      */
     private static void excludeInaccessiblePackages(HierarchyFilterNode rootNode) {
         rootNode.addOrGetChildren("com.oracle.graal.**", ConfigurationFilter.Inclusion.Exclude);
@@ -245,6 +249,9 @@ public final class AccessAdvisor {
         }
     }
 
+    private static final JNICallDescriptor WINDOWS_LAUNCHER_BOOLEAN_PROPERTY_LOOKUP = new JNICallDescriptor("GetStaticMethodID", "java.lang.Boolean", "getBoolean",
+                    "(Ljava/lang/String;)Z", false);
+
     private static final JNICallDescriptor[] JNI_STARTUP_SEQUENCE = new JNICallDescriptor[]{
                     new JNICallDescriptor("GetStaticMethodID", "sun.launcher.LauncherHelper", "getApplicationClass", "()Ljava/lang/Class;", true),
                     new JNICallDescriptor("GetMethodID", "java.lang.Class", "getCanonicalName", "()Ljava/lang/String;", false),
@@ -288,6 +295,11 @@ public final class AccessAdvisor {
                 logIgnoredEntry("calls from sun.launcher.LauncherHelper are ignored", entry);
                 return true;
             }
+            if (WINDOWS_LAUNCHER_BOOLEAN_PROPERTY_LOOKUP.matches(jniFunction, queriedClass.get(), name.get(), signature.get())) {
+                // The Windows launcher may query a boolean system property before Java main starts.
+                logIgnoredEntry("calls to java.lang.Boolean.getBoolean during launcher startup are ignored", entry);
+                return true;
+            }
 
             if (expectedCall.required) {
                 // Mismatch on a required call. Mark startup as complete and start tracing JNI
@@ -310,7 +322,7 @@ public final class AccessAdvisor {
     public boolean shouldIgnoreResourceLookup(LazyValue<String> resource, EconomicMap<String, Object> entry) {
         boolean result = Set.of("META-INF/services/jdk.vm.ci.services.JVMCIServiceLocator", "META-INF/services/java.lang.System$LoggerFinder",
                         "META-INF/services/jdk.vm.ci.hotspot.HotSpotJVMCIBackendFactory", "META-INF/services/jdk.graal.compiler.options.OptionDescriptors",
-                        "META-INF/services/com.oracle.graal.phases.preciseinline.priorityinline.PolicyFactory").contains(resource.get());
+                        "META-INF/services/jdk.graal.compiler.phases.common.priorityinline.PolicyFactory").contains(resource.get());
         if (result) {
             logIgnoredEntry("blocklisted resource", entry);
         }

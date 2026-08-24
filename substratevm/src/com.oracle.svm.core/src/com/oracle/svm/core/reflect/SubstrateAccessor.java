@@ -34,9 +34,10 @@ import org.graalvm.word.Pointer;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.meta.MethodRef;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 
+import jdk.internal.vm.annotation.Hidden;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 @InternalVMMethod
@@ -115,7 +116,12 @@ public abstract class SubstrateAccessor {
         return getCodePointer(expandSignature);
     }
 
-    public Object invokeSpecial(Object obj, Object[] args) {
+    /*
+     * This is @Hidden. This is important as this is called as part of the method handle
+     * implementation where this frame is not expected to appear.
+     */
+    @Hidden
+    public Object methodHandleInvokeSpecial(Object obj, Object[] args) {
         CFunctionPointer target = getDirectTarget();
         if (target.isNull()) {
             throw new IllegalArgumentException("Cannot do invokespecial for an abstract method");

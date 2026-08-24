@@ -723,7 +723,7 @@ public final class FrameState extends VirtualState implements IterableNodeType {
 
                 /*
                  * The virtual object may be mapped to another virtual object. If this is the case,
-                 * we must ensure that that one is mapped too.
+                 * we must ensure that one is mapped too.
                  */
                 MaterializedObjectState materializedObjectState = (MaterializedObjectState) pushedEscapeObjectState;
                 if (materializedObjectState.materializedValue() instanceof VirtualObjectNode) {
@@ -990,14 +990,15 @@ public final class FrameState extends VirtualState implements IterableNodeType {
 
     @Override
     public void applyToVirtual(VirtualClosure closure) {
-        closure.apply(this);
-        if (virtualObjectMappings != null) {
-            for (EscapeObjectState state : virtualObjectMappings) {
-                state.applyToVirtual(closure);
+        FrameState current = this;
+        while (current != null) {
+            closure.apply(current);
+            if (current.virtualObjectMappings != null) {
+                for (EscapeObjectState state : current.virtualObjectMappings) {
+                    state.applyToVirtual(closure);
+                }
             }
-        }
-        if (outerFrameState() != null) {
-            outerFrameState().applyToVirtual(closure);
+            current = current.outerFrameState();
         }
     }
 

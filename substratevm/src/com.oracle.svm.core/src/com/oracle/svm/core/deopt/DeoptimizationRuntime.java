@@ -34,12 +34,12 @@ import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.Pointer;
 
 import com.oracle.svm.core.FrameAccess;
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.code.CodeInfoTable;
 import com.oracle.svm.core.code.DeoptimizationSourcePositionDecoder;
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.snippets.SnippetRuntime;
 import com.oracle.svm.core.snippets.SnippetRuntime.SubstrateForeignCallDescriptor;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
@@ -69,6 +69,7 @@ public class DeoptimizationRuntime {
 
             Pointer sp = KnownIntrinsics.readCallerStackPointer();
             DeoptimizationAction action = Deoptimizer.decodeDeoptAction(actionAndReason);
+            DeoptimizationReason reason = Deoptimizer.decodeDeoptReason(actionAndReason);
 
             if (Deoptimizer.Options.TraceDeoptimization.getValue()) {
                 CodePointer ip = KnownIntrinsics.readReturnAddress();
@@ -80,7 +81,7 @@ public class DeoptimizationRuntime {
 
             if (action.doesInvalidateCompilation()) {
                 boolean reprofile = (action == DeoptimizationAction.InvalidateReprofile);
-                Deoptimizer.invalidateMethodOfFrame(CurrentIsolate.getCurrentThread(), sp, speculation, reprofile);
+                Deoptimizer.invalidateMethodOfFrame(CurrentIsolate.getCurrentThread(), sp, speculation, reason, reprofile);
             } else {
                 Deoptimizer.deoptimizeFrame(sp, false, speculation);
             }

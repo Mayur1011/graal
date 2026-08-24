@@ -27,10 +27,7 @@ package com.oracle.svm.hosted.jni;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Function;
 
-import com.oracle.graal.pointsto.ObjectScanner;
-import com.oracle.graal.pointsto.ObjectScanner.ScanReason;
 import com.oracle.graal.pointsto.infrastructure.ResolvedSignature;
 import com.oracle.graal.pointsto.infrastructure.WrappedJavaMethod;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
@@ -38,15 +35,11 @@ import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.HostedProviders;
 import com.oracle.svm.core.graal.code.CGlobalDataInfo;
 import com.oracle.svm.core.graal.nodes.CGlobalDataLoadAddressNode;
-import com.oracle.svm.core.jni.access.JNINativeLinkage;
 import com.oracle.svm.core.jni.headers.JNIEnvironment;
 import com.oracle.svm.core.jni.headers.JNIObjectHandle;
 import com.oracle.svm.core.thread.VMThreads.StatusSupport;
 import com.oracle.svm.guest.staging.c.CGlobalDataFactory;
-import com.oracle.svm.hosted.annotation.CustomSubstitutionMethod;
 import com.oracle.svm.hosted.c.CGlobalDataFeature;
-import com.oracle.svm.util.GuestAccess;
-import com.oracle.svm.util.JVMCIReflectionUtil;
 
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.nodes.ConstantNode;
@@ -58,7 +51,6 @@ import jdk.graal.compiler.nodes.java.MonitorExitNode;
 import jdk.graal.compiler.nodes.java.MonitorIdNode;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.LineNumberTable;
-import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
@@ -66,25 +58,22 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
  * transitioning to native code and back to Java, and if required, for boxing object arguments in
  * handles and for unboxing an object return value.
  */
-class JNINativeCallWrapperMethod extends CustomSubstitutionMethod {
+class JNINativeCallWrapperMethod extends AbstractJNINativeCallWrapperMethod {
     /** Line number that indicates a native method to {@link StackTraceElement}. */
     private static final int NATIVE_LINE_NUMBER = -2;
     private static final LineNumberTable LINE_NUMBER_TABLE = new LineNumberTable(new int[]{1}, new int[]{NATIVE_LINE_NUMBER});
 
-    private final JNINativeLinkage linkage;
-    private final ResolvedJavaField linkageBuiltInAddressField;
-
     JNINativeCallWrapperMethod(ResolvedJavaMethod method) {
         super(method);
         assert !(method instanceof WrappedJavaMethod);
-        this.linkage = createLinkage(method);
-        this.linkageBuiltInAddressField = JVMCIReflectionUtil.getUniqueDeclaredField(GuestAccess.get().lookupType(JNINativeLinkage.class), "builtInAddress");
     }
 
-    private static JNINativeLinkage createLinkage(ResolvedJavaMethod method) {
-        String className = method.getDeclaringClass().getName();
-        String descriptor = method.getSignature().toMethodDescriptor();
-        return JNIAccessFeature.singleton().makeLinkage(className, method.getName(), descriptor);
+    String getShortSymbol() {
+        return linkage.getShortSymbol();
+    }
+
+    String getLongSymbol() {
+        return linkage.getLongSymbol();
     }
 
     @Override
@@ -113,12 +102,8 @@ class JNINativeCallWrapperMethod extends CustomSubstitutionMethod {
 
         ValueNode callAddress;
         if (linkage.isBuiltInFunction()) {
-            Function<String, CGlobalDataInfo> createSymbol = symbolName -> CGlobalDataFeature.singleton().registerAsAccessedOrGet(CGlobalDataFactory.forSymbol(symbolName));
-            CGlobalDataInfo builtinAddress = linkage.getOrCreateBuiltInAddress(createSymbol);
+            CGlobalDataInfo builtinAddress = linkage.getOrCreateBuiltInAddress(symbolName -> CGlobalDataFeature.singleton().registerAsAccessedOrGet(CGlobalDataFactory.forSymbol(symbolName)));
             callAddress = kit.unique(new CGlobalDataLoadAddressNode(builtinAddress));
-
-            ScanReason reason = new ObjectScanner.OtherReason("Manual rescan triggered for " + method.getQualifiedName());
-            method.getUniverse().getHeapScanner().rescanField(linkage, linkageBuiltInAddressField, reason);
         } else {
             callAddress = kit.invokeNativeCallAddress(kit.createObject(linkage));
         }

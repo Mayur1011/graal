@@ -25,15 +25,6 @@
 
 package jdk.graal.compiler.core.amd64;
 
-import static jdk.vm.ci.amd64.AMD64.rax;
-import static jdk.vm.ci.amd64.AMD64.rbx;
-import static jdk.vm.ci.amd64.AMD64.r8;
-import static jdk.vm.ci.amd64.AMD64.r9;
-import static jdk.vm.ci.amd64.AMD64.rcx;
-import static jdk.vm.ci.amd64.AMD64.rdi;
-import static jdk.vm.ci.amd64.AMD64.rdx;
-import static jdk.vm.ci.amd64.AMD64.rsi;
-
 import static jdk.graal.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.BYTE;
 import static jdk.graal.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.DWORD;
 import static jdk.graal.compiler.asm.amd64.AMD64BaseAssembler.OperandSize.PD;
@@ -46,8 +37,20 @@ import static jdk.graal.compiler.lir.LIRValueUtil.asJavaConstant;
 import static jdk.graal.compiler.lir.LIRValueUtil.isConstantValue;
 import static jdk.graal.compiler.lir.LIRValueUtil.isIntConstant;
 import static jdk.graal.compiler.lir.LIRValueUtil.isJavaConstant;
+import static jdk.graal.compiler.lir.amd64.AMD64ComplexVectorOp.supports;
+import static jdk.vm.ci.amd64.AMD64.r8;
+import static jdk.vm.ci.amd64.AMD64.r9;
+import static jdk.vm.ci.amd64.AMD64.r10;
+import static jdk.vm.ci.amd64.AMD64.r11;
+import static jdk.vm.ci.amd64.AMD64.rax;
+import static jdk.vm.ci.amd64.AMD64.rbx;
+import static jdk.vm.ci.amd64.AMD64.rcx;
+import static jdk.vm.ci.amd64.AMD64.rdi;
+import static jdk.vm.ci.amd64.AMD64.rdx;
+import static jdk.vm.ci.amd64.AMD64.rsi;
 import static jdk.vm.ci.code.ValueUtil.asRegister;
 import static jdk.vm.ci.code.ValueUtil.isAllocatableValue;
+import static jdk.vm.ci.code.ValueUtil.isIllegal;
 import static jdk.vm.ci.code.ValueUtil.isRegister;
 
 import java.util.EnumSet;
@@ -60,6 +63,7 @@ import jdk.graal.compiler.asm.amd64.AMD64Assembler.SSEOp;
 import jdk.graal.compiler.asm.amd64.AMD64Assembler.VexRMOp;
 import jdk.graal.compiler.asm.amd64.AMD64Assembler.VexRROp;
 import jdk.graal.compiler.asm.amd64.AMD64BaseAssembler.OperandSize;
+import jdk.graal.compiler.asm.amd64.AMD64MacroAssembler;
 import jdk.graal.compiler.asm.amd64.AVXKind;
 import jdk.graal.compiler.asm.amd64.AVXKind.AVXSize;
 import jdk.graal.compiler.core.common.LIRKind;
@@ -91,8 +95,15 @@ import jdk.graal.compiler.lir.amd64.AMD64ArrayCopyWithConversionsOp;
 import jdk.graal.compiler.lir.amd64.AMD64ArrayEqualsOp;
 import jdk.graal.compiler.lir.amd64.AMD64ArrayIndexOfOp;
 import jdk.graal.compiler.lir.amd64.AMD64ArrayRegionCompareToOp;
+import jdk.graal.compiler.lir.amd64.AMD64Base64DecodeOp;
+import jdk.graal.compiler.lir.amd64.AMD64Base64EncodeOp;
+import jdk.graal.compiler.lir.amd64.AMD64ChaCha20BlockOp;
 import jdk.graal.compiler.lir.amd64.AMD64BigIntegerMulAddOp;
+import jdk.graal.compiler.lir.amd64.AMD64BigIntegerLeftShiftOp;
+import jdk.graal.compiler.lir.amd64.AMD64BigIntegerMontgomeryMultiplyOp;
+import jdk.graal.compiler.lir.amd64.AMD64BigIntegerMontgomerySquareOp;
 import jdk.graal.compiler.lir.amd64.AMD64BigIntegerMultiplyToLenOp;
+import jdk.graal.compiler.lir.amd64.AMD64BigIntegerRightShiftOp;
 import jdk.graal.compiler.lir.amd64.AMD64BigIntegerSquareToLenOp;
 import jdk.graal.compiler.lir.amd64.AMD64BinaryConsumer;
 import jdk.graal.compiler.lir.amd64.AMD64ByteSwapOp;
@@ -119,16 +130,34 @@ import jdk.graal.compiler.lir.amd64.AMD64ControlFlow.StrategySwitchOp;
 import jdk.graal.compiler.lir.amd64.AMD64ControlFlow.TestBranchOp;
 import jdk.graal.compiler.lir.amd64.AMD64ControlFlow.TestByteBranchOp;
 import jdk.graal.compiler.lir.amd64.AMD64ControlFlow.TestConstBranchOp;
-import jdk.graal.compiler.lir.amd64.AMD64Base64DecodeOp;
-import jdk.graal.compiler.lir.amd64.AMD64Base64EncodeOp;
+import jdk.graal.compiler.lir.amd64.AMD64Adler32UpdateBytesOp;
 import jdk.graal.compiler.lir.amd64.AMD64CountPositivesOp;
+import jdk.graal.compiler.lir.amd64.AMD64CRC32CUpdateBytesOp;
+import jdk.graal.compiler.lir.amd64.AMD64CRC32UpdateBytesOp;
+import jdk.graal.compiler.lir.amd64.AMD64DoubleModStubOp;
 import jdk.graal.compiler.lir.amd64.AMD64CounterModeAESCryptOp;
+import jdk.graal.compiler.lir.amd64.AMD64DilithiumAlmostInverseNttOp;
+import jdk.graal.compiler.lir.amd64.AMD64DilithiumAlmostNttOp;
+import jdk.graal.compiler.lir.amd64.AMD64DilithiumDecomposePolyOp;
+import jdk.graal.compiler.lir.amd64.AMD64DilithiumMontMulByConstantOp;
+import jdk.graal.compiler.lir.amd64.AMD64DilithiumNttMultOp;
+import jdk.graal.compiler.lir.amd64.AMD64DoubleKeccakOp;
 import jdk.graal.compiler.lir.amd64.AMD64ElectronicCodeBookAESDecryptOp;
 import jdk.graal.compiler.lir.amd64.AMD64ElectronicCodeBookAESEncryptOp;
 import jdk.graal.compiler.lir.amd64.AMD64EncodeArrayOp;
+import jdk.graal.compiler.lir.amd64.AMD64GaloisCounterModeAESCryptOp;
 import jdk.graal.compiler.lir.amd64.AMD64GHASHProcessBlocksOp;
 import jdk.graal.compiler.lir.amd64.AMD64HaltOp;
 import jdk.graal.compiler.lir.amd64.AMD64IndexOfZeroOp;
+import jdk.graal.compiler.lir.amd64.AMD64IntegerPolynomialAssignOp;
+import jdk.graal.compiler.lir.amd64.AMD64IntegerPolynomialP256MontgomeryMultOp;
+import jdk.graal.compiler.lir.amd64.AMD64Kyber12To16Op;
+import jdk.graal.compiler.lir.amd64.AMD64KyberAddPoly2Op;
+import jdk.graal.compiler.lir.amd64.AMD64KyberAddPoly3Op;
+import jdk.graal.compiler.lir.amd64.AMD64KyberBarrettReduceOp;
+import jdk.graal.compiler.lir.amd64.AMD64KyberInverseNttOp;
+import jdk.graal.compiler.lir.amd64.AMD64KyberNttMultOp;
+import jdk.graal.compiler.lir.amd64.AMD64KyberNttOp;
 import jdk.graal.compiler.lir.amd64.AMD64LFenceOp;
 import jdk.graal.compiler.lir.amd64.AMD64MD5Op;
 import jdk.graal.compiler.lir.amd64.AMD64Move;
@@ -136,6 +165,7 @@ import jdk.graal.compiler.lir.amd64.AMD64Move.CompareAndSwapOp;
 import jdk.graal.compiler.lir.amd64.AMD64Move.MembarOp;
 import jdk.graal.compiler.lir.amd64.AMD64Move.StackLeaOp;
 import jdk.graal.compiler.lir.amd64.AMD64PauseOp;
+import jdk.graal.compiler.lir.amd64.AMD64Poly1305ProcessBlocksOp;
 import jdk.graal.compiler.lir.amd64.AMD64ReadTimestampCounterWithProcid;
 import jdk.graal.compiler.lir.amd64.AMD64SHA1Op;
 import jdk.graal.compiler.lir.amd64.AMD64SHA256AVX2Op;
@@ -305,6 +335,12 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                 return result;
             }
         }
+    }
+
+    private AllocatableValue emitConvertNullToZero(Value value) {
+        AllocatableValue result = newVariable(value.getValueKind());
+        emitConvertNullToZero(result, value);
+        return result;
     }
 
     @Override
@@ -760,9 +796,11 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value arrayA, Value lengthA,
                     Value arrayB, Value lengthB) {
         LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        // AMD64ArrayCompareToOp emits pcmpestri, which implicitly uses rcx, rdx, and rax.
+        // Pre-allocate the lengths and result into those fixed registers so the op can reuse them.
         RegisterValue raxRes = rax.asValue(resultKind);
-        RegisterValue cntA = AMD64.rcx.asValue(lengthA.getValueKind());
-        RegisterValue cntB = AMD64.rdx.asValue(lengthB.getValueKind());
+        RegisterValue cntA = rcx.asValue(lengthA.getValueKind());
+        RegisterValue cntB = rdx.asValue(lengthB.getValueKind());
         emitMove(cntA, lengthA);
         emitMove(cntB, lengthB);
         append(new AMD64ArrayCompareToOp(this, getAVX3Threshold(), strideA, strideB, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
@@ -776,9 +814,9 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     @Override
     public Variable emitArrayRegionCompareTo(EnumSet<?> runtimeCheckedCPUFeatures, Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length, Value dynamicStrides) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayRegionCompareToOp.movParamsAndCreate(this, null, null, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, length, dynamicStrides,
-                        ZERO_EXTEND));
+        append(new AMD64ArrayRegionCompareToOp(this, null, null, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        asAllocatable(length), dynamicStrides == null ? Value.ILLEGAL : asAllocatable(dynamicStrides), ZERO_EXTEND));
         return result;
     }
 
@@ -786,9 +824,9 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     @Override
     public Variable emitArrayRegionCompareTo(Stride strideA, Stride strideB, EnumSet<?> runtimeCheckedCPUFeatures, Value arrayA, Value offsetA, Value arrayB, Value offsetB, Value length) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayRegionCompareToOp.movParamsAndCreate(this, strideA, strideB, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, length, null,
-                        ZERO_EXTEND));
+        append(new AMD64ArrayRegionCompareToOp(this, strideA, strideB, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        asAllocatable(length), Value.ILLEGAL, ZERO_EXTEND));
         return result;
     }
 
@@ -796,7 +834,11 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     @Override
     public Variable emitVectorizedMismatch(EnumSet<?> runtimeCheckedCPUFeatures, Value arrayA, Value arrayB, Value length, Value stride) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64VectorizedMismatchOp.movParamsAndCreate(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, result, arrayA, arrayB, length, stride));
+        // Only stride stays fixed because shlq(length) takes its shift count from cl/rcx. The
+        // array pointers and length remain allocatable @UseKill operands.
+        RegisterValue regStride = rcx.asValue(stride.getValueKind());
+        emitMove(regStride, stride);
+        append(new AMD64VectorizedMismatchOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, result, asAllocatable(arrayA), asAllocatable(arrayB), asAllocatable(length), regStride));
         return result;
     }
 
@@ -817,10 +859,10 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value length) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
         Stride stride = Stride.fromJavaKind(commonElementKind);
-        append(AMD64ArrayEqualsOp.movParamsAndCreate(this, commonElementKind, stride, stride, stride,
-                        (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, null, length, null,
-                        ZERO_EXTEND));
+        int constLength = isJavaConstant(length) ? asJavaConstant(length).asInt() : -1;
+        append(new AMD64ArrayEqualsOp(this, commonElementKind, stride, stride, stride, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        Value.ILLEGAL, asAllocatable(length), Value.ILLEGAL, ZERO_EXTEND, constLength));
         return result;
     }
 
@@ -833,10 +875,10 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value arrayB, Value offsetB,
                     Value length) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayEqualsOp.movParamsAndCreate(this, strideA, strideB, strideB,
-                        (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, null, length,
-                        ZERO_EXTEND));
+        int constLength = isJavaConstant(length) ? asJavaConstant(length).asInt() : -1;
+        append(new AMD64ArrayEqualsOp(this, JavaKind.Byte, strideA, strideB, strideB, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        Value.ILLEGAL, asAllocatable(length), Value.ILLEGAL, ZERO_EXTEND, constLength));
         return result;
     }
 
@@ -849,9 +891,10 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value length,
                     Value dynamicStrides) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayEqualsOp.movParamsAndCreate(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, null, length, dynamicStrides,
-                        ZERO_EXTEND));
+        int constLength = isJavaConstant(length) ? asJavaConstant(length).asInt() : -1;
+        append(new AMD64ArrayEqualsOp(this, JavaKind.Byte, null, null, null, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        Value.ILLEGAL, asAllocatable(length), asAllocatable(dynamicStrides), ZERO_EXTEND, constLength));
         return result;
     }
 
@@ -867,10 +910,10 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value mask,
                     Value length) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayEqualsOp.movParamsAndCreate(this, strideA, strideB, strideMask,
-                        (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, mask, length,
-                        ZERO_EXTEND));
+        int constLength = isJavaConstant(length) ? asJavaConstant(length).asInt() : -1;
+        append(new AMD64ArrayEqualsOp(this, JavaKind.Byte, strideA, strideB, strideMask, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        asAllocatable(mask), asAllocatable(length), Value.ILLEGAL, ZERO_EXTEND, constLength));
         return result;
     }
 
@@ -884,10 +927,10 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
                     Value length,
                     Value dynamicStrides) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayEqualsOp.movParamsAndCreate(this,
-                        (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayA, offsetA, arrayB, offsetB, mask, length, dynamicStrides,
-                        ZERO_EXTEND));
+        int constLength = isJavaConstant(length) ? asJavaConstant(length).asInt() : -1;
+        append(new AMD64ArrayEqualsOp(this, JavaKind.Byte, null, null, null, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayA), asAllocatable(offsetA), emitConvertNullToZero(arrayB), asAllocatable(offsetB),
+                        asAllocatable(mask), asAllocatable(length), asAllocatable(dynamicStrides), ZERO_EXTEND, constLength));
         return result;
     }
 
@@ -895,23 +938,29 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     @Override
     public void emitArrayCopyWithConversion(Stride strideSrc, Stride strideDst, EnumSet<?> runtimeCheckedCPUFeatures,
                     Value arraySrc, Value offsetSrc, Value arrayDst, Value offsetDst, Value length) {
-        append(AMD64ArrayCopyWithConversionsOp.movParamsAndCreate(this, strideSrc, strideDst, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        arraySrc, offsetSrc, arrayDst, offsetDst, length,
-                        ZERO_EXTEND));
+        append(new AMD64ArrayCopyWithConversionsOp(this, strideSrc, strideDst, false, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        emitConvertNullToZero(arraySrc), asAllocatable(offsetSrc),
+                        emitConvertNullToZero(arrayDst), asAllocatable(offsetDst),
+                        asAllocatable(length), Value.ILLEGAL, AMD64MacroAssembler.ExtendMode.ZERO_EXTEND));
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public void emitArrayCopyWithConversion(EnumSet<?> runtimeCheckedCPUFeatures,
                     Value arraySrc, Value offsetSrc, Value arrayDst, Value offsetDst, Value length, Value dynamicStrides) {
-        append(AMD64ArrayCopyWithConversionsOp.movParamsAndCreate(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, arraySrc, offsetSrc, arrayDst, offsetDst, length, dynamicStrides,
-                        ZERO_EXTEND));
+        append(new AMD64ArrayCopyWithConversionsOp(this, null, null, false, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        emitConvertNullToZero(arraySrc), asAllocatable(offsetSrc),
+                        emitConvertNullToZero(arrayDst), asAllocatable(offsetDst),
+                        asAllocatable(length), isIllegal(dynamicStrides) ? Value.ILLEGAL : asAllocatable(dynamicStrides), AMD64MacroAssembler.ExtendMode.ZERO_EXTEND));
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public void emitArrayCopyWithReverseBytes(Stride stride, EnumSet<?> runtimeCheckedCPUFeatures, Value arraySrc, Value offsetSrc, Value arrayDst, Value offsetDst, Value length) {
-        append(AMD64ArrayCopyWithConversionsOp.movParamsAndCreateReverseBytes(this, stride, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, arraySrc, offsetSrc, arrayDst, offsetDst, length));
+        append(new AMD64ArrayCopyWithConversionsOp(this, stride, stride, true, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        emitConvertNullToZero(arraySrc), asAllocatable(offsetSrc),
+                        emitConvertNullToZero(arrayDst), asAllocatable(offsetDst),
+                        asAllocatable(length), Value.ILLEGAL, AMD64MacroAssembler.ExtendMode.ZERO_EXTEND));
     }
 
     @SuppressWarnings("unchecked")
@@ -919,7 +968,12 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     public Variable emitCalcStringAttributes(CalcStringAttributesEncoding encoding, EnumSet<?> runtimeCheckedCPUFeatures,
                     Value array, Value offset, Value length, boolean assumeValid) {
         Variable result = newVariable(LIRKind.value(encoding == CalcStringAttributesEncoding.UTF_8 || encoding.isUTF16() ? AMD64Kind.QWORD : AMD64Kind.DWORD));
-        append(AMD64CalcStringAttributesOp.movParamsAndCreate(this, encoding, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, array, offset, length, result, assumeValid));
+        // AMD64CalcStringAttributesOp reuses offset as lengthTail, and the ordered 4-7 byte tail
+        // load consumes that value via the implicit rcx shift count.
+        RegisterValue regOffset = AMD64.rcx.asValue(offset.getValueKind());
+        emitMove(regOffset, offset);
+        append(new AMD64CalcStringAttributesOp(this, encoding, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        emitConvertNullToZero(array), regOffset, asAllocatable(length), result, assumeValid));
         return result;
     }
 
@@ -1007,6 +1061,46 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
         return result;
     }
 
+    @SuppressWarnings("unchecked")
+    @Override
+    public Variable emitGaloisCounterModeAESCrypt(EnumSet<?> runtimeCheckedCPUFeatures, Value inAddr, Value len, Value ctAddr, Value outAddr, Value kAddr, Value stateAddr, Value subkeyHtblAddr,
+                    Value counterAddr) {
+        AllocatableValue rIn = rdi.asValue(inAddr.getValueKind());
+        AllocatableValue rLen = rsi.asValue(len.getValueKind());
+        AllocatableValue rCt = rdx.asValue(ctAddr.getValueKind());
+        AllocatableValue rOut = rcx.asValue(outAddr.getValueKind());
+        AllocatableValue rKey = r8.asValue(kAddr.getValueKind());
+        AllocatableValue rState = r9.asValue(stateAddr.getValueKind());
+        boolean useAVX512 = supports(target(), (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, CPUFeature.AES, CPUFeature.CLMUL, CPUFeature.AVX, CPUFeature.AVX2,
+                        CPUFeature.AVX512F, CPUFeature.AVX512DQ, CPUFeature.AVX512BW, CPUFeature.AVX512VL, CPUFeature.AVX512_VAES, CPUFeature.AVX512_VPCLMULQDQ);
+        AllocatableValue rSubkeyHtbl = (useAVX512 ? r10 : r11).asValue(subkeyHtblAddr.getValueKind());
+        AllocatableValue rCounter = (useAVX512 ? r11 : rax).asValue(counterAddr.getValueKind());
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(rIn, inAddr);
+        emitMove(rLen, len);
+        emitMove(rCt, ctAddr);
+        emitMove(rOut, outAddr);
+        emitMove(rKey, kAddr);
+        emitMove(rState, stateAddr);
+        emitMove(rSubkeyHtbl, subkeyHtblAddr);
+        emitMove(rCounter, counterAddr);
+        append(new AMD64GaloisCounterModeAESCryptOp(this,
+                        (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        rIn,
+                        rLen,
+                        rCt,
+                        rOut,
+                        rKey,
+                        rState,
+                        rSubkeyHtbl,
+                        rCounter,
+                        rResult,
+                        getArrayLengthOffset() - getArrayBaseOffset(JavaKind.Int)));
+        Variable result = newVariable(len.getValueKind());
+        emitMove(result, rResult);
+        return result;
+    }
+
     @Override
     public Variable emitCBCAESEncrypt(Value inAddr, Value outAddr, Value kAddr, Value rAddr, Value len) {
         Variable result = newVariable(len.getValueKind());
@@ -1077,11 +1171,69 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
         return result;
     }
 
+    @Override
+    public Variable emitChaCha20Block(Value state, Value result) {
+        RegisterValue stateReg = AMD64.rdi.asValue(state.getValueKind());
+        RegisterValue resultReg = AMD64.rsi.asValue(result.getValueKind());
+        RegisterValue outputLengthReg = AMD64.rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(stateReg, state);
+        emitMove(resultReg, result);
+        append(new AMD64ChaCha20BlockOp(stateReg, resultReg, outputLengthReg));
+        Variable outputLength = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(outputLength, outputLengthReg);
+        return outputLength;
+    }
+
     @SuppressWarnings("unchecked")
     @Override
     public void emitGHASHProcessBlocks(EnumSet<?> runtimeCheckedCPUFeatures, Value state, Value hashSubkey, Value data, Value blocks) {
         append(new AMD64GHASHProcessBlocksOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, asAllocatable(state), asAllocatable(hashSubkey), asAllocatable(data),
                         asAllocatable(blocks)));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public void emitPoly1305ProcessBlocks(EnumSet<?> runtimeCheckedCPUFeatures, Value input, Value length, Value accumulator, Value r) {
+        RegisterValue rInput = rdi.asValue(input.getValueKind());
+        RegisterValue rLength = rbx.asValue(length.getValueKind());
+        RegisterValue rAccumulator = rcx.asValue(accumulator.getValueKind());
+        RegisterValue rR = r8.asValue(r.getValueKind());
+
+        emitMove(rInput, input);
+        emitMove(rLength, length);
+        emitMove(rAccumulator, accumulator);
+        emitMove(rR, r);
+
+        append(new AMD64Poly1305ProcessBlocksOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rInput, rLength, rAccumulator, rR));
+    }
+
+    @Override
+    public void emitIntegerPolynomialAssign(Value set, Value a, Value b, Value length) {
+        RegisterValue rSet = rdi.asValue(set.getValueKind());
+        RegisterValue rA = rsi.asValue(a.getValueKind());
+        RegisterValue rB = rdx.asValue(b.getValueKind());
+        RegisterValue rLength = rcx.asValue(length.getValueKind());
+
+        emitMove(rSet, set);
+        emitMove(rA, a);
+        emitMove(rB, b);
+        emitMove(rLength, length);
+
+        append(new AMD64IntegerPolynomialAssignOp(rSet, rA, rB, rLength));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public void emitIntegerPolynomialP256MontgomeryMult(EnumSet<?> runtimeCheckedCPUFeatures, Value a, Value b, Value r) {
+        RegisterValue rA = rdi.asValue(a.getValueKind());
+        RegisterValue rB = rsi.asValue(b.getValueKind());
+        RegisterValue rR = rdx.asValue(r.getValueKind());
+
+        emitMove(rA, a);
+        emitMove(rB, b);
+        emitMove(rR, r);
+
+        append(new AMD64IntegerPolynomialP256MontgomeryMultOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rA, rB, rR));
     }
 
     @Override
@@ -1139,31 +1291,190 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
         append(new AMD64BigIntegerSquareToLenOp(this, rX, rLen, rZ, rZlen));
     }
 
+    @Override
+    public void emitBigIntegerMontgomeryMultiply(Value a, Value b, Value n, Value len, Value inv, Value product) {
+        RegisterValue rA = AMD64.rdi.asValue(a.getValueKind());
+        RegisterValue rB = AMD64.rsi.asValue(b.getValueKind());
+        RegisterValue rN = AMD64.rdx.asValue(n.getValueKind());
+        RegisterValue rLen = AMD64.rcx.asValue(len.getValueKind());
+        RegisterValue rInv = AMD64.r8.asValue(inv.getValueKind());
+        RegisterValue rProduct = AMD64.r9.asValue(product.getValueKind());
+
+        emitMove(rA, a);
+        emitMove(rB, b);
+        emitMove(rN, n);
+        emitMove(rLen, len);
+        emitMove(rInv, inv);
+        emitMove(rProduct, product);
+
+        append(new AMD64BigIntegerMontgomeryMultiplyOp(rA, rB, rN, rLen, rInv, rProduct));
+    }
+
+    @Override
+    public void emitBigIntegerMontgomerySquare(Value a, Value n, Value len, Value inv, Value product) {
+        RegisterValue rA = AMD64.rdi.asValue(a.getValueKind());
+        RegisterValue rN = AMD64.rsi.asValue(n.getValueKind());
+        RegisterValue rLen = AMD64.rdx.asValue(len.getValueKind());
+        RegisterValue rInv = AMD64.rcx.asValue(inv.getValueKind());
+        RegisterValue rProduct = AMD64.r8.asValue(product.getValueKind());
+
+        emitMove(rA, a);
+        emitMove(rN, n);
+        emitMove(rLen, len);
+        emitMove(rInv, inv);
+        emitMove(rProduct, product);
+
+        append(new AMD64BigIntegerMontgomerySquareOp(rA, rN, rLen, rInv, rProduct));
+    }
+
+    @Override
+    public void emitBigIntegerLeftShiftWorker(Value newArr, Value oldArr, Value newIdx, Value shiftCount, Value numIter) {
+        RegisterValue rNewArr = AMD64.rdi.asValue(newArr.getValueKind());
+        RegisterValue rOldArr = AMD64.rsi.asValue(oldArr.getValueKind());
+        RegisterValue rNewIdx = AMD64.rdx.asValue(newIdx.getValueKind());
+        RegisterValue rShiftCount = AMD64.rcx.asValue(shiftCount.getValueKind());
+        RegisterValue rNumIter = AMD64.r8.asValue(numIter.getValueKind());
+
+        emitMove(rNewArr, newArr);
+        emitMove(rOldArr, oldArr);
+        emitMove(rNewIdx, newIdx);
+        emitMove(rShiftCount, shiftCount);
+        emitMove(rNumIter, numIter);
+
+        append(new AMD64BigIntegerLeftShiftOp(rNewArr, rOldArr, rNewIdx, rShiftCount, rNumIter, getAVX3Threshold()));
+    }
+
+    @Override
+    public void emitBigIntegerRightShiftWorker(Value newArr, Value oldArr, Value newIdx, Value shiftCount, Value numIter) {
+        RegisterValue rNewArr = AMD64.rdi.asValue(newArr.getValueKind());
+        RegisterValue rOldArr = AMD64.rsi.asValue(oldArr.getValueKind());
+        RegisterValue rNewIdx = AMD64.rdx.asValue(newIdx.getValueKind());
+        RegisterValue rShiftCount = AMD64.rcx.asValue(shiftCount.getValueKind());
+        RegisterValue rNumIter = AMD64.r8.asValue(numIter.getValueKind());
+
+        emitMove(rNewArr, newArr);
+        emitMove(rOldArr, oldArr);
+        emitMove(rNewIdx, newIdx);
+        emitMove(rShiftCount, shiftCount);
+        emitMove(rNumIter, numIter);
+
+        append(new AMD64BigIntegerRightShiftOp(rNewArr, rOldArr, rNewIdx, rShiftCount, rNumIter, getAVX3Threshold()));
+    }
+
     @SuppressWarnings("unchecked")
     @Override
     public void emitSha1ImplCompress(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state) {
-        append(new AMD64SHA1Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, asAllocatable(buf), asAllocatable(state)));
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        append(new AMD64SHA1Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rBuf, rState));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public Variable emitSha1ImplCompressMB(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state, Value ofs, Value limit) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rOfs = AMD64.rdx.asValue(ofs.getValueKind());
+        RegisterValue rLimit = AMD64.rcx.asValue(limit.getValueKind());
+
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rOfs, ofs);
+        emitMove(rLimit, limit);
+
+        append(new AMD64SHA1Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rBuf, rState, rOfs, rLimit, rResult, true));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public void emitSha256ImplCompress(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state) {
-        if (supports(runtimeCheckedCPUFeatures, CPUFeature.SHA)) {
-            append(new AMD64SHA256Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, asAllocatable(buf), asAllocatable(state)));
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        if (supports(target(), (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, CPUFeature.SHA)) {
+            append(new AMD64SHA256Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rBuf, rState));
         } else {
-            RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
-            RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
-
-            emitMove(rBuf, buf);
-            emitMove(rState, state);
-
             append(new AMD64SHA256AVX2Op(rBuf, rState));
         }
     }
 
+    @SuppressWarnings("unchecked")
+    @Override
+    public Variable emitSha256ImplCompressMB(EnumSet<?> runtimeCheckedCPUFeatures, Value buf, Value state, Value ofs, Value limit) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rOfs = AMD64.rdx.asValue(ofs.getValueKind());
+        RegisterValue rLimit = AMD64.rcx.asValue(limit.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rOfs, ofs);
+        emitMove(rLimit, limit);
+        if (supports(target(), (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, CPUFeature.SHA)) {
+            append(new AMD64SHA256Op(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rBuf, rState, rOfs, rLimit, rResult, true));
+        } else {
+            append(new AMD64SHA256AVX2Op(rBuf, rState, rOfs, rLimit, rResult, true));
+        }
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
     @Override
     public void emitSha3ImplCompress(Value buf, Value state, Value blockSize) {
-        append(new AMD64SHA3Op(asAllocatable(buf), asAllocatable(state), asAllocatable(blockSize)));
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rBlockSize = AMD64.rdx.asValue(blockSize.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rBlockSize, blockSize);
+        append(new AMD64SHA3Op(rBuf, rState, rBlockSize));
+    }
+
+    @Override
+    public Variable emitSha3ImplCompressMB(Value buf, Value state, Value blockSize, Value ofs, Value limit) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rBlockSize = AMD64.rdx.asValue(blockSize.getValueKind());
+        RegisterValue rOfs = AMD64.rcx.asValue(ofs.getValueKind());
+        RegisterValue rLimit = AMD64.r8.asValue(limit.getValueKind());
+
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rBlockSize, blockSize);
+        emitMove(rOfs, ofs);
+        emitMove(rLimit, limit);
+
+        append(new AMD64SHA3Op(rBuf, rState, rBlockSize, rOfs, rLimit, rResult, true));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDoubleKeccak(Value state0, Value state1) {
+        RegisterValue rState0 = AMD64.rdi.asValue(state0.getValueKind());
+        RegisterValue rState1 = AMD64.rsi.asValue(state1.getValueKind());
+        RegisterValue rResult = AMD64.rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+
+        emitMove(rState0, state0);
+        emitMove(rState1, state1);
+
+        append(new AMD64DoubleKeccakOp(rState0, rState1, rResult));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
     }
 
     @Override
@@ -1178,27 +1489,328 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     }
 
     @Override
+    public Variable emitSha512ImplCompressMB(Value buf, Value state, Value ofs, Value limit) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rOfs = AMD64.rdx.asValue(ofs.getValueKind());
+        RegisterValue rLimit = AMD64.rcx.asValue(limit.getValueKind());
+
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rOfs, ofs);
+        emitMove(rLimit, limit);
+
+        append(new AMD64SHA512Op(rBuf, rState, rOfs, rLimit, rResult, true));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
     public void emitMD5ImplCompress(Value buf, Value state) {
-        append(new AMD64MD5Op(this, asAllocatable(buf), asAllocatable(state)));
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        append(new AMD64MD5Op(rBuf, rState));
+    }
+
+    @Override
+    public Variable emitMD5ImplCompressMB(Value buf, Value state, Value ofs, Value limit) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rBuf = AMD64.rdi.asValue(buf.getValueKind());
+        RegisterValue rState = AMD64.rsi.asValue(state.getValueKind());
+        RegisterValue rOfs = AMD64.rdx.asValue(ofs.getValueKind());
+        RegisterValue rLimit = AMD64.rcx.asValue(limit.getValueKind());
+        emitMove(rBuf, buf);
+        emitMove(rState, state);
+        emitMove(rOfs, ofs);
+        emitMove(rLimit, limit);
+        append(new AMD64MD5Op(rBuf, rState, rOfs, rLimit, rResult, true));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDilithiumAlmostNtt(Value coeffs, Value zetas) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rCoeffs = AMD64.rdi.asValue(coeffs.getValueKind());
+        RegisterValue rZetas = AMD64.rsi.asValue(zetas.getValueKind());
+
+        emitMove(rCoeffs, coeffs);
+        emitMove(rZetas, zetas);
+
+        append(new AMD64DilithiumAlmostNttOp(rResult, rCoeffs, rZetas));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDilithiumAlmostInverseNtt(Value coeffs, Value zetas) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rCoeffs = AMD64.rdi.asValue(coeffs.getValueKind());
+        RegisterValue rZetas = AMD64.rsi.asValue(zetas.getValueKind());
+
+        emitMove(rCoeffs, coeffs);
+        emitMove(rZetas, zetas);
+
+        append(new AMD64DilithiumAlmostInverseNttOp(rResult, rCoeffs, rZetas));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDilithiumNttMult(Value product, Value coeffs1, Value coeffs2) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rProduct = AMD64.rdi.asValue(product.getValueKind());
+        RegisterValue rCoeffs1 = AMD64.rsi.asValue(coeffs1.getValueKind());
+        RegisterValue rCoeffs2 = AMD64.rdx.asValue(coeffs2.getValueKind());
+
+        emitMove(rProduct, product);
+        emitMove(rCoeffs1, coeffs1);
+        emitMove(rCoeffs2, coeffs2);
+
+        append(new AMD64DilithiumNttMultOp(rResult, rProduct, rCoeffs1, rCoeffs2));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDilithiumMontMulByConstant(Value coeffs, Value constant) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rCoeffs = AMD64.rdi.asValue(coeffs.getValueKind());
+        RegisterValue rConstant = AMD64.rsi.asValue(constant.getValueKind());
+
+        emitMove(rCoeffs, coeffs);
+        emitMove(rConstant, constant);
+
+        append(new AMD64DilithiumMontMulByConstantOp(rResult, rCoeffs, rConstant));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDilithiumDecomposePoly(Value input, Value lowPart, Value highPart, Value twoGamma2, Value multiplier) {
+        LIRKind resultKind = LIRKind.value(AMD64Kind.DWORD);
+        RegisterValue rResult = AMD64.rax.asValue(resultKind);
+        RegisterValue rInput = AMD64.rdi.asValue(input.getValueKind());
+        RegisterValue rLowPart = AMD64.rsi.asValue(lowPart.getValueKind());
+        RegisterValue rHighPart = AMD64.rdx.asValue(highPart.getValueKind());
+        RegisterValue rTwoGamma2 = AMD64.rcx.asValue(twoGamma2.getValueKind());
+        RegisterValue rMultiplier = AMD64.r8.asValue(multiplier.getValueKind());
+
+        emitMove(rInput, input);
+        emitMove(rLowPart, lowPart);
+        emitMove(rHighPart, highPart);
+        emitMove(rTwoGamma2, twoGamma2);
+        emitMove(rMultiplier, multiplier);
+
+        append(new AMD64DilithiumDecomposePolyOp(rResult, rInput, rLowPart, rHighPart, rTwoGamma2, rMultiplier));
+        Variable result = newVariable(resultKind);
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberNtt(Value poly, Value zetas) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rPoly = rdi.asValue(poly.getValueKind());
+        AllocatableValue rZetas = rsi.asValue(zetas.getValueKind());
+
+        emitMove(rPoly, poly);
+        emitMove(rZetas, zetas);
+
+        append(new AMD64KyberNttOp(rResult, rPoly, rZetas));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberInverseNtt(Value poly, Value zetas) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rPoly = rdi.asValue(poly.getValueKind());
+        AllocatableValue rZetas = rsi.asValue(zetas.getValueKind());
+
+        emitMove(rPoly, poly);
+        emitMove(rZetas, zetas);
+
+        append(new AMD64KyberInverseNttOp(rResult, rPoly, rZetas));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberNttMult(Value resultArray, Value ntta, Value nttb, Value zetas) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rResultArray = rdi.asValue(resultArray.getValueKind());
+        AllocatableValue rNtta = rsi.asValue(ntta.getValueKind());
+        AllocatableValue rNttb = rdx.asValue(nttb.getValueKind());
+        AllocatableValue rZetas = rcx.asValue(zetas.getValueKind());
+
+        emitMove(rResultArray, resultArray);
+        emitMove(rNtta, ntta);
+        emitMove(rNttb, nttb);
+        emitMove(rZetas, zetas);
+
+        append(new AMD64KyberNttMultOp(rResult, rResultArray, rNtta, rNttb, rZetas));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberAddPoly2(Value resultArray, Value a, Value b) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rResultArray = rdi.asValue(resultArray.getValueKind());
+        AllocatableValue rA = rsi.asValue(a.getValueKind());
+        AllocatableValue rB = rdx.asValue(b.getValueKind());
+
+        emitMove(rResultArray, resultArray);
+        emitMove(rA, a);
+        emitMove(rB, b);
+
+        append(new AMD64KyberAddPoly2Op(rResult, rResultArray, rA, rB));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberAddPoly3(Value resultArray, Value a, Value b, Value c) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rResultArray = rdi.asValue(resultArray.getValueKind());
+        AllocatableValue rA = rsi.asValue(a.getValueKind());
+        AllocatableValue rB = rdx.asValue(b.getValueKind());
+        AllocatableValue rC = rcx.asValue(c.getValueKind());
+
+        emitMove(rResultArray, resultArray);
+        emitMove(rA, a);
+        emitMove(rB, b);
+        emitMove(rC, c);
+
+        append(new AMD64KyberAddPoly3Op(rResult, rResultArray, rA, rB, rC));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyber12To16(Value condensed, Value index, Value parsed, Value parsedLength) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rCondensed = rdi.asValue(condensed.getValueKind());
+        AllocatableValue rIndex = rsi.asValue(index.getValueKind());
+        AllocatableValue rParsed = rdx.asValue(parsed.getValueKind());
+        AllocatableValue rParsedLength = rcx.asValue(parsedLength.getValueKind());
+
+        emitMove(rCondensed, condensed);
+        emitMove(rIndex, index);
+        emitMove(rParsed, parsed);
+        emitMove(rParsedLength, parsedLength);
+
+        append(new AMD64Kyber12To16Op(rResult, rCondensed, rIndex, rParsed, rParsedLength));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitKyberBarrettReduce(Value coeffs) {
+        AllocatableValue rResult = rax.asValue(LIRKind.value(AMD64Kind.DWORD));
+        AllocatableValue rCoeffs = rdi.asValue(coeffs.getValueKind());
+
+        emitMove(rCoeffs, coeffs);
+
+        append(new AMD64KyberBarrettReduceOp(rResult, rCoeffs));
+        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
+        emitMove(result, rResult);
+        return result;
     }
 
     @SuppressWarnings("unchecked")
-    protected boolean supports(EnumSet<?> runtimeCheckedCPUFeatures, CPUFeature feature) {
-        assert runtimeCheckedCPUFeatures == null || runtimeCheckedCPUFeatures.isEmpty() ||
-                        runtimeCheckedCPUFeatures.iterator().next() instanceof CPUFeature : Assertions.errorMessage(runtimeCheckedCPUFeatures);
-        EnumSet<CPUFeature> typedFeatures = (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures;
-        return typedFeatures != null && typedFeatures.contains(feature) || ((AMD64) target().arch).getFeatures().contains(feature);
+    @Override
+    public Variable emitCRC32UpdateBytes(EnumSet<?> runtimeCheckedCPUFeatures, Value crc, Value bufferAddress, Value length) {
+        RegisterValue rResult = AMD64.rdi.asValue(crc.getValueKind());
+        RegisterValue rCrc = AMD64.rdi.asValue(crc.getValueKind());
+        RegisterValue rBuf = AMD64.rsi.asValue(bufferAddress.getValueKind());
+        RegisterValue rLen = AMD64.rdx.asValue(length.getValueKind());
+        emitMove(rCrc, crc);
+        emitMove(rBuf, bufferAddress);
+        emitMove(rLen, length);
+        append(new AMD64CRC32UpdateBytesOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rResult, rCrc, rBuf, rLen));
+        Variable result = newVariable(crc.getValueKind());
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public Variable emitAdler32UpdateBytes(EnumSet<?> runtimeCheckedCPUFeatures, Value adler, Value bufferAddress, Value length) {
+        RegisterValue rResult = AMD64.rax.asValue(adler.getValueKind());
+        RegisterValue rAdler = AMD64.rdi.asValue(adler.getValueKind());
+        RegisterValue rBuf = AMD64.rsi.asValue(bufferAddress.getValueKind());
+        RegisterValue rLen = AMD64.rdx.asValue(length.getValueKind());
+        emitMove(rAdler, adler);
+        emitMove(rBuf, bufferAddress);
+        emitMove(rLen, length);
+        append(new AMD64Adler32UpdateBytesOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, getAVX3Threshold(), rResult, rAdler, rBuf, rLen));
+        Variable result = newVariable(adler.getValueKind());
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public Variable emitCRC32CUpdateBytes(EnumSet<?> runtimeCheckedCPUFeatures, Value crc, Value bufferAddress, Value length) {
+        RegisterValue rResult = AMD64.rdi.asValue(crc.getValueKind());
+        RegisterValue rCrc = AMD64.rdi.asValue(crc.getValueKind());
+        RegisterValue rBuf = AMD64.rsi.asValue(bufferAddress.getValueKind());
+        RegisterValue rLen = AMD64.rdx.asValue(length.getValueKind());
+        emitMove(rCrc, crc);
+        emitMove(rBuf, bufferAddress);
+        emitMove(rLen, length);
+        append(new AMD64CRC32CUpdateBytesOp(this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, rResult, rCrc, rBuf, rLen));
+        Variable result = newVariable(crc.getValueKind());
+        emitMove(result, rResult);
+        return result;
+    }
+
+    @Override
+    public Variable emitDoubleMod(Value x, Value y) {
+        LIRKind kind = LIRKind.combine(x, y);
+        RegisterValue xmm0Value = AMD64.xmm0.asValue(kind);
+        emitMove(xmm0Value, x);
+        RegisterValue xmm1Value = AMD64.xmm1.asValue(kind);
+        emitMove(xmm1Value, y);
+        append(new AMD64DoubleModStubOp(xmm0Value, xmm0Value, xmm1Value));
+        Variable result = newVariable(kind);
+        emitMove(result, xmm0Value);
+        return result;
     }
 
     /**
      * Return the maximum size of vector registers used in SSE/AVX instructions.
      */
+    @SuppressWarnings("unchecked")
     @Override
     public AVXSize getMaxVectorSize(EnumSet<?> runtimeCheckedCPUFeatures) {
-        if (supports(runtimeCheckedCPUFeatures, AMD64.CPUFeature.AVX512VL)) {
+        if (supports(target(), (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, AMD64.CPUFeature.AVX512VL)) {
             return AVXSize.ZMM;
         }
-        if (supports(runtimeCheckedCPUFeatures, AMD64.CPUFeature.AVX2)) {
+        if (supports(target(), (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures, AMD64.CPUFeature.AVX2)) {
             return AVXSize.YMM;
         }
         return AVXSize.XMM;
@@ -1215,9 +1827,20 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     @Override
     public Variable emitArrayIndexOf(Stride stride, ArrayIndexOfVariant variant, EnumSet<?> runtimeCheckedCPUFeatures,
                     Value arrayPointer, Value arrayOffset, Value arrayLength, Value fromIndex, Value... searchValues) {
-        Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64ArrayIndexOfOp.movParamsAndCreate(stride, variant, this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
-                        result, arrayPointer, arrayOffset, arrayLength, fromIndex, searchValues));
+        Variable result = newVariable(LIRKind.value(variant.returnsLong() ? AMD64Kind.QWORD : AMD64Kind.DWORD));
+        int nValues = searchValues.length;
+        int constOffset = isConstantValue(arrayOffset) && asConstantValue(arrayOffset).isJavaConstant() &&
+                        asConstantValue(arrayOffset).getJavaConstant().asLong() >= 0 &&
+                        asConstantValue(arrayOffset).getJavaConstant().asLong() <= Integer.MAX_VALUE
+                                        ? (int) asConstantValue(arrayOffset).getJavaConstant().asLong()
+                                        : -1;
+        Value searchValue1 = asAllocatable(searchValues[0]);
+        Value searchValue2 = nValues > 1 ? asAllocatable(searchValues[1]) : Value.ILLEGAL;
+        Value searchValue3 = nValues > 2 ? asAllocatable(searchValues[2]) : Value.ILLEGAL;
+        Value searchValue4 = nValues > 3 ? asAllocatable(searchValues[3]) : Value.ILLEGAL;
+        append(new AMD64ArrayIndexOfOp(stride, variant, constOffset, nValues, this, (EnumSet<CPUFeature>) runtimeCheckedCPUFeatures,
+                        result, emitConvertNullToZero(arrayPointer), asAllocatable(arrayOffset), asAllocatable(arrayLength), asAllocatable(fromIndex),
+                        searchValue1, searchValue2, searchValue3, searchValue4));
         return result;
     }
 
@@ -1269,7 +1892,8 @@ public abstract class AMD64LIRGenerator extends LIRGenerator {
     public Variable emitCodepointIndexToByteIndex(StringCodepointIndexToByteIndexNode.InputEncoding inputEncoding, EnumSet<?> runtimeCheckedCPUFeatures, Value array, Value offset, Value length,
                     Value index) {
         Variable result = newVariable(LIRKind.value(AMD64Kind.DWORD));
-        append(AMD64CodepointIndexToByteIndexOp.movParamsAndCreate(this, inputEncoding, (EnumSet<AMD64.CPUFeature>) runtimeCheckedCPUFeatures, array, offset, length, index, result));
+        append(new AMD64CodepointIndexToByteIndexOp(this, inputEncoding, (EnumSet<AMD64.CPUFeature>) runtimeCheckedCPUFeatures,
+                        emitConvertNullToZero(array), asAllocatable(offset), asAllocatable(length), asAllocatable(index), result));
         return result;
     }
 

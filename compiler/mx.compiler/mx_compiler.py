@@ -60,6 +60,7 @@ import json
 import mx_graal_tools #pylint: disable=unused-import
 
 import mx_graal_benchmark #pylint: disable=unused-import
+import mx_run_jdk_test #pylint: disable=unused-import
 _suite = mx.suite('compiler')
 
 
@@ -165,6 +166,7 @@ class JVMCIVersionCheckVersion:
 
 _jdk_jvmci_version = None
 _jdk_min_jvmci_version = None
+_jdk_jvmci_edition = None
 
 if os.environ.get('JDK_VERSION_CHECK', None) != 'ignore' and jdk.javaCompliance < '25':
     mx.abort('Graal requires JDK 25 or later, got ' + str(jdk) +
@@ -187,22 +189,26 @@ def _check_jvmci_version(jdk):
             mx.abort(rc)
         if out.data:
             try:
-                (jdk_version, release_name, jvmci_build) = out.data.split(',')
-                return JVMCIVersionCheckVersion(JavaLangRuntimeVersion(jdk_version), None if release_name == "null" else release_name, int(jvmci_build))
+                jdk_version, release_name, jvmci_build, edition = out.data.strip().split(',')
+                return JVMCIVersionCheckVersion(JavaLangRuntimeVersion(jdk_version), None if release_name == "null" else release_name, int(jvmci_build)), edition
             except ValueError:
                 mx.warn(f'Could not parse jvmci version from JVMCIVersionCheck output:\n{out.data}')
-            return None
+            return None, None
+        return None, None
 
     global _jdk_jvmci_version
-    _jdk_jvmci_version = _capture_jvmci_version()
+    global _jdk_jvmci_edition
+    _jdk_jvmci_version, _jdk_jvmci_edition = _capture_jvmci_version()
     global _jdk_min_jvmci_version
-    _jdk_min_jvmci_version = _capture_jvmci_version(['--min-version'])
+    _jdk_min_jvmci_version, _ = _capture_jvmci_version(['--min-version'])
+    if _jdk_jvmci_edition not in ['ce', 'ee']:
+        mx.abort('Could not parse LabsJDK edition from JVMCIVersionCheck output')
 
 
 def _ensure_jvmci_version_checked(jdk):
     if os.environ.get('JVMCI_VERSION_CHECK', None) == 'ignore':
         return
-    if _jdk_jvmci_version is None or _jdk_min_jvmci_version is None:
+    if _jdk_jvmci_version is None or _jdk_min_jvmci_version is None or _jdk_jvmci_edition is None:
         _check_jvmci_version(jdk)
 
 
@@ -535,7 +541,10 @@ def _check_forbidden_imports(projects, package_substrings, exceptions=None):
 def compiler_gate_runner(suites, unit_test_runs, bootstrap_tests, tasks, extraVMarguments=None, extraUnitTestArguments=None):
     with Task('CheckForbiddenImports:Compiler', tasks, tags=['style']) as t:
         # Ensure HotSpot-independent compiler classes do not import HotSpot-specific classes
-        if t: _check_forbidden_imports([mx.project('jdk.graal.compiler')], ('hotspot', 'libgraal'))
+        exceptions = {
+            'TruffleInliningPolicy.java': 'GR-45924'
+        }
+        if t: _check_forbidden_imports([mx.project('jdk.graal.compiler')], ('hotspot', 'libgraal'), exceptions)
 
     with Task('JDK_java_base_test', tasks, tags=['javabasetest'], report=True) as t:
         if t: java_base_unittest(_remove_empty_entries(extraVMarguments) + [])
@@ -587,7 +596,7 @@ def compiler_gate_benchmark_runner(tasks, extraVMarguments=None, prefix='', task
     #########################
 
     # DaCapo benchmarks that can run with system assertions enabled but
-    # java.util.Logging assertions disabled because the the DaCapo harness
+    # java.util.Logging assertions disabled because the DaCapo harness
     # misuses the API. The same harness is used by Scala DaCapo.
     enable_assertions = ['-esa']
     dacapo_esa = enable_assertions + ['-da:java.util.logging...']
@@ -803,7 +812,6 @@ mx_gate.add_gate_argument('--extra-vm-argument', action=ShellEscapedStringAction
 mx_gate.add_gate_argument('--extra-unittest-argument', action=ShellEscapedStringAction, help='add extra unit test arguments to gate tasks if applicable')
 
 def _unittest_vm_launcher(vmArgs, mainClass, mainClassArgs):
-    jdk = _get_unittest_jdk()
     if jdk.tag == 'graalvm':
         # we do not want to use -server for GraalVM configurations
         mx.run_java(vmArgs + [mainClass] + mainClassArgs, jdk=jdk)
@@ -918,29 +926,7 @@ class GraalUnittestConfig(mx_unittest.MxUnittestConfig):
 
 mx_unittest.register_unittest_config(GraalUnittestConfig())
 
-_use_graalvm = False
-
-class SwitchToGraalVMJDK(argparse.Action):
-    def __init__(self, **kwargs):
-        global _use_graalvm
-        kwargs['required'] = False
-        kwargs['nargs'] = 0
-        argparse.Action.__init__(self, **kwargs)
-        _use_graalvm = False
-    def __call__(self, parser, namespace, values, option_string=None):
-        global _use_graalvm
-        _use_graalvm = True
-
-def _get_unittest_jdk():
-    if _use_graalvm:
-        return mx.get_jdk(tag='graalvm')
-    return jdk
-
-mx_unittest.set_vm_launcher('JDK VM launcher', _unittest_vm_launcher, _get_unittest_jdk)
-# Note this option should probably be implemented in mx_sdk. However there can be only
-# one set_vm_launcher call per configuration, so we we do it here where it is easy to compose
-# with the mx_compiler behavior.
-mx_unittest.add_unittest_argument('--use-graalvm', default=False, help='Use the previously built GraalVM for running the unit test.', action=SwitchToGraalVMJDK)
+mx_unittest.set_vm_launcher('JDK VM launcher', _unittest_vm_launcher, lambda : jdk)
 
 def _parseVmArgs(args, addDefaultArgs=True):
     args = mx.expand_project_in_args(args, insitu=False)
@@ -1160,7 +1146,7 @@ def _check_latest_jvmci_version():
     ``common.json`` file and issues a warning if not.
     """
     _ensure_jvmci_version_checked(jdk)
-    jvmci_re = re.compile(r'(?:ce|ee)-(?P<jdk_version>.+)-jvmci(?:-(?P<release_name>.+))?-b(?P<jvmci_build>\d+)')
+    jvmci_re = re.compile(r'(?P<edition>ce|ee)-(?P<jdk_version>.+)-jvmci(?:-(?P<release_name>.+))?-b(?P<jvmci_build>\d+)')
     common_path = os.path.normpath(join(_suite.dir, '..', 'common.json'))
 
     if _jdk_jvmci_version is None:
@@ -1178,15 +1164,16 @@ def _check_latest_jvmci_version():
                 match = jvmci_re.match(version)
                 if not match:
                     mx.abort(f'Cannot parse version {version}')
-                (jdk_version, release_name, jvmci_build) = match.groups(default=None)
+                (edition, jdk_version, release_name, jvmci_build) = match.groups(default=None)
                 if _jdk_jvmci_version.jvmci_build == 0:
                     # jvmci_build == 0 indicates an OpenJDK version has been specified in JVMCIVersionCheck.java.
                     # The JDK does not know the jvmci_build number that might have been specified in common.json,
                     # as it is only a repackaged JDK. Thus, we reset the jvmci_build because we cannot validate it.
                     jvmci_build = 0
                 current = JVMCIVersionCheckVersion(JavaLangRuntimeVersion(jdk_version), release_name, int(jvmci_build))
-                if current.jdk_version.feature() == _jdk_jvmci_version.jdk_version.feature():
-                    # only compare the same major versions
+                if current.jdk_version.feature() == _jdk_jvmci_version.jdk_version.feature() and edition == _jdk_jvmci_edition:
+                    # CE and EE can have distinct JDK build versions, but each edition must
+                    # consistently use the same JVMCI version for a given JDK feature.
                     if latest == 'not found':
                         latest = current
                     elif latest != current:
@@ -1651,6 +1638,7 @@ def igvutil(args):
     cp = mx.classpath('GRAAL_IGVUTIL', jdk=jdk)
     vm_args = ['-cp', cp, 'org.graalvm.igvutil.IgvUtility'] + args
     return jdk.run_java(args=vm_args)
+
 
 mx.update_commands(_suite, {
     'sl' : [sl, '[SL args|@VM options]'],

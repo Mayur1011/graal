@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -101,7 +101,7 @@ import com.oracle.truffle.api.source.Source;
 @RunWith(Parameterized.class)
 public abstract class AbstractBasicInterpreterTest {
 
-    public record TestRun(BytecodeVariant bytecode, boolean testSerialize, boolean testTracer) {
+    public record TestRun(BytecodeVariant bytecode, boolean testSerialize, boolean testTracer, boolean testIntrospectionInvariants) {
 
         public Class<? extends BasicInterpreter> interpreterClass() {
             return bytecode.getGeneratedClass();
@@ -139,16 +139,24 @@ public abstract class AbstractBasicInterpreterTest {
         }
 
         public boolean hasInstructionRewriting() {
-            return interpreterClass() != BasicInterpreterBase.class;
+            return interpreterClass() != BasicInterpreterBase.class && !testTracer;
         }
 
         public boolean storesBciInFrame() {
             return interpreterClass() == BasicInterpreterWithStoreBytecodeIndexInFrame.class;
         }
 
+        /**
+         * This method returns the same {@link TestRun} with introspection disabled; it is useful
+         * for tests whose execution time would otherwise be dominated by introspection testing.
+         */
+        public TestRun withoutIntrospection() {
+            return new TestRun(bytecode, testSerialize, testTracer, false);
+        }
+
         @Override
         public String toString() {
-            return interpreterClass().getSimpleName() + "[serialize=" + testSerialize + ",trace=" + testTracer + "]";
+            return interpreterClass().getSimpleName() + "[serialize=" + testSerialize + ",trace=" + testTracer + ",introspection=" + testIntrospectionInvariants + "]";
         }
 
         public int getFrameBaseSlots() {
@@ -278,9 +286,9 @@ public abstract class AbstractBasicInterpreterTest {
     public static List<TestRun> getParameters() {
         List<TestRun> result = new ArrayList<>();
         for (BytecodeVariant bc : allVariants()) {
-            result.add(new TestRun(bc, false, false));
-            result.add(new TestRun(bc, true, false));
-            result.add(new TestRun(bc, false, true));
+            result.add(new TestRun(bc, false, false, true));
+            result.add(new TestRun(bc, true, false, false));
+            result.add(new TestRun(bc, false, true, false));
         }
         return result;
     }
@@ -365,11 +373,13 @@ public abstract class AbstractBasicInterpreterTest {
             });
         }
 
-        for (BasicInterpreter interpreter : result.getNodes()) {
-            try {
-                testIntrospectionInvariants(interpreter.getBytecodeNode());
-            } catch (Throwable e) {
-                throw new AssertionError("Invariant failure " + interpreter.dump(), e);
+        if (run.testIntrospectionInvariants()) {
+            for (BasicInterpreter interpreter : result.getNodes()) {
+                try {
+                    testIntrospectionInvariants(interpreter.getBytecodeNode());
+                } catch (Throwable e) {
+                    throw new AssertionError("Invariant failure " + interpreter.dump(), e);
+                }
             }
         }
 
@@ -524,9 +534,19 @@ public abstract class AbstractBasicInterpreterTest {
             if (local.getStartIndex() != -1) {
                 // block scoping
                 assertNotNull(BytecodeLocation.get(bytecode, local.getStartIndex()));
-                assertTrue(local.getStartIndex() < local.getEndIndex());
+                assertTrue(local.getStartIndex() <= local.getEndIndex());
 
                 if (locals.size() < 1000) {
+                    if (local.getStartIndex() == local.getEndIndex()) {
+                        /*
+                         * Special case: locals with empty ranges are not live at any bci, so we
+                         * cannot query the bytecode node. Just test that these calls succeed.
+                         */
+                        local.getInfo();
+                        local.getName();
+                        assertTrue(0 <= local.getLocalOffset());
+                        continue;
+                    }
                     assertEquals(local.getInfo(), bytecode.getLocalInfo(local.getStartIndex(), local.getLocalOffset()));
                     assertEquals(local.getName(), bytecode.getLocalName(local.getStartIndex(), local.getLocalOffset()));
                     assertTrue(local.getLocalOffset() < bytecode.getLocalCount(local.getStartIndex()));
@@ -543,7 +563,6 @@ public abstract class AbstractBasicInterpreterTest {
 
         SourceInformationTree tree = bytecode.getSourceInformationTree();
         if (tree != null) {
-
             testSourceTree(bytecode, null, tree);
         }
 
@@ -559,8 +578,17 @@ public abstract class AbstractBasicInterpreterTest {
         }
 
         assertNotNull(BytecodeLocation.get(bytecode, tree.getStartBytecodeIndex()));
+        assertTrue(tree.getStartBytecodeIndex() <= tree.getEndBytecodeIndex());
 
-        for (SourceInformationTree child : tree.getChildren()) {
+        List<SourceInformationTree> children = tree.getChildren();
+        for (int i = 0; i < children.size(); i++) {
+            SourceInformationTree child = children.get(i);
+            assertTrue(tree.getStartBytecodeIndex() <= child.getStartBytecodeIndex());
+            assertTrue(child.getEndBytecodeIndex() <= tree.getEndBytecodeIndex());
+            if (i > 0) {
+                SourceInformationTree previous = children.get(i - 1);
+                assertTrue(previous.getEndBytecodeIndex() <= child.getStartBytecodeIndex());
+            }
             testSourceTree(bytecode, tree, child);
         }
     }

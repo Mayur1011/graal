@@ -44,7 +44,7 @@ import jdk.vm.ci.meta.AllocatableValue;
 public abstract class AMD64CGlobalDataLoadAddressOp extends AMD64LIRInstruction {
     public static final LIRInstructionClass<AMD64CGlobalDataLoadAddressOp> TYPE = LIRInstructionClass.create(AMD64CGlobalDataLoadAddressOp.class);
 
-    @Def(REG) private AllocatableValue result;
+    @Def(REG) protected AllocatableValue result;
 
     protected final CGlobalDataInfo dataInfo;
     private final int addend;

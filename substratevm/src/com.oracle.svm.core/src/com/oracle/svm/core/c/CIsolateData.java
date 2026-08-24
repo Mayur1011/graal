@@ -31,8 +31,8 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.PointerBase;
 
-import com.oracle.svm.core.BuildPhaseProvider.AfterHostedUniverse;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterHostedUniverse;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
 
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
@@ -52,6 +52,9 @@ public final class CIsolateData<T extends PointerBase> {
 
     @Platforms(Platform.HOSTED_ONLY.class)
     CIsolateData(String name, long size) {
+        assert name != null;
+        assert size >= 0;
+
         this.name = name;
         this.size = size;
         this.offset = -1;

@@ -301,7 +301,7 @@ final class NativeReflectionLibrarySupport {
         @Override
         public Object dispatch(long objectHandle, int messageId, Object[] args) {
             JNIEnv jniEnv = JNIMethodScope.env();
-            if (!StackPointerRetriever.fitsOnStack(hostStackSpaceHeadroom, PolyglotIsolateGuestSupport.getHostStackOverflowLimit())) {
+            if (hostStackSpaceHeadroom != 0L && !StackPointerRetriever.fitsOnStack(hostStackSpaceHeadroom, PolyglotIsolateGuestSupport.getHostStackOverflowLimit())) {
                 throw new StackOverflowError("Not enough stack space to perform a host call from isolated guest language.");
             }
             CCharPointer staticBuffer = StackValue.get(STATIC_BUFFER_SIZE);

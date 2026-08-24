@@ -31,7 +31,7 @@ import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.genscavenge.remset.RememberedSet;
 import com.oracle.svm.core.hub.RuntimeClassLoading;
@@ -76,7 +76,13 @@ public final class HeapParameters {
 
     @Fold
     public static int getMaxSurvivorSpaces() {
-        return SerialGCOptions.MaxSurvivorSpaces.getValue();
+        if (SubstrateOptions.useEpsilonGC() || !SerialGCOptions.useRememberedSet()) {
+            return 0;
+        }
+
+        Integer value = SerialGCOptions.ConcealedOptions.MaxSurvivorSpaces.getValue();
+        UserError.guarantee(value == null || value >= 0, "%s value must be greater than or equal to 0", SerialGCOptions.ConcealedOptions.MaxSurvivorSpaces.getName());
+        return (value != null) ? value : AbstractCollectionPolicy.MAX_TENURING_THRESHOLD;
     }
 
     /*
@@ -153,10 +159,6 @@ public final class HeapParameters {
             throw UserError.abort("'%s' can only be set if '%s' is enabled.",
                             SerialAndEpsilonGCOptions.ConcealedOptions.MaxMetaspaceSize.getName(),
                             RuntimeClassLoading.Options.RuntimeClassLoading.getName());
-        } else if (!SubstrateOptions.SpawnIsolates.getValue()) {
-            throw UserError.abort("'%s' can only be set if '%s' is enabled.",
-                            SerialAndEpsilonGCOptions.ConcealedOptions.MaxMetaspaceSize.getName(),
-                            SubstrateOptions.SpawnIsolates.getName());
         } else if (maxMetaspaceSize < 0) {
             throw UserError.abort("The value of '%s' must be greater than or equal to 0.",
                             SerialAndEpsilonGCOptions.ConcealedOptions.MaxMetaspaceSize.getName());

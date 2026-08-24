@@ -30,13 +30,13 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 
-import com.oracle.svm.core.config.ObjectLayout;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Equivalence;
 import org.graalvm.nativeimage.ImageInfo;
 
 import com.oracle.svm.core.FrameAccess;
+import com.oracle.svm.core.config.ObjectLayout;
 
 import jdk.graal.compiler.core.common.NumUtil;
 import jdk.vm.ci.code.ReferenceMap;
@@ -172,54 +172,12 @@ public class SubstrateReferenceMap extends ReferenceMap implements ReferenceMapE
 
     @Override
     public ReferenceMapEncoder.OffsetIterator getOffsets() {
-        return new ReferenceMapEncoder.OffsetIterator() {
-            private int nextShiftedOffset = shiftedOffsets == null ? -1 : shiftedOffsets.nextSetBit(0);
-
-            @Override
-            public boolean hasNext() {
-                return (nextShiftedOffset != -1);
-            }
-
-            @Override
-            public int nextInt() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                int result = nextShiftedOffset - shift;
-                /* +1: skip compression bit. */
-                nextShiftedOffset = shiftedOffsets.nextSetBit(nextShiftedOffset + 2);
-                return result;
-            }
-
-            @Override
-            public boolean isNextCompressed() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                return shiftedOffsets.get(nextShiftedOffset + 1);
-            }
-
-            @Override
-            public boolean isNextDerived() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                return derived != null && derived.containsKey(nextShiftedOffset - shift);
-            }
-
-            @Override
-            public EconomicSet<Integer> getDerivedOffsets(int baseOffset) {
-                if (derived == null || !derived.containsKey(baseOffset)) {
-                    throw new NoSuchElementException();
-                }
-                return derived.get(baseOffset);
-            }
-        };
+        return new SubstrateReferenceMapOffsetIterator();
     }
 
     @Override
     public int hashCode() {
-        int result = shift * 31 + (derived == null ? 42 : derived.hashCode());
+        int result = shift * 31 + (derived == null ? 42 : derivedHashCode());
         if (shiftedOffsets != null) {
             /* We do not use BitSet.hashCode because it has a too high collision rate. */
             for (int idx = shiftedOffsets.nextSetBit(0); idx != -1; idx = shiftedOffsets.nextSetBit(idx + 1)) {
@@ -248,7 +206,7 @@ public class SubstrateReferenceMap extends ReferenceMap implements ReferenceMapE
             }
 
             for (int base : derived.getKeys()) {
-                if (!derived.get(base).equals(other.derived.get(base))) {
+                if (!derivedOffsetSetsEqual(derived.get(base), other.derived.get(base))) {
                     return false;
                 }
             }
@@ -257,6 +215,37 @@ public class SubstrateReferenceMap extends ReferenceMap implements ReferenceMapE
         } else {
             return false;
         }
+    }
+
+    /**
+     * Computes an order-independent hash for the derived reference map. This matches the equality
+     * logic below, which treats derived offsets as logical sets.
+     */
+    private int derivedHashCode() {
+        int result = 0;
+        for (int base : derived.getKeys()) {
+            int derivedOffsetsHashCode = 0;
+            for (int derivedOffset : derived.get(base)) {
+                derivedOffsetsHashCode += Integer.hashCode(derivedOffset);
+            }
+            result += 31 * Integer.hashCode(base) + derivedOffsetsHashCode;
+        }
+        return result;
+    }
+
+    private static boolean derivedOffsetSetsEqual(EconomicSet<Integer> x, EconomicSet<Integer> y) {
+        if (x == y) {
+            return true;
+        } else if (x == null || y == null || x.size() != y.size()) {
+            return false;
+        }
+
+        for (int element : x) {
+            if (!y.contains(element)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public boolean hasNoDerivedOffsets() {
@@ -302,5 +291,49 @@ public class SubstrateReferenceMap extends ReferenceMap implements ReferenceMapE
     @Override
     public String toString() {
         return dump(new StringBuilder()).toString();
+    }
+
+    public class SubstrateReferenceMapOffsetIterator implements ReferenceMapEncoder.OffsetIterator {
+        private int nextShiftedOffset = shiftedOffsets == null ? -1 : shiftedOffsets.nextSetBit(0);
+
+        @Override
+        public boolean hasNext() {
+            return (nextShiftedOffset != -1);
+        }
+
+        @Override
+        public int nextInt() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            int result = nextShiftedOffset - shift;
+            /* +1: skip compression bit. */
+            nextShiftedOffset = shiftedOffsets.nextSetBit(nextShiftedOffset + 2);
+            return result;
+        }
+
+        @Override
+        public boolean isNextCompressed() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            return shiftedOffsets.get(nextShiftedOffset + 1);
+        }
+
+        @Override
+        public boolean isNextDerived() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            return derived != null && derived.containsKey(nextShiftedOffset - shift);
+        }
+
+        @Override
+        public EconomicSet<Integer> getDerivedOffsets(int baseOffset) {
+            if (derived == null || !derived.containsKey(baseOffset)) {
+                throw new NoSuchElementException();
+            }
+            return derived.get(baseOffset);
+        }
     }
 }

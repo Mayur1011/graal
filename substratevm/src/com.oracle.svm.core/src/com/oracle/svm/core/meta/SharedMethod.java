@@ -24,6 +24,8 @@
  */
 package com.oracle.svm.core.meta;
 
+import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 
 import com.oracle.svm.core.code.ImageCodeInfo;
@@ -42,6 +44,8 @@ public interface SharedMethod extends ResolvedJavaMethod {
     boolean isUninterruptible();
 
     boolean needSafepointCheck();
+
+    boolean isLambdaFormCompiled();
 
     /**
      * @return true if the stack overflow check in the method's prologue cannot be omitted.
@@ -103,14 +107,20 @@ public interface SharedMethod extends ResolvedJavaMethod {
      */
     Deoptimizer.StubType getDeoptStubType();
 
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     ImageCodeInfo getImageCodeInfo();
 
     boolean hasImageCodeOffset();
 
     int getImageCodeOffset();
 
-    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    /**
+     * Returns the encoded relative IP of this method's deoptimization entry point in image code.
+     *
+     * @see com.oracle.svm.core.code.CodeInfoAccess#relativeIP(com.oracle.svm.core.code.CodeInfo,
+     *      org.graalvm.nativeimage.c.function.CodePointer)
+     */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     int getImageCodeDeoptOffset();
 
     /**
@@ -144,4 +154,9 @@ public interface SharedMethod extends ResolvedJavaMethod {
      * @return interpreter method for target method, or {@code null} if not applicable
      */
     ResolvedJavaMethod getInterpreterMethod();
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    default boolean hasInterpreterMethod() {
+        return false;
+    }
 }

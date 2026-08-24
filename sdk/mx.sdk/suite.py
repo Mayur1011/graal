@@ -39,10 +39,10 @@
 # SOFTWARE.
 #
 suite = {
-  "mxversion": "7.68.2",
+  "mxversion": "7.83.0",
   "name" : "sdk",
-  "version" : "25.1.0",
-  "release" : False,
+  "version" : "25.3.4.1",
+  "release_from" : "tag:vm",
   "sourceinprojectwhitelist" : [],
   "url" : "https://github.com/oracle/graal",
   "groupId" : "org.graalvm.sdk",
@@ -166,37 +166,33 @@ suite = {
       },
     },
     "LLVM_ORG" : {
-      "version" : "20.1.4-1-ga7183f5a17-bg217527b869",
-      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm-org",
+      "version" : "22.1.8-4-g1d96596a53-bg6891668b1e",
+      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm",
       "os_arch" : {
         "linux" : {
           "amd64" : {
-            "urls" : ["{host}/llvm-llvmorg-{version}-linux-amd64.tar.gz"],
-            "digest" : "sha512:7b01495c3af3f5cd6ce8835e56ca3c99f24c1ae91425c0d090018bdf1639a27c527b76dc93e9e940beacfaeb31b63729ec35c54972891b0aedc04006ab498a15",
+            "urls" : ["{host}/llvm-{version}-linux-amd64.tar.gz"],
+            "digest" : "sha512:a7c7db68d93d6d446ba0a8fb57c718f9fbed8c3027893a4201b980f368dc7a33fe45c9e979a1d7c9576ec15239b42de08a6d86e020941f1569e72128d9228f9a",
           },
           "aarch64" : {
-            "urls" : ["{host}/llvm-llvmorg-{version}-linux-aarch64.tar.gz"],
-            "digest" : "sha512:6c193bd952a3efbaa0b12875984d3898a2cce5d62b385e1b2adb78aac38d4a7df34b0bba55d9b705c970b7e1cc146c48c8cfdfdfc03c89c468a6ed4ecd522be4",
+            "urls" : ["{host}/llvm-{version}-linux-aarch64.tar.gz"],
+            "digest" : "sha512:9428707b32cab9fca85b756aea88daa0e7ea818a53d7e4a75b7e0ee6d7ba4ad82e738764d0464a072a1a4611432c59c478f0761130dabca5311fea3d01866e97",
           },
           "riscv64": {
-            "urls" : ["{host}/llvm-llvmorg-{version}-linux-riscv64.tar.gz"],
-            "digest" : "sha512:28a83428a925a3ce41c99e107df96b570131f4ae6e14ece29be0a038bb521e020f785645dd931f06110c292d4ca688d9272c67f97b426f16f8ff89c57a36f868",
+            "urls" : ["{host}/llvm-{version}-linux-riscv64.tar.gz"],
+            "digest" : "sha512:f9139c334c80fd198c6b4f24b8afedb756e9f484724f741ebe9188dd5a959d19fd6e2e3b097cac07ca8fa7c4a5655987b4fd5030a1066bcb0452dbf2c77a5e82",
           },
         },
         "darwin" : {
-          "amd64" : {
-            "urls" : ["{host}/llvm-llvmorg-{version}-darwin-amd64.tar.gz"],
-            "digest" : "sha512:88da0b36e7bdf03b7ec683b7f6c044e7a884b9e1575ae7a82c76eb073278df9fcfe7cac9f2e827cd7312468e9a337572fa93dfb5a16360a634e96154ba121dd4",
-          },
           "aarch64" : {
-            "urls" : ["{host}/llvm-llvmorg-{version}-darwin-aarch64.tar.gz"],
-            "digest" : "sha512:27ca7c82608e5fb379563ed3d39393e1a6c5c7300d42abb2ad9bdac232c5708511f287f562fa90ef15e069073f533f65ba73c8a9e5c95e7c0f04fdd15e84f65e",
+            "urls" : ["{host}/llvm-{version}-darwin-aarch64.tar.gz"],
+            "digest" : "sha512:6c061e61b94756085b8eb104920e2eb2b437d61d7e02e30e8ba3d1b50507b9f531778f729f0b1de254f9b9ef0d7ac052d085b54bb47af425987e29e46590faaa",
           }
         },
         "windows" : {
           "amd64" : {
-            "urls" : ["{host}/llvm-llvmorg-{version}-windows-amd64.tar.gz"],
-            "digest" : "sha512:87a0337c0e73bef91952295e5510f54bffbdc395877e612e7e14dc2ab0943b9d460e9dbaf47dd41f619362315fc2db80fa97927ec95230a90eb895e3c30fd12f",
+            "urls" : ["{host}/llvm-{version}-windows-amd64.tar.gz"],
+            "digest" : "sha512:f868d2e752fa984cf254707b781c2a4f8307de1c229c81a70b833d42c9620c995b741f9927235706a07a7a0f3af185690df8076ffb7c5ce04ec8744ee8997229",
           }
         },
         "<others>": {
@@ -208,19 +204,19 @@ suite = {
       "license" : "Apache-2.0-LLVM",
     },
     "LLVM_ORG_COMPILER_RT_LINUX" : {
-      "version" : "20.1.4-1-ga7183f5a17-bg217527b869",
-      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm-org",
+      "version" : "22.1.8-4-g1d96596a53-bg6891668b1e",
+      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm",
       # we really want linux-amd64, also on non-linux and non-amd64 platforms for cross-compilation
-      "urls" : ["{host}/compiler-rt-llvmorg-{version}-linux-amd64.tar.gz"],
-      "digest" : "sha512:70fb32a94e35b44a170737aa5ad188214b4c6d72a7aaae141b348f18c0d7815d99dfb117b6f5b0bd1b9d2821aa47d374496d58209c9219f11f0ad090a04ef40a",
+      "urls" : ["{host}/compiler-rt-{version}-linux-amd64.tar.gz"],
+      "digest" : "sha512:5fe9593455ec1f81d5361247ea465efa39c89c31ed5cad5d656dd190c484c75f1a886ce2caeb6be372c17b536f70ce027a905b5dbfecd6a4e4e30679cb31ba2f",
       "license" : "Apache-2.0-LLVM",
     },
     "LLVM_ORG_SRC" : {
-      "version" : "20.1.4-1-ga7183f5a17-bg217527b869",
-      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm-org",
+      "version" : "22.1.8-4-g1d96596a53-bg6891668b1e",
+      "host" : "https://lafo.ssw.uni-linz.ac.at/pub/llvm",
       "packedResource" : True,
-      "urls" : ["{host}/llvm-src-llvmorg-{version}.tar.gz"],
-      "digest" : "sha512:9c83d01eb6745a3e20e3426d8334728a977da11528819cdc835bb2d62925b4d15cd167a549e08c4f263d15461771be2bc92d1ea36c1fd99ab7888740733c534c",
+      "urls" : ["{host}/llvm-src-{version}.tar.gz"],
+      "digest" : "sha512:ae3645453304cbe6898eab416e5a3c5d5ce6bafb1ce39ef34ee4efa31a719a76309a7046af3b5991dd459ff6dfd2dd4724f305f8895afc8f6db5ab2942a80f6b",
       "license" : "Apache-2.0-LLVM",
     },
     "MUSL_GCC_TOOLCHAIN" : {
@@ -1010,6 +1006,7 @@ suite = {
                                              org.graalvm.nativeimage.builder,
                                              org.graalvm.nativeimage.configure,
                                              org.graalvm.nativeimage.shared,
+                                             org.graalvm.nativeimage.guest.staging,
                                              com.oracle.svm.svm_enterprise,
                                              org.graalvm.extraimage.builder,
                                              org.graalvm.truffle.runtime.svm,
@@ -1374,6 +1371,7 @@ suite = {
       "distDependencies" : ["JNIUTILS"],
       "description" : "API and utility classes for nativebridge.",
       "allowsJavadocWarnings": True,
+      "useModulePath": True,
       "maven": {
           "tag": ["default", "public"],
       },

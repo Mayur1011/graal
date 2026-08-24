@@ -68,11 +68,6 @@ public final class RuntimeInterpreterConstantPool extends InterpreterConstantPoo
     }
 
     @Override
-    public RuntimeException classFormatError(String message) {
-        throw SemanticJavaException.raise(new ClassFormatError(message));
-    }
-
-    @Override
     protected Object resolve(int cpi, InterpreterResolvedObjectType accessingClass) {
         Tag tag = tagAt(cpi);
         return switch (tag) {

@@ -25,7 +25,9 @@
 
 package com.oracle.svm.core.log;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import com.oracle.svm.guest.staging.log.Log;
+
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.LogHandler;
@@ -34,9 +36,9 @@ import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordBase;
 
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.jdk.BacktraceDecoder;
 import com.oracle.svm.core.jdk.JDKUtils;
@@ -418,14 +420,14 @@ public class RealLog extends AbstractLog {
             if (backtrace == null) {
                 return 0;
             }
-            return backtracePrinter.printBacktrace((long[]) backtrace, maxFrames);
+            return backtracePrinter.printBacktrace(backtrace, maxFrames);
         } finally {
             BACKTRACE_PRINTER_MUTEX.unlock();
         }
     }
 
     private final class BacktracePrinter extends BacktraceDecoder {
-        int printBacktrace(long[] backtrace, int maxFramesProcessed) {
+        int printBacktrace(Object backtrace, int maxFramesProcessed) {
             return visitBacktrace(backtrace, maxFramesProcessed, SubstrateOptions.maxJavaStackTraceDepth());
         }
 

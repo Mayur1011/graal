@@ -92,6 +92,9 @@ public interface Metaspace {
     /** Allocates an int array. */
     int[] allocateIntArray(int length);
 
+    /** Allocates a pure-instance object of the given class. */
+    <T> T allocateObject(Class<T> clazz);
+
     default byte[] copyToMetaspace(byte[] heapArray) {
         byte[] result = Metaspace.singleton().allocateByteArray(heapArray.length);
         System.arraycopy(heapArray, 0, result, 0, heapArray.length);

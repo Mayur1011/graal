@@ -114,7 +114,7 @@ You can also instantiate a [`BytecodeLocation`](https://github.com/oracle/graal/
 
 ## Operations
 Operations are the basic unit of language semantics in the Bytecode DSL.
-Each operation performs some computation and can produce a value.
+Each operation performs some computation and can produce a value (excluding [source operations](#source-information)).
 For example, the `LoadArgument` operation produces the value of a given argument.
 
 An operation can have children that produce inputs to the operation.
@@ -196,7 +196,7 @@ They model language-specific behaviour, such as arithmetic operations, value con
 Here, we discuss regular custom operations that eagerly evaluate their
 children; the Bytecode DSL also supports [short circuit operations](ShortCircuitOperations.md).
 
-Custom operations are defined using Java classes in one of two ways:
+Regular custom operations are defined using Java classes in one of two ways:
 
 1. Typically, operations are defined as inner classes of the root class annotated with [`@Operation`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Operation.java).
 2. To support migration from an AST interpreter, custom operations can also be *proxies* of existing existing Truffle node classes. To define an operation proxy, the root class should have an [`@OperationProxy`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/OperationProxy.java) annotation referencing the node class, and the node class itself should be marked `@OperationProxy.Proxyable`. Proxied nodes have additional restrictions compared to regular Truffle AST nodes, so making a node proxyable can require some (minimal) refactoring.
@@ -264,8 +264,13 @@ These static imports can be declared on the root node and on individual operatio
 
 #### Advanced use cases
 
-This section discussed regular operations. There are also [short circuit operations](ShortCircuitOperations.md) to implement short-circuit behaviour, and special [`@Prolog`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Prolog.java), [`@EpilogReturn`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/EpilogReturn.java), and [`@EpilogExceptional`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/EpilogExceptional.java) operations to guarantee certain behaviour happens on entry/exit.
-
+In addition to the regular custom operations described above, there are special operations you can define for custom control flow and entry/exit behaviour:
+- [short circuit operations](ShortCircuitOperations.md) to implement short-circuit behaviour
+- [`@Yield`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Yield.java) for custom yield behaviour
+- [`@Return`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Return.java) for custom return behaviour
+- [`@Prolog`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Prolog.java) for custom behaviour on root entry
+- [`@EpilogReturn`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/EpilogReturn.java) for custom behaviour on root exit
+- [`@EpilogExceptional`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/EpilogExceptional.java) for custom behaviour on exceptional root exit
 
 An operation can take zero or more values for its last dynamic operand by declaring the last dynamic operand [`@Variadic`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Variadic.java).
 The builder will emit code to collect these values into an `Object[]`.
@@ -528,6 +533,8 @@ Bear in mind that declaring an operation with `forceCached` may limit the useful
 ### Source information
 
 The `Source` and `SourceSection` operations associate source ranges with each operation in a program.
+These operations are metadata-only and do not affect the operation tree semantics. Operations in their bodies appear as
+children of the enclosing operation.
 There are several `getSourceLocation` methods defined by [`BytecodeNode`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/BytecodeNode.java) that can be used to compute source information for a particular bytecode index, frame instance, etc.
 
 It is recommended to enclose the `Root` operation in appropriate `Source` and `SourceSection` operations in order to provide accurate source information for the root node.
@@ -548,6 +555,8 @@ The Bytecode DSL supports two forms of instrumentation:
 
 1. [`@Instrumentation`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Instrumentation.java) operations, which are emitted and behave just like custom [`@Operation`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/Operation.java)s. These operations can perform special actions like logging or modifying the value produced by another operation. `@Instrumentation` operations must have no stack effects, so they can either have no children and produce no value, or have one child and produce a value (which allows you to modify the result of an instrumented operation).
 2. Tag-based instrumentation associates operations with particular instrumentation [`Tag`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.instrumentation/src/com/oracle/truffle/api/instrumentation/Tag.java)s using `Tag` operations. If these instrumentations are enabled, the bytecode will include instructions that invoke the various event callbacks on any attached [`ExecutionEventNode`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.instrumentation/src/com/oracle/truffle/api/instrumentation/ExecutionEventNode.java)s (e.g., `onEnter`, `onReturnValue`) when executing the enclosed operation. Tag-based instrumentation can be enabled using the `enableTagInstrumentation` flag in [`@GenerateBytecode`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/GenerateBytecode.java).
+
+Override [`BytecodeRootNode.interceptOutgoingValue`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/BytecodeRootNode.java) to convert every guest-language value before it is exposed to tag instrumentation, for example to replace an internal representation with an interop-capable value. Override [`BytecodeRootNode.interceptIncomingValue`](https://github.com/oracle/graal/blob/master/truffle/src/com.oracle.truffle.api.bytecode/src/com/oracle/truffle/api/bytecode/BytecodeRootNode.java) to convert values supplied by tag instrumentation to representations supported by the guest language. The hooks add no generated calls unless they are overridden and do not apply to `@Instrumentation` operations.
 
 Note: once instrumentation instructions are added, they cannot be removed from the bytecode. However, in tag-based instrumentation you can still disable the instruments so that the instrumentation instructions have no effect.
 

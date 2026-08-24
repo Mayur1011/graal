@@ -36,13 +36,12 @@ import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.meta.MethodRef;
 import com.oracle.svm.core.reflect.ReflectionAccessorHolder.MethodInvokeFunctionPointer;
 import com.oracle.svm.core.reflect.ReflectionAccessorHolder.MethodInvokeFunctionPointerForCallerSensitiveAdapter;
-import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.internal.reflect.MethodAccessor;
+import jdk.internal.vm.annotation.Hidden;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
-@InternalVMMethod
 public final class SubstrateMethodAccessor extends SubstrateAccessor implements MethodAccessor {
 
     public static final int VTABLE_INDEX_STATICALLY_BOUND = -1;
@@ -119,6 +118,25 @@ public final class SubstrateMethodAccessor extends SubstrateAccessor implements 
         return ((MethodInvokeFunctionPointer) getExpandSignature()).invoke(obj, args, invokeTarget(obj));
     }
 
+    /**
+     * This variant of {@link #invoke(Object, Object[], Class)} is @Hidden. This is important when
+     * this is called as part of the method handle implementation where this frame is not expected
+     * to appear.
+     */
+    @Hidden
+    public Object methodHandleInvoke(Object obj, Object[] args, Class<?> caller) {
+        if (callerSensitiveAdapter) {
+            if (caller == null) {
+                throw VMError.shouldNotReachHere("Cannot invoke method that has a @CallerSensitiveAdapter without an explicit caller");
+            }
+            preInvoke(obj);
+            return ((MethodInvokeFunctionPointerForCallerSensitiveAdapter) getExpandSignature()).invoke(obj, args, invokeTarget(obj), caller);
+        } else {
+            preInvoke(obj);
+            return ((MethodInvokeFunctionPointer) getExpandSignature()).invoke(obj, args, invokeTarget(obj));
+        }
+    }
+
     @Override
     public Object invoke(Object obj, Object[] args, Class<?> caller) {
         if (callerSensitiveAdapter) {
@@ -131,11 +149,12 @@ public final class SubstrateMethodAccessor extends SubstrateAccessor implements 
     }
 
     @Override
-    public Object invokeSpecial(Object obj, Object[] args) {
+    @Hidden
+    public Object methodHandleInvokeSpecial(Object obj, Object[] args) {
         if (callerSensitiveAdapter) {
             throw VMError.shouldNotReachHere("Cannot invoke method that has a @CallerSensitiveAdapter without an explicit caller");
         }
         preInvoke(obj);
-        return super.invokeSpecial(obj, args);
+        return super.methodHandleInvokeSpecial(obj, args);
     }
 }

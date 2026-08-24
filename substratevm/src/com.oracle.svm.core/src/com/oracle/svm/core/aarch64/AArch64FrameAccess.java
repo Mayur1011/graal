@@ -34,18 +34,19 @@ import org.graalvm.word.Pointer;
 import com.oracle.svm.core.FrameAccess;
 import com.oracle.svm.core.SubstrateControlFlowIntegrity;
 import com.oracle.svm.core.SubstrateTarget;
+import com.oracle.svm.core.graal.nodes.aarch64.AArch64PACNode;
 import com.oracle.svm.core.graal.nodes.aarch64.AArch64XPACNode;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.Duplicable;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 
 @AutomaticallyRegisteredImageSingleton(FrameAccess.class)
 @Platforms(Platform.AARCH64.class)
-@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Duplicable.class, other = Disallowed.class)
+@SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, layeredInstallationKind = Duplicable.class, other = PartiallyLayerAware.class)
 public class AArch64FrameAccess extends FrameAccess {
     @Override
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -58,6 +59,15 @@ public class AArch64FrameAccess extends FrameAccess {
     public CodePointer unsafeReadReturnAddress(Pointer sourceSp) {
         CodePointer returnAddress = super.unsafeReadReturnAddress(sourceSp);
         return stripAddress(returnAddress);
+    }
+
+    @Override
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public CodePointer encodeReturnAddress(Pointer sourceSp, CodePointer returnAddress) {
+        if (SubstrateControlFlowIntegrity.enabled()) {
+            return AArch64PACNode.signAddress(returnAddress, sourceSp);
+        }
+        return returnAddress;
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)

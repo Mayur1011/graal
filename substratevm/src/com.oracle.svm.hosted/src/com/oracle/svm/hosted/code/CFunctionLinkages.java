@@ -40,7 +40,7 @@ import com.oracle.svm.hosted.c.CGlobalDataFeature;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.graph.Node.NodeIntrinsic;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
@@ -58,13 +58,17 @@ public final class CFunctionLinkages {
     }
 
     public CGlobalDataInfo addOrLookupMethod(ResolvedJavaMethod method) {
-        if (AnnotationUtil.getAnnotation(method, NodeIntrinsic.class) != null || AnnotationUtil.getAnnotation(method, Word.Operation.class) != null) {
+        if (GuestAnnotationAccess.getAnnotation(method, NodeIntrinsic.class) != null || GuestAnnotationAccess.getAnnotation(method, Word.Operation.class) != null) {
             return null;
         }
         return nameToFunction.computeIfAbsent(linkageName(method), symbolName -> {
             CGlobalData<CFunctionPointer> linkage = CGlobalDataFactory.forSymbol(symbolName);
             return CGlobalDataFeature.singleton().registerAsAccessedOrGet(linkage);
         });
+    }
+
+    public boolean isFunctionLinkage(CGlobalDataInfo dataInfo) {
+        return dataInfo.isSymbolReference() && nameToFunction.get(dataInfo.getData().symbolName) == dataInfo;
     }
 
     private static String linkageName(ResolvedJavaMethod method) {
@@ -76,7 +80,7 @@ public final class CFunctionLinkages {
     }
 
     private static String getLinkageNameFromAnnotation(ResolvedJavaMethod method) {
-        CFunction cFunctionAnnotation = AnnotationUtil.getAnnotation(method, CFunction.class);
+        CFunction cFunctionAnnotation = GuestAnnotationAccess.getAnnotation(method, CFunction.class);
         if (cFunctionAnnotation != null) {
             return cFunctionAnnotation.value();
         }

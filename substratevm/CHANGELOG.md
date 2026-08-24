@@ -2,7 +2,44 @@
 
 This changelog summarizes major changes to GraalVM Native Image.
 
-## GraalVM 25.1 (Internal Version 25.1.0)
+## GraalVM 25.4 (Internal Version 25.4.4)
+* (GR-75824) When native executables are built with `-H:+StrictRuntimeJavaOptions`, runtime assertion options (for example, `-ea`, `-da`, `-esa`, and `-dsa`) are supported and configure the assertion status of runtime-loaded classes and runtime-initialized image classes. They do not affect build-time-initialized classes whose assertion status is *only* configured by `native-image -ea ...`.
+* (GR-71854) On Linux AMD64, Native Image now records the selected x86-64 ISA level in `.note.gnu.property` for `-march` values requiring x86-64-v2 or newer, so tools such as `readelf` report the requirement correctly.
+* (GR-78784) Default to optional identity hash code fields with SerialGC. Few objects need one, and this optimization adds them during garbage collection. It can be disabled with `-H:-OptionalIdentityHashCodes`.
+* (GR-78804) Added outlining for StringBuilder/StringBuffer append sequences and invokedynamic string concatenations. This reduces the binary size of native executables.
+
+## GraalVM 25.3 (Internal Version 25.3.4.1)
+* (GR-77137) Added `SubstratePriorityInliningPhase` to leverage the new priority inliner added to the compiler suite.
+* (GR-77637) Fast inline execution paths and optimized spinning for `synchronized`. This generally improves locking performance, but inlined fast paths might increase image size. They can be disabled with `-H:-UseMonitorFastPath`.
+* (GR-72095) Refactored the Native Image runtime bytecode interpreter to enable tail-call threading among outlined bytecode handlers, significantly improving interpreter performance.
+* (GR-77670) Chunk up digest generation for Native Image Layers, to allow for large layer files to be checked. This makes older layer files potentially incompabile with layers created after this change.
+* (GR-73199) When native executables are built with `-H:-LegacyJavaOptionMode`, VM options are parsed only before the first `--` argument. Arguments after `--` are passed unchanged to the application main method. The legacy behavior remains unchanged.
+* (GR-78832) Renamed `LegacyJavaOptionMode` to `StrictRuntimeJavaOptions` and inverted its polarity. The default remains permissive; use `-H:+StrictRuntimeJavaOptions` to enable strict runtime Java option handling.
+* (GR-77977) Added control flow integrity options, available via `-H:CFI`. Indirect branches on AMD64 can be guarded with software-based checks that ensure that they land on valid targets. On AArch64, PAC is supported to protect return addresses on the stack.
+* (GR-77766) Executable anonymous memory mapping locations are randomized by default. This can be disabled with -H:-RandomizeRuntimeCodeCache.
+
+## GraalVM 25.2 (Internal Version 25.2.4)
+* (GR-77358) Introduced compressed (32-bit) references, enabled by default. This generally improves memory usage and performance, but limits heap memory to 32 GB. Disable with `-H:-UseCompressedReferences`.
+* (GR-59698) Native Image now always uses isolates. The deprecated `-H:+SpawnIsolates` option remains for compatibility, while `-H:-SpawnIsolates` is no longer supported and reports a build-time error.
+* (GR-76718) Removed the deprecated `-H:OutlineWriteBarriers` option. Use `-H:WriteBarrierOutlining=<value>` instead.
+* (GR-73735) Enable Java Vector API support by default when the `jdk.incubator.vector` module is part of the boot module layer. Use `-H:-VectorAPISupport` as an explicit opt-out if needed.
+* (GR-70895) Native Image `resource:` URLs now preserve the source root of duplicate resource entries using the path format `resource://<module>@<loader>/<root-id>!/<resource-path>`. This allows directory resource URLs from different class-path roots to be converted to `Path` values and walked independently instead of observing a merged directory view.
+* (GR-76779) Added support for the JFR event `jdk.Shutdown`.
+* (GR-65320) Introduced `--future-defaults=exact-reflection`. This currently makes unregistered `Unsafe.allocateInstance` operations throw a `MissingReflectionRegistrationError` instead of the legacy `IllegalArgumentException`, preparing for stricter reflection metadata behavior in a future release.
+
+## GraalVM 25.1 (Internal Version 25.1.3)
+* (GR-76005) Improve Native Image support for constant `String.format` and `String::formatted` calls by intrinsifying simple format strings in CE. This reduces the reachability of JDK formatting and localization code for applications such as Hello World.
+* (GR-74889) Added Windows support for Native Image JFR recordings and heap dumps.
+* (GR-67169) Added POSIX support for Native Image JFR emergency dumps. When an out-of-memory error occurs while a JFR recording is active, Native Image can preserve in-memory recording data in an emergency JFR file.
+* (GR-75641) Added experimental support for Native Image layered images on Windows.
+* (GR-68156) Reflection queries in Native Image now preserve lookup-specific linkage errors for registered classes, matching JVM behavior for member and record component lookups when referenced types are missing.
+* (GR-75640) Added experimental support for Native Image layered images on Darwin.
+* (GR-53498) Added experimental support for Native Image layered images on AArch64.
+* (GR-76207) `-H:Preserve` now preserves reached lambda proxy classes whose capturing classes are preserved.
+* (GR-73221) Native Image resource lookup can now preserve the class loader that owned a resource at image build time. Loader-aware `resource:` URLs encode named modules and resource loaders in the authority part using the format `resource://<module>@<loader>/...`.
+* (GR-73717) Added support for collecting conditional reachability metadata from a native image at run time using `-XX:TraceMetadataConditionPackages`.
+* (GR-75222) Deprecated `native-image-utils generate-filters`. The native-image agent applies built-in filters by default; pass custom filter JSON directly with `caller-filter-file=<path>` or `access-filter-file=<path>` when additional filtering is needed.
+* (GR-61365) Improved URL protocol reachability metadata collection. The Tracing Agent no longer records the JAR URL protocol handler for built-in classpath resource URLs that Native Image replaces with embedded resources, while runtime `URLClassLoader` JAR access and explicit `jar:` and `jrt:` URL protocol use remain recorded. The `--enable-url-protocols` option is now deprecated; use reachability metadata to register required URL protocols instead.
 * (GR-73875) Added `--print-options` flag to `native-image` for printing available build options in table, markdown, or JSON format. Automated generation of option documentation from `@Option` annotations, eliminating manual maintenance of option tables.
 * (GR-70601) (GR-70592) (GR-70593) (GR-70598) (GR-71096): Add experimental support for just-in-time compilation of Java bytecodes loaded at run-time.
 * (GR-73556) Remove the deprecated `@AutomaticFeature` annotation and its handling. Features should be registered via the --features argument.
@@ -11,9 +48,11 @@ This changelog summarizes major changes to GraalVM Native Image.
 * (GR-43070) Add a new API flag `-Werror` to treat warnings as errors.
 * (GR-69280) Allow use of the `graal.` prefix for options without issuing a warning.
 * (GR-2092) Add jitdump support for recording run-time compilation metadata for perf (see PerfProfiling.md). Can be enabled with `-g -H:+RuntimeDebugInfo -H:RuntimeDebugInfoFormat=jitdump`.
+* (GR-2092) Jitdump writing can now be disabled with `-XX:-RuntimeJitdump`, or disabled by default in an image with `-R:-RuntimeJitdump` and re-enabled for a run with `-XX:+RuntimeJitdump`.
 * (GR-69116) Rename `native-image-configure` tool to `native-image-utils`.
 * (GR-69572) Deprecates the `native-image-inspect` tool. To extract embedded SBOMs, use `native-image-utils extract-sbom --image-path=<path_to_binary>`.
-* (GR-70136) Add a new tool `--tool:llvm` for the LLVM backend of Native Image.
+* (GR-76386) Move `native-image-utils extract-sbom` to GraalVM Community Edition.
+* (GR-70136) Add a new tool `--tool:llvm-backend` for the LLVM backend of Native Image.
 * (GR-68984) Ship the `reachability-metadata-schema.json` together with GraalVM at `<graalvm-home>/lib/svm/schemas/reachability-metadata-schema.json`.
 * (GR-68984) Improve the schema to capture detailed constraints about each element in the `reachability-metadata-schema.json`.
 * (GR-57214) `-H:...` can now be used at build-time to set new defaults for both build-time and run-time options (for example, run-time option `-R:MaxHeapSize` can now also be set via `-H:MaxHeapSize`).
@@ -26,13 +65,17 @@ This changelog summarizes major changes to GraalVM Native Image.
 * (GR-71698) Introduced `--future-defaults=class-for-name-respects-class-loader` that changes 'Class.forName' and 'ClassLoader#loadClass' to respect the class loader arguments. 
 * (GR-72689) The context class loader seen during build-time context initialization is now part of the native image module layer. This means that by default, service loaders will now see some extra service providers definition coming from the native image module path.
 * (GR-74050) JFR now uses the safepoint-based execution sampler by default on all platforms. To use the signal-handler-based execution sampler instead, enable `-H:+SignalHandlerBasedExecutionSampler`.
+* (GR-75242) JFR stack trace support is no longer disabled entirely if runtime compilation is enabled. Instead, individual stack traces are skipped when they contain JIT-compiled code.
 * (GR-63737) Deprecated API function `Threading.registerRecurringCallback(...)` without replacement. This method should not be used as it is inherently unsafe.
 * (GR-63737) Removed deprecated API function `ProcessPropertiesSupport.setLocale(...)`.
 * (GR-52538) (GR-69523) (GR-73129) Introduce new SerialGC policy `Adaptive2` and default to mark-compact collection in the old generation. On average, this reduces memory usage and often improves throughput and latency. Restore the old behavior with: `-H:-CompactingOldGen -H:InitialCollectionPolicy=Adaptive`.
+* (GR-75348) Allow selecting the Serial GC collection policy at run time with `-XX:InitialCollectionPolicy`.
 * (GR-71974) Introduced `-H:+CompatibilityMode` that disables all Native Image features that allow users to diverge from original program semantics: build-time initialization for classpath classes, native-image-specific system properties, substitutions on the classpath, and user features, while enabling all future defaults. This mode does not modify key Native Image restrictions related to dynamic access (reachability metadata) and run-time class loading as those are accepted limitations of native image.
 * (GR-74008) On macOS, the build process now uses `memory_pressure` for a more accurate detection of free memory.
 * (GR-73792) Added randomized runtime code entry points. Enable with `-H:+MaxRuntimeCodeOffset`.
 * (GR-73792) Added AMD64 memory masking and fencing mitigation for untrusted code. Enable with `-H:+MemoryMaskingAndFencing`.
+* (GR-74988) Build position-independent executables (PIE) on Linux by default, increasing security by participating in address space layout randomization (ASLR). To disable PIE (even if the system toolchain would otherwise produce PIE), use `-H:NativeLinkerOption=-no-pie`. Note that on many Linux distributions, macOS, and Windows, the system toolchains used by Native Image have already been producing PIE.
+* (GR-74988) Turn on relative code pointers by default to reduce startup time, memory usage, and size for PIE and shared library images. Instead of dynamic linker relocations, they use a dedicated code base register to compute code addresses. To disable, use `-H:-RelativeCodePointers`.
 
 ## GraalVM 25
 * (GR-52276) (GR-61959) Add support for Arena.ofShared().

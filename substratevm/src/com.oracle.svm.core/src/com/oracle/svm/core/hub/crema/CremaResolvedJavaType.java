@@ -48,6 +48,12 @@ public interface CremaResolvedJavaType extends ResolvedJavaType {
     CremaResolvedJavaMethod[] getDeclaredCremaMethods();
 
     /**
+     * Returns the declared method with the given name and descriptor, or {@code null} if no such
+     * method exists.
+     */
+    CremaResolvedJavaMethod lookupDeclaredMethod(String name, String descriptor);
+
+    /**
      * Returns an array all the declared constructors of this type.
      *
      * @return An array of {@code CremaResolvedJavaMethod} objects representing all the declared
@@ -95,14 +101,6 @@ public interface CremaResolvedJavaType extends ResolvedJavaType {
      *         type
      */
     JavaType[] getDeclaredClasses();
-
-    /**
-     * Returns the permitted subclasses for a sealed class. Note that this method must only be
-     * called on a known sealed resolved type.
-     *
-     * @return array of permitted subclasses as a JavaType array
-     */
-    JavaType[] getPermittedSubClasses();
 
     /**
      * Returns the resolved nest members of this resolved java type.

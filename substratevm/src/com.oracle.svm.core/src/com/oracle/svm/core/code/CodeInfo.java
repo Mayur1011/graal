@@ -26,7 +26,7 @@ package com.oracle.svm.core.code;
 
 import org.graalvm.nativeimage.c.struct.RawStructure;
 
-import com.oracle.svm.core.util.DuplicatedInNativeCode;
+import com.oracle.svm.shared.util.DuplicatedInNativeCode;
 
 /**
  * A tethered {@link CodeInfo} object that can be accessed using the static methods on the class
@@ -79,6 +79,8 @@ public interface CodeInfo extends UntetheredCodeInfo {
      * freed by the GC once the tether object becomes unreachable. Until then, the GC must continue
      * visiting all heap references, including code constants that are directly embedded into the
      * machine code.
+     *
+     * @see CodeInfoAccess#isLiveCodeConstantsState
      */
     @DuplicatedInNativeCode //
     int STATE_REMOVED_FROM_CODE_CACHE = STATE_PENDING_REMOVAL_FROM_CODE_CACHE + 1;

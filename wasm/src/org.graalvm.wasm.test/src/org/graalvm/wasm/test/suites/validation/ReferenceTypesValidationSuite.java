@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2022, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -243,6 +243,30 @@ public class ReferenceTypesValidationSuite extends AbstractBinarySuite {
             Value main = instance.getMember("main");
             Value result = main.execute();
             Assert.assertEquals("Unexpected return value", 0, result.asInt());
+        });
+    }
+
+    @Test
+    public void testTableInitDeclarativeElementSegmentSecondInstantiation() throws IOException {
+        // main:
+        // i32.const 0
+        // i32.const 0
+        // i32.const 1
+        // table.init 0 0
+        // i32.const 0
+        //
+        // (elem declare func 0)
+        final byte[] binary = getDefaultTableInitBuilder("41 00 41 00 41 01 FC 0C 00 00 41 00 0B").addElements("03 00 01 00").build();
+        runParserTest(binary, (context, source) -> {
+            Value module = context.eval(source);
+            module.newInstance();
+            Value main = module.newInstance().getMember("exports").getMember("main");
+            try {
+                main.execute();
+                Assert.fail("Should have thrown");
+            } catch (PolyglotException e) {
+                Assert.assertTrue("Expect out of bounds error", e.getMessage().contains("out of bounds table access"));
+            }
         });
     }
 
@@ -531,11 +555,46 @@ public class ReferenceTypesValidationSuite extends AbstractBinarySuite {
     }
 
     @Test
+    public void testTableInitActiveElementSegmentZeroLength() throws IOException {
+        // main:
+        // i32.const 0
+        // i32.const 0
+        // i32.const 0
+        // table.init 2 0
+        // i32.const 0
+        //
+        // (elem (i32.const 0) func)
+        // (elem func 0)
+        // (elem (table 0) (i32.const 0) func)
+        final byte[] binary = getDefaultTableInitBuilder("41 00 41 00 41 00 FC 0C 02 00 41 00 0B").addElements("00 41 00 0B 00").addElements("01 00 01 00").addElements("02 00 41 00 0B 00 00").build();
+        runRuntimeTest(binary, instance -> {
+            Value main = instance.getMember("main");
+            Value result = main.execute();
+            Assert.assertEquals("Unexpected return value", 0, result.asInt());
+        });
+    }
+
+    @Test
     public void testMultipleTables() throws IOException {
         // (table 1 1 funcref)
         // (table 1 1 externref)
         // (table 1 1 exnref)
         final byte[] binary = newBuilder().addTable(1, 1, WasmType.FUNCREF_TYPE).addTable(1, 1, WasmType.EXTERNREF_TYPE).addTable(1, 1, WasmType.EXNREF_TYPE).build();
+        runParserTest(binary, options -> options.option("wasm.Exceptions", "true"), Context::eval);
+    }
+
+    @Test
+    public void testCatchRefHandlersProduceNonNullReferences() throws IOException {
+        final int nonNullExnRef = WasmType.withNullable(false, WasmType.EXN_HEAPTYPE);
+        final BinaryBuilder builder = newBuilder();
+        builder.addType(EMPTY_INTS, new int[]{nonNullExnRef});
+        builder.addType(EMPTY_INTS, EMPTY_INTS);
+        builder.addTag((byte) 0, (byte) 1);
+        // block (result (ref exn)) { try_table (catch_ref 0 0) { throw 0 } }
+        builder.addFunction(0, EMPTY_INTS, "02 64 69 1F 40 01 01 00 00 08 00 0B 00 0B 0B");
+        // block (result (ref exn)) { try_table (catch_all_ref 0) { throw 0 } }
+        builder.addFunction(0, EMPTY_INTS, "02 64 69 1F 40 01 03 00 08 00 0B 00 0B 0B");
+        final byte[] binary = builder.build();
         runParserTest(binary, options -> options.option("wasm.Exceptions", "true"), Context::eval);
     }
 

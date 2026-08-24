@@ -36,8 +36,9 @@ import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.singletons.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
-import com.oracle.svm.core.util.DuplicatedInNativeCode;
-import com.oracle.svm.core.util.ImageHeapList;
+import com.oracle.svm.guest.staging.util.AbstractImageHeapList;
+import com.oracle.svm.shared.util.DuplicatedInNativeCode;
+import com.oracle.svm.guest.staging.util.ImageHeapList;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.singletons.ImageSingletonLoader;
 import com.oracle.svm.shared.singletons.ImageSingletonWriter;
@@ -59,21 +60,24 @@ import jdk.graal.compiler.debug.Assertions;
  */
 public class GCCause {
 
-    @DuplicatedInNativeCode public static final GCCause JavaLangSystemGC = new GCCause("java.lang.System.gc()", 0);
-    @DuplicatedInNativeCode public static final GCCause UnitTest = new GCCause("Forced GC in unit test", 1);
-    @DuplicatedInNativeCode public static final GCCause TestGCInDeoptimizer = new GCCause("Test GC in deoptimizer", 2);
-    @DuplicatedInNativeCode public static final GCCause HintedGC = new GCCause("Hinted GC", 3);
-    @DuplicatedInNativeCode public static final GCCause JvmtiForceGC = new GCCause("JvmtiEnv ForceGarbageCollection", 4);
-    @DuplicatedInNativeCode public static final GCCause HeapDump = new GCCause("Heap Dump Initiated GC", 5);
-    @DuplicatedInNativeCode public static final GCCause DiagnosticCommand = new GCCause("Diagnostic Command", 6);
+    @DuplicatedInNativeCode public static final GCCause JavaLangSystemGC = new GCCause("java.lang.System.gc()", 0, true);
+    @DuplicatedInNativeCode public static final GCCause TestGCInDeoptimizer = new GCCause("Test GC in deoptimizer", 2, false);
+    @DuplicatedInNativeCode public static final GCCause HintedGC = new GCCause("Hinted GC", 3, false);
+    @DuplicatedInNativeCode public static final GCCause JvmtiForceGC = new GCCause("JvmtiEnv ForceGarbageCollection", 4, true);
+    @DuplicatedInNativeCode public static final GCCause HeapDump = new GCCause("Heap Dump Initiated GC", 5, true);
+    @DuplicatedInNativeCode public static final GCCause DiagnosticCommand = new GCCause("Diagnostic Command", 6, true);
+    @DuplicatedInNativeCode public static final GCCause WhiteBoxTestYoungGC = new GCCause("WhiteBox Initiated Young GC", 7, false);
+    @DuplicatedInNativeCode public static final GCCause WhiteBoxTestFullGC = new GCCause("WhiteBox Initiated Full GC", 8, true);
 
     private final int id;
     private final String name;
+    private final boolean completeCollection;
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    protected GCCause(String name, int id) {
+    protected GCCause(String name, int id, boolean completeCollection) {
         this.id = id;
         this.name = name;
+        this.completeCollection = completeCollection;
     }
 
     public String getName() {
@@ -85,11 +89,16 @@ public class GCCause {
         return id;
     }
 
+    /** Returns whether this cause triggers a complete collection. */
+    public boolean collectsCompletely() {
+        return completeCollection;
+    }
+
     public static GCCause fromId(int causeId) {
         return getGCCauses().get(causeId);
     }
 
-    public static List<GCCause> getGCCauses() {
+    public static AbstractImageHeapList<GCCause> getGCCauses() {
         return ImageSingletons.lookup(GCCauseSupport.class).gcCauses;
     }
 
@@ -102,7 +111,7 @@ public class GCCause {
 @AutomaticallyRegisteredImageSingleton
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
 class GCCauseSupport {
-    final List<GCCause> gcCauses = ImageHeapList.create(GCCause.class, null);
+    final AbstractImageHeapList<GCCause> gcCauses = ImageHeapList.create(GCCause.class, null);
 
     @Platforms(Platform.HOSTED_ONLY.class)
     Object collectGCCauses(Object obj) {
@@ -137,6 +146,11 @@ class GCCauseFeature implements InternalFeature {
     List<String> registeredGCCauses;
 
     @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(GCCauseFeature.class, this);
+    }
+
+    @Override
     public void duringSetup(DuringSetupAccess access) {
         if (!ImageLayerBuildingSupport.buildingImageLayer()) {
             /*
@@ -154,12 +168,13 @@ class GCCauseFeature implements InternalFeature {
             if (ImageLayerBuildingSupport.buildingInitialLayer()) {
                 GCCauseSupport support = ImageSingletons.lookup(GCCauseSupport.class);
                 support.installGCCause(GCCause.JavaLangSystemGC);
-                support.installGCCause(GCCause.UnitTest);
                 support.installGCCause(GCCause.TestGCInDeoptimizer);
                 support.installGCCause(GCCause.HintedGC);
                 support.installGCCause(GCCause.JvmtiForceGC);
                 support.installGCCause(GCCause.HeapDump);
                 support.installGCCause(GCCause.DiagnosticCommand);
+                support.installGCCause(GCCause.WhiteBoxTestYoungGC);
+                support.installGCCause(GCCause.WhiteBoxTestFullGC);
 
                 var gcCauseList = GCCause.getGCCauses();
                 idToGCCauseName = (idx) -> gcCauseList.get(idx).getName();

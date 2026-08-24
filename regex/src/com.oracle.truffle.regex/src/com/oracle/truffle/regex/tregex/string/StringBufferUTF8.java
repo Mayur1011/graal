@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,6 +47,10 @@ public final class StringBufferUTF8 extends ByteArrayBuffer implements AbstractS
 
     public StringBufferUTF8(int capacity) {
         super(capacity);
+    }
+
+    public StringBufferUTF8(StringBufferUTF8 copy) {
+        super(copy);
     }
 
     @Override
@@ -146,6 +150,21 @@ public final class StringBufferUTF8 extends ByteArrayBuffer implements AbstractS
                 set(--i, (byte) (c1 ^ c2));
         }
         // Checkstyle: resume
+    }
+
+    @Override
+    public AbstractStringBuffer copy() {
+        return new StringBufferUTF8(this);
+    }
+
+    @Override
+    public long prefixHash(int maxLength) {
+        int prefixLength = Math.min(length(), maxLength);
+        long hash = prefixLength;
+        for (int i = 0; i < prefixLength; i++) {
+            hash = Long.rotateLeft(hash, 5) ^ Byte.toUnsignedInt(buf[i]);
+        }
+        return hash;
     }
 
     @Override

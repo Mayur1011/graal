@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -1905,8 +1905,9 @@ public final class IntegerStamp extends PrimitiveStamp {
                                 int extraBits = 64 - bits;
                                 long defaultMask = CodeUtil.mask(bits);
                                 // shifting back and forth performs sign extension
-                                long mustBeSet = (value.mustBeSet() << extraBits) >> (shiftCount + extraBits) & defaultMask;
-                                long mayBeSet = (value.mayBeSet() << extraBits) >> (shiftCount + extraBits) & defaultMask;
+                                int signExtendShift = (int) Math.min(shiftCount + extraBits, Long.SIZE - 1);
+                                long mustBeSet = (value.mustBeSet() << extraBits) >> signExtendShift & defaultMask;
+                                long mayBeSet = (value.mayBeSet() << extraBits) >> signExtendShift & defaultMask;
                                 return IntegerStamp.create(bits, value.lowerBound() >> shiftCount, value.upperBound() >> shiftCount, mustBeSet, mayBeSet);
                             }
                             long mask = IntegerStamp.mayBeSetFor(bits, value.lowerBound(), value.upperBound());
@@ -1958,8 +1959,31 @@ public final class IntegerStamp extends PrimitiveStamp {
                                     return stamp;
                                 }
 
-                                long mustBeSet = value.mustBeSet() >>> shiftCount;
-                                long mayBeSet = value.mayBeSet() >>> shiftCount;
+                                long mustBeSet;
+                                long mayBeSet;
+                                if (bits < Integer.SIZE) {
+                                    /*
+                                     * Byte and short constants are sign-extended to int before
+                                     * applying >>> and narrowing back to their original bit width.
+                                     */
+                                    long defaultMask = CodeUtil.mask(bits);
+                                    long signBit = 1L << (bits - 1);
+                                    long highBits = CodeUtil.mask(Integer.SIZE) & ~defaultMask;
+                                    long signExtendedMustBeSet = value.mustBeSet();
+                                    long signExtendedMayBeSet = value.mayBeSet();
+                                    if ((value.mustBeSet() & signBit) != 0) {
+                                        signExtendedMustBeSet |= highBits;
+                                    }
+                                    if ((value.mayBeSet() & signBit) != 0) {
+                                        signExtendedMayBeSet |= highBits;
+                                    }
+                                    mustBeSet = (signExtendedMustBeSet >>> shiftCount) & defaultMask;
+                                    mayBeSet = (signExtendedMayBeSet >>> shiftCount) & defaultMask;
+                                    return IntegerStamp.stampForMask(bits, mustBeSet, mayBeSet);
+                                }
+
+                                mustBeSet = value.mustBeSet() >>> shiftCount;
+                                mayBeSet = value.mayBeSet() >>> shiftCount;
                                 if (value.lowerBound() < 0) {
                                     return IntegerStamp.create(bits, mustBeSet, mayBeSet, mustBeSet, mayBeSet);
                                 } else {
@@ -2398,6 +2422,146 @@ public final class IntegerStamp extends PrimitiveStamp {
                             PrimitiveConstant n = (PrimitiveConstant) value;
                             int bits = n.getJavaKind().getBitCount();
                             return CodeUtil.zeroExtend(n.asLong(), bits) == NumUtil.maxValueUnsigned(bits);
+                        }
+                    },
+
+                    new ArithmeticOpTable.BinaryOp.SAdd(false, true) {
+
+                        @Override
+                        public Constant foldConstant(Constant a, Constant b) {
+                            PrimitiveConstant x = (PrimitiveConstant) a;
+                            PrimitiveConstant y = (PrimitiveConstant) b;
+                            GraalError.guarantee(x.getJavaKind() == y.getJavaKind(), "unexpected kinds %s and %s", x.getJavaKind(), y.getJavaKind());
+                            int bits = x.getJavaKind().getBitCount();
+                            return JavaConstant.forIntegerKind(x.getJavaKind(), NumUtil.addSaturatingSigned(bits, x.asLong(), y.asLong()));
+                        }
+
+                        @Override
+                        protected Stamp foldStampImpl(Stamp a, Stamp b) {
+                            if (a.isEmpty()) {
+                                return a;
+                            }
+                            if (b.isEmpty()) {
+                                return b;
+                            }
+                            IntegerStamp x = (IntegerStamp) a;
+                            IntegerStamp y = (IntegerStamp) b;
+                            GraalError.guarantee(x.getBits() == y.getBits(), "unexpected stamps %s and %s", x, y);
+                            int bits = x.getBits();
+                            long lowerBound = NumUtil.addSaturatingSigned(bits, x.lowerBound(), y.lowerBound());
+                            long upperBound = NumUtil.addSaturatingSigned(bits, x.upperBound(), y.upperBound());
+                            return create(bits, lowerBound, upperBound);
+                        }
+
+                        @Override
+                        public boolean isNeutral(Constant value) {
+                            PrimitiveConstant n = (PrimitiveConstant) value;
+                            return n.asLong() == 0;
+                        }
+                    },
+
+                    new ArithmeticOpTable.BinaryOp.SSub(false, false) {
+
+                        @Override
+                        public Constant foldConstant(Constant a, Constant b) {
+                            PrimitiveConstant x = (PrimitiveConstant) a;
+                            PrimitiveConstant y = (PrimitiveConstant) b;
+                            GraalError.guarantee(x.getJavaKind() == y.getJavaKind(), "unexpected kinds %s and %s", x.getJavaKind(), y.getJavaKind());
+                            int bits = x.getJavaKind().getBitCount();
+                            return JavaConstant.forIntegerKind(x.getJavaKind(), NumUtil.subSaturatingSigned(bits, x.asLong(), y.asLong()));
+                        }
+
+                        @Override
+                        protected Stamp foldStampImpl(Stamp a, Stamp b) {
+                            if (a.isEmpty()) {
+                                return a;
+                            }
+                            if (b.isEmpty()) {
+                                return b;
+                            }
+                            IntegerStamp x = (IntegerStamp) a;
+                            IntegerStamp y = (IntegerStamp) b;
+                            GraalError.guarantee(x.getBits() == y.getBits(), "unexpected stamps %s and %s", x, y);
+                            int bits = x.getBits();
+                            long lowerBound = NumUtil.subSaturatingSigned(bits, x.lowerBound(), y.upperBound());
+                            long upperBound = NumUtil.subSaturatingSigned(bits, x.upperBound(), y.lowerBound());
+                            return create(bits, lowerBound, upperBound);
+                        }
+
+                        @Override
+                        public boolean isNeutral(Constant value) {
+                            PrimitiveConstant n = (PrimitiveConstant) value;
+                            return n.asLong() == 0;
+                        }
+                    },
+
+                    new ArithmeticOpTable.BinaryOp.SUAdd(true, true) {
+
+                        @Override
+                        public Constant foldConstant(Constant a, Constant b) {
+                            PrimitiveConstant x = (PrimitiveConstant) a;
+                            PrimitiveConstant y = (PrimitiveConstant) b;
+                            GraalError.guarantee(x.getJavaKind() == y.getJavaKind(), "unexpected kinds %s and %s", x.getJavaKind(), y.getJavaKind());
+                            int bits = x.getJavaKind().getBitCount();
+                            return JavaConstant.forIntegerKind(x.getJavaKind(), NumUtil.addSaturatingUnsigned(bits, x.asLong(), y.asLong()));
+                        }
+
+                        @Override
+                        protected Stamp foldStampImpl(Stamp a, Stamp b) {
+                            if (a.isEmpty()) {
+                                return a;
+                            }
+                            if (b.isEmpty()) {
+                                return b;
+                            }
+                            IntegerStamp x = (IntegerStamp) a;
+                            IntegerStamp y = (IntegerStamp) b;
+                            GraalError.guarantee(x.getBits() == y.getBits(), "unexpected stamps %s and %s", x, y);
+                            int bits = x.getBits();
+                            long lowerBound = NumUtil.addSaturatingUnsigned(bits, x.unsignedLowerBound(), y.unsignedLowerBound());
+                            long upperBound = NumUtil.addSaturatingUnsigned(bits, x.unsignedUpperBound(), y.unsignedUpperBound());
+                            return StampFactory.forUnsignedInteger(bits, lowerBound, upperBound);
+                        }
+
+                        @Override
+                        public boolean isNeutral(Constant value) {
+                            PrimitiveConstant n = (PrimitiveConstant) value;
+                            return n.asLong() == 0;
+                        }
+                    },
+
+                    new ArithmeticOpTable.BinaryOp.SUSub(false, false) {
+
+                        @Override
+                        public Constant foldConstant(Constant a, Constant b) {
+                            PrimitiveConstant x = (PrimitiveConstant) a;
+                            PrimitiveConstant y = (PrimitiveConstant) b;
+                            GraalError.guarantee(x.getJavaKind() == y.getJavaKind(), "unexpected kinds %s and %s", x.getJavaKind(), y.getJavaKind());
+                            int bits = x.getJavaKind().getBitCount();
+                            return JavaConstant.forIntegerKind(x.getJavaKind(), NumUtil.subSaturatingUnsigned(bits, x.asLong(), y.asLong()));
+                        }
+
+                        @Override
+                        protected Stamp foldStampImpl(Stamp a, Stamp b) {
+                            if (a.isEmpty()) {
+                                return a;
+                            }
+                            if (b.isEmpty()) {
+                                return b;
+                            }
+                            IntegerStamp x = (IntegerStamp) a;
+                            IntegerStamp y = (IntegerStamp) b;
+                            GraalError.guarantee(x.getBits() == y.getBits(), "unexpected stamps %s and %s", x, y);
+                            int bits = x.getBits();
+                            long lowerBound = NumUtil.subSaturatingUnsigned(bits, x.unsignedLowerBound(), y.unsignedUpperBound());
+                            long upperBound = NumUtil.subSaturatingUnsigned(bits, x.unsignedUpperBound(), y.unsignedLowerBound());
+                            return StampFactory.forUnsignedInteger(bits, lowerBound, upperBound);
+                        }
+
+                        @Override
+                        public boolean isNeutral(Constant value) {
+                            PrimitiveConstant n = (PrimitiveConstant) value;
+                            return n.asLong() == 0;
                         }
                     },
 

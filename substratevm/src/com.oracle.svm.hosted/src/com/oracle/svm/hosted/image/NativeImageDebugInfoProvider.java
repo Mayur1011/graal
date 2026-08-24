@@ -99,7 +99,7 @@ import com.oracle.svm.hosted.substitute.SubstitutionMethod;
 import com.oracle.svm.hosted.substitute.SubstitutionType;
 import com.oracle.svm.shared.util.ClassUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.OriginalClassProvider;
 
 import jdk.graal.compiler.code.CompilationResult;
@@ -660,7 +660,7 @@ class NativeImageDebugInfoProvider extends SharedDebugInfoProvider {
         LoaderEntry loaderEntry = lookupLoaderEntry(hostedType);
         String loaderName = loaderEntry.loaderId();
         long typeSignature = getTypeSignature(typeName + loaderName);
-        long compressedTypeSignature = useHeapBase ? getTypeSignature(INDIRECT_PREFIX + typeName + loaderName) : typeSignature;
+        long compressedTypeSignature = getTypeSignature(INDIRECT_PREFIX + typeName + loaderName);
 
         if (hostedType.isPrimitive()) {
             JavaKind kind = hostedType.getStorageKind();
@@ -782,11 +782,11 @@ class NativeImageDebugInfoProvider extends SharedDebugInfoProvider {
                      * RawPointerTo annotation
                      */
                     AnalysisType pointerTo = null;
-                    CPointerTo cPointerTo = AnnotationUtil.getAnnotation(type, CPointerTo.class);
+                    CPointerTo cPointerTo = GuestAnnotationAccess.getAnnotation(type, CPointerTo.class);
                     if (cPointerTo != null) {
                         pointerTo = metaAccess.lookupJavaType(cPointerTo.value());
                     }
-                    RawPointerTo rawPointerTo = AnnotationUtil.getAnnotation(type, RawPointerTo.class);
+                    RawPointerTo rawPointerTo = GuestAnnotationAccess.getAnnotation(type, RawPointerTo.class);
                     if (rawPointerTo != null) {
                         pointerTo = metaAccess.lookupJavaType(rawPointerTo.value());
                     }

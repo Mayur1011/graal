@@ -27,6 +27,7 @@ import json
 import shutil
 
 import mx
+import mx_benchmark
 import mx_subst
 import mx_unittest
 import mx_sdk
@@ -66,7 +67,6 @@ class VmGateTasks:
     graal_js_tests_compiled = 'graal-js-tests-compiled'
     graal_nodejs = 'graal-nodejs'
     python = 'python'
-    fastr = 'fastr'
     integration = 'integration'
     tools = 'tools'
     libgraal = 'libgraal'
@@ -75,12 +75,14 @@ class VmGateTasks:
     truffle_native_tck_js = 'truffle-native-tck-js'
     truffle_native_tck_python = 'truffle-native-tck-python'
     truffle_native_tck_wasm = 'truffle-native-tck-wasm'
+    truffle_isolate_build_unittest_library = 'truffle_isolate_build_unittest_library'
     truffle_isolate_internal_unittest = 'truffle_isolate_internal_unittest'
     truffle_isolate_external_unittest = 'truffle_isolate_external_unittest'
     maven_downloader = 'maven-downloader'
     truffle_maven_deploy_local = 'truffle_maven_deploy_local'
     truffle_maven_isolate_internal = 'truffle_maven_isolate_internal'
     truffle_maven_isolate_external = 'truffle_maven_isolate_external'
+    crema = 'crema'
 
 def _get_CountUppercase_vmargs():
     cp = mx.project("jdk.graal.compiler.test").classpath_repr()
@@ -288,11 +290,6 @@ def _test_libgraal_oome_dumping(extra_vm_arguments):
         'custom.hprof': join(scratch_dir, 'custom.hprof'),
         'subdir': join(scratch_dir, 'subdir', 'libgraal_pid*.hprof'),
     }
-    if mx.is_windows():
-        # GR-39501
-        mx.log('-Djdk.graal.internal.HeapDumpOnOutOfMemoryError=true is not supported on Windows')
-        return
-
     for n, v in inputs.items():
         vmargs = ['-Djdk.graal.CrashAt=*',
                   '-Djdk.graal.internal.Xmx128M',
@@ -510,6 +507,23 @@ def gate_body(args, tasks):
             # 2. the build must be JVMCI-enabled since the 'GraalVM compiler' component is registered
             mx_sdk_vm_impl.check_versions(mx_sdk_vm_impl.graalvm_output(), expect_graalvm=True, check_jvmci=True)
 
+    with Task('AWFY_Crema:Sieve', tasks, tags=[VmGateTasks.crema], report='compiler') as t:
+        if t:
+            crema_vm_configs = {vm.config_name() for vm in mx_benchmark.java_vm_registry.get_vms() if vm.name() == 'crema'}
+            crema_jvm_config = None
+            if 'default-ee' in crema_vm_configs:
+                crema_jvm_config = 'default-ee'
+            elif 'default-ce' in crema_vm_configs:
+                crema_jvm_config = 'default-ce'
+            else:
+                mx.abort('No crema Java VM configuration is registered')
+            mx_benchmark.gate_mx_benchmark([
+                'awfy:Sieve', '--tracker=none',
+                '--', '--jvm', 'crema', '--jvm-config', crema_jvm_config,
+                '-Djdk.graal.CompilationFailureAction=Diagnose', '-Xmx1G',
+                '--', '-i', '10',
+            ])
+
     libgraal_suite_name = 'substratevm'
     if mx.suite(libgraal_suite_name, fatalIfMissing=False) is not None:
         import mx_substratevm
@@ -640,7 +654,14 @@ def _svm_truffle_tck(native_image, language_id, language_distribution=None, fail
     success = False
     try:
         report_file = join(svmbuild, "language_permissions.log")
-        print_call_tree_options = ['-H:+PrintAnalysisCallTree'] if print_call_tree else []
+        call_graph_file = join(svmbuild, "call_graph.txt")
+        if print_call_tree:
+            print_call_tree_options = [
+                '-H:+PrintAnalysisCallTree',
+                f'-H:TruffleTCKDumpCallGraph={call_graph_file}',
+            ]
+        else:
+            print_call_tree_options = []
         options = mx.get_runtime_jvm_args(dists, exclude_names=['substratevm:SVM']) + [
             '--features=com.oracle.svm.truffle.tck.PermissionsFeature',
         ] + mx_sdk_vm_impl.svm_experimental_options([
@@ -658,18 +679,40 @@ def _svm_truffle_tck(native_image, language_id, language_distribution=None, fail
             options += mx_sdk_vm_impl.svm_experimental_options([f"-H:TruffleTCKPermissionsExcludeFiles={','.join(excludes)}"])
         native_image(options)
         if isfile(report_file) and getsize(report_file) > 0:
-            message = f"Failed: Language {language_id} performs following privileged calls:\n\n"
+            message = f"""Failed: Language {language_id} performs privileged calls.
+How to resolve this failure:
+1. If your change modified {language_id} code, it most likely made a privileged operation reachable from the language.
+   Truffle languages must not call privileged JDK APIs directly. Use the corresponding Truffle API instead, for example
+   TruffleFile for file-system access. If the call is intentionally reachable only under a non-default option or another
+   restricted condition, consider adding the enclosing language method to an exclude file under
+   `mx.{language_id}/truffle.tck.permissions` in the language suite.
+2. If your change added or updated a third-party library, the library may either perform a privileged operation directly
+   or make one reachable through a polymorphic call site that the native-image points-to analysis cannot distinguish by
+   context. Inspect the reported call path and decide whether the enclosing library or language method is safe to exclude
+   in `mx.{language_id}/truffle.tck.permissions`.
+3. If your change updated the JDK or Graal, a privileged operation may have become reachable through JDK or platform code,
+   often via a megamorphic interface such as a functional interface. First verify whether the call can really be reached
+   from the Truffle language. If it cannot, consider adding the JDK method to `jdk_allowed_methods.json`. If the privileged
+   operation is performed by a JDK lambda, method reference, or anonymous class that implements a megamorphic interface,
+   and that implementation object is confined to the method that creates it, consider adding the enclosing JDK method to
+   `jdk_inlined_implementations.json` so the permission checker treats the implementation only in that enclosing context.
+
+Reported call paths:
+"""
+
             with open(report_file, encoding='utf-8') as f:
                 for line in f.readlines():
                     message = message + line
-            message = message + ("\nNote: If the method is not used directly by the language, but is part of the call path "
-                                 "because it is used internally by the JDK and introduced by a polymorphic call, consider "
-                                 "adding it to `jdk_allowed_methods.json`.")
             if fail_on_error:
                 mx.abort(message)
             else:
-                reports_folder = os.path.join(svmbuild, 'reports') if print_call_tree else None
-                return message, reports_folder
+                if print_call_tree:
+                    reports_folder = os.path.join(svmbuild, 'reports')
+                    call_tree = call_graph_file
+                else:
+                    reports_folder = None
+                    call_tree = None
+                return message, reports_folder, call_tree
         else:
             success = True
     finally:
@@ -680,7 +723,7 @@ def _svm_truffle_tck(native_image, language_id, language_distribution=None, fail
 
 def gate_truffle_native_tck_smoke_test(tasks):
 
-    def _copy_call_tree(source_folder):
+    def _copy_call_tree(source_folder, inverted_call_tree):
         """
         Copies native-image call tree from a temporary folder to the current working directory
         and compresses it with gzip algorithm. Such a file can be preserved when the build fails.
@@ -695,6 +738,12 @@ def gate_truffle_native_tck_smoke_test(tasks):
             with open(call_tree_file, "rb") as f_in:
                 with gzip.open(dest_file, "wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
+        if inverted_call_tree:
+            dest_file = "inverted_call_tree.txt.gz"
+            with open(inverted_call_tree, "rb") as f_in:
+                with gzip.open(dest_file, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+
 
     with Task('Truffle Native TCK Smoke Test', tasks, tags=[VmGateTasks.truffle_native_tck]) as t:
         if t:
@@ -706,34 +755,41 @@ def gate_truffle_native_tck_smoke_test(tasks):
                                           ['-H:TruffleTCKCollectMode=All'])
                 privileged_calls = result[0]
                 reports_folder = result[1]
-                if 'Failed: Language TCKSmokeTestLanguage performs following privileged calls' not in privileged_calls:
-                    _copy_call_tree(reports_folder)
-                    mx.abort("Expected failure, log:\n" + privileged_calls)
+                call_tree = result[2]
+                try:
+                    if 'Failed: Language TCKSmokeTestLanguage performs privileged calls.' not in privileged_calls:
+                        _copy_call_tree(reports_folder, call_tree)
+                        mx.abort("Expected failure, log:\n" + privileged_calls)
 
-                must_have_methods = [
-                    'PrivilegedCallNode.callConstructorReflectively',
-                    'PrivilegedCallNode.callMethodHandle',
-                    'PrivilegedCallNode.callMethodReflectively',
-                    'PrivilegedCallNode.doBehindBoundaryPrivilegedCall',
-                    'PrivilegedCallNode.doInterrupt',
-                    'PrivilegedCallNode.doPolymorphicCall',
-                    'PrivilegedCallNode.doPrivilegedCall',
-                    'ServiceImpl.execute',
-                    'UnsafeCallNode.doBehindBoundaryUnsafeAccess',
-                    'UnsafeCallNode.doUnsafeAccess',
-                    'DeniedURLNode.doURLOf'
-                ]
-                must_not_have_methods = [
-                    'AllowedURLNode.doURLOf'
-                ]
-                for method in must_have_methods:
-                    if method not in privileged_calls:
-                        _copy_call_tree(reports_folder)
-                        mx.abort(f"Missing {method} call in the log.\nLog content:\n" + privileged_calls)
-                for method in must_not_have_methods:
-                    if method in privileged_calls:
-                        _copy_call_tree(reports_folder)
-                        mx.abort(f"Found {method} call in the log.\nLog content:\n" + privileged_calls)
+                    must_have_methods = [
+                        'PrivilegedCallNode.callConstructorReflectively',
+                        'PrivilegedCallNode.callMethodHandle',
+                        'PrivilegedCallNode.callMethodReflectively',
+                        'PrivilegedCallNode.doBehindBoundaryPrivilegedCall',
+                        'PrivilegedCallNode.doInterrupt',
+                        'PrivilegedCallNode.doPolymorphicCall',
+                        'PrivilegedCallNode.doPrivilegedCall',
+                        'ServiceImpl.execute',
+                        'UnsafeCallNode.doBehindBoundaryUnsafeAccess',
+                        'UnsafeCallNode.doUnsafeAccess',
+                        'DeniedURLNode.doURLOf'
+                    ]
+                    must_not_have_methods = [
+                        'AllowedURLNode.doURLOf'
+                    ]
+                    for method in must_have_methods:
+                        if method not in privileged_calls:
+                            _copy_call_tree(reports_folder, call_tree)
+                            mx.abort(f"Missing {method} call in the log.\nLog content:\n" + privileged_calls)
+                    for method in must_not_have_methods:
+                        if method in privileged_calls:
+                            _copy_call_tree(reports_folder, call_tree)
+                            mx.abort(f"Found {method} call in the log.\nLog content:\n" + privileged_calls)
+                finally:
+                    if reports_folder:
+                        mx.rmtree(reports_folder)
+                    if call_tree:
+                        os.unlink(call_tree)
 
 def gate_truffle_native_tck_js(tasks):
     with Task('JavaScript Truffle Native TCK', tasks, tags=[VmGateTasks.truffle_native_tck_js]) as t:
@@ -773,13 +829,41 @@ def gate_truffle_native_tck_wasm(tasks):
                                  additional_options=['-Djdk.internal.lambda.disableEagerInitialization=false'] + wasm_extensions.libwasmvm_dynamic_build_args())
 
 def gate_polyglot_isolate(tasks):
+
+    class _DisableOptimizedTruffleRuntime:
+
+        def __enter__(self):
+            self.orig = mx_truffle.TruffleUnittestConfig._use_optimized_runtime
+            mx_truffle.TruffleUnittestConfig._use_optimized_runtime = False
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            mx_truffle.TruffleUnittestConfig._use_optimized_runtime = self.orig
+            return self
+
+        def runtime_options(self):
+            return ["-Dtruffle.UseFallbackRuntime=true", "-Dpolyglot.engine.WarnInterpreterOnly=false"]
+
+    with Task('TruffleIsolate:build-unittest-library', tasks, tags=[VmGateTasks.truffle_isolate_build_unittest_library]) as t:
+        if t:
+            _build_unittest_polyglot_isolate_library()
+
     with Task('TruffleIsolate:internal:unittest', tasks, tags=[VmGateTasks.truffle_isolate_internal_unittest]) as t:
         if t:
-            _polyglot_isolate_unittest('internal')
+            _polyglot_isolate_hotspot_unittest('internal')
+            _polyglot_isolate_native_unittest('internal')
+            with _DisableOptimizedTruffleRuntime() as fallback:
+                _polyglot_isolate_hotspot_unittest('internal', fallback.runtime_options())
+                _polyglot_isolate_native_unittest('internal', fallback.runtime_options())
 
     with Task('TruffleIsolate:external:unittest', tasks, tags=[VmGateTasks.truffle_isolate_external_unittest]) as t:
         if t:
-            _polyglot_isolate_unittest('external')
+            _polyglot_isolate_hotspot_unittest('external')
+            _polyglot_isolate_native_unittest('external')
+            with _DisableOptimizedTruffleRuntime() as fallback:
+                _polyglot_isolate_hotspot_unittest('external', fallback.runtime_options())
+                _polyglot_isolate_native_unittest('external', fallback.runtime_options())
+
 
 def gate_maven(tasks):
     # Runs truffle deploy to maven tests
@@ -877,19 +961,22 @@ def build_tests_image(image_dir, options, unit_tests=None, additional_deps=None,
             build_deps = build_deps + additional_deps
         extra_image_args = mx.get_runtime_jvm_args(build_deps, jdk=mx_compiler.jdk, exclude_names=mx_sdk_vm_impl.NativePropertiesBuildTask.implicit_excludes)
         native_image(build_options + extra_image_args)
-        artifacts_file_path = join(image_dir, 'build-artifacts.json')
-        if not exists(artifacts_file_path):
-            mx.abort(f'{artifacts_file_path} for tests image not found.')
-        with open(artifacts_file_path, encoding='utf-8') as f:
-            artifacts = json.load(f)
-        kind = 'shared_libraries' if shared_lib else 'executables'
-        if kind not in artifacts:
-            mx.abort(f'{kind} not found in {artifacts_file_path}.')
-        if len(artifacts[kind]) != 1:
-            mx.abort(f"Expected {kind} list with one element, found {len(artifacts[kind])}: {', '.join(artifacts[kind])}.")
-        tests_image_path = join(image_dir, artifacts[kind][0])
+        tests_image_path = _find_library(image_dir, shared_lib)
         mx.logv(f'Test image path: {tests_image_path}')
         return tests_image_path, unittests_file
+
+def _find_library(image_dir, shared_lib):
+    artifacts_file_path = join(image_dir, 'build-artifacts.json')
+    if not exists(artifacts_file_path):
+        mx.abort(f'{artifacts_file_path} for tests image not found.')
+    with open(artifacts_file_path, encoding='utf-8') as f:
+        artifacts = json.load(f)
+    kind = 'shared_libraries' if shared_lib else 'executables'
+    if kind not in artifacts:
+        mx.abort(f'{kind} not found in {artifacts_file_path}.')
+    if len(artifacts[kind]) != 1:
+        mx.abort(f"Expected {kind} list with one element, found {len(artifacts[kind])}: {', '.join(artifacts[kind])}.")
+    return join(image_dir, artifacts[kind][0])
 
 def gate_truffle_native_tck_sl(tasks):
     with Task('SL Truffle Native TCK', tasks, tags=[VmGateTasks.truffle_native_tck_sl]) as t:
@@ -916,18 +1003,56 @@ def _build_polyglot_isolate_library(target_folder, dist_names, native_image_opti
     image_build_options = list(native_image_options) if native_image_options else []
     optional_mpk_opts = ['-H:+ProtectionKeys'] if mx_sdk_vm_ng.is_enterprise() else []
     image_build_options += [
-        '-ea', '-esa',
+        '-ea',
+        '-esa',
         '--features=com.oracle.svm.truffle.PolyglotIsolateGuestFeature',
-        '-H:APIFunctionPrefix=truffle_isolate_', '-o', os.path.join(target_folder, 'truffle_isolate_test_lib')
+        '-H:APIFunctionPrefix=truffle_isolate_',
+        *mx_sdk_vm_impl.svm_experimental_options(['-H:-InitializeVM']),
+        '-o', os.path.join(target_folder, 'truffle_isolate_test_lib')
     ] + optional_mpk_opts
 
     return build_tests_image(
                 target_folder,
                 image_build_options,
                 add_tests,
-                additional_deps=mx_truffle.resolve_truffle_dist_names(True) + dist_names,
+                additional_deps=[
+                    'sdk:NATIVEBRIDGE',
+                    *mx_truffle.resolve_truffle_dist_names(True),
+                    *dist_names,
+                ],
                 shared_lib=True,
             )[0]
+
+_POLYGLOT_ISOLATE_SUPPORTED_TESTS = [
+    'com.oracle.truffle.api.test',
+    'com.oracle.truffle.tck.tests',
+    'com.oracle.truffle.sl.test'
+]
+
+def _resolve_unittest_polyglot_isolate_library_folder():
+    return os.path.join(_suite.get_mx_output_dir(platformDependent=True, jdkDependent=False), 'unittest-polyglot-isolate-library')
+
+def _build_unittest_polyglot_isolate_library():
+    truffle_isolate_guest_options = [
+        '--enable-url-protocols=http',
+        '--add-opens org.graalvm.polyglot/org.graalvm.polyglot=ALL-UNNAMED',
+        '--add-exports org.graalvm.nativeimage.builder/com.oracle.svm.core.os=ALL-UNNAMED',
+        *mx_sdk_vm_impl.svm_experimental_options([
+            # Disable a native-image check of `HostSpot` in element name. JFluid library used by unittest uses such a names.
+            # For example, org.graalvm.visualvm.lib.jfluid.heap.NearestGCRoot#initHotSpotReference
+            '-H:-VerifyNamingConventions',
+        ])
+    ]
+    mx_truffle.append_unittest_image_build_time_options(truffle_isolate_guest_options)
+    dists = [
+        'truffle:TRUFFLE_SL_TCK',
+        'truffle:TRUFFLE_TCK_INSTRUMENTATION',
+        *mx_truffle.resolve_truffle_dist_names()
+    ]
+    target_folder = _resolve_unittest_polyglot_isolate_library_folder()
+    shutil.rmtree(target_folder, ignore_errors=True)
+    os.makedirs(target_folder, exist_ok=True)
+    _build_polyglot_isolate_library(target_folder, dists, truffle_isolate_guest_options, _POLYGLOT_ISOLATE_SUPPORTED_TESTS)
 
 def _isolate_mode_vm_options(isolate_mode):
     if isolate_mode == 'external':
@@ -937,55 +1062,69 @@ def _isolate_mode_vm_options(isolate_mode):
     else:
         mx.abort(f"Invalid isolate_mode {isolate_mode}")
 
-def _polyglot_isolate_unittest(isolate_mode):
-    svmbuild = mkdtemp()
-    try:
-        isolate_mode_vm_options = _isolate_mode_vm_options(isolate_mode)
-        truffle_isolate_common_options = [
-                                             '--enable-url-protocols=http',
-                                             '--add-opens org.graalvm.polyglot/org.graalvm.polyglot=ALL-UNNAMED',
-                                         ] + mx_sdk_vm_impl.svm_experimental_options([
+def _isolate_library_vm_options():
+    tests_image_path = _find_library(_resolve_unittest_polyglot_isolate_library_folder(), True)
+    isolate_launcher = next(mx.distribution('sdk:NATIVEBRIDGE_LAUNCHER_RESOURCES').getArchivableResults(use_relpath=False))[0]
+    return [
+        "-Dpolyglot.engine.AllowExperimentalOptions=true",
+        "-Dpolyglot.engine.IsolateLibrary=" + tests_image_path,
+        "-Dpolyglot.engine.IsolateLauncher=" + isolate_launcher
+    ]
+
+def _polyglot_isolate_hotspot_unittest(isolate_mode, truffle_runtime_options=None):
+    if not truffle_runtime_options:
+        truffle_runtime_options = []
+    isolate_mode_vm_options = _isolate_mode_vm_options(isolate_mode)
+    extra_vm_arguments_isolate_library = _isolate_library_vm_options()
+    extra_vm_arguments_spawn_isolate = ["-Dpolyglot.engine.AllowExperimentalOptions=true",
+                                        "-Dpolyglot.engine.SpawnIsolate=true"]
+    unittest_args = ['--verbose']
+
+    mx_unittest.unittest(
+        unittest_args + extra_vm_arguments_isolate_library + isolate_mode_vm_options + truffle_runtime_options + ['com.oracle.truffle.api.test.polyglot.isolate'])
+    mx_unittest.unittest(unittest_args + extra_vm_arguments_isolate_library + isolate_mode_vm_options + truffle_runtime_options + extra_vm_arguments_spawn_isolate + [
+        'com.oracle.truffle.sandbox.test.ResourceLimitsTest',
+        'com.oracle.truffle.sandbox.test.HeapMemoryLimitTest'])
+    unittest_args_tck = unittest_args + ['-Dtck.inlineVerifierInstrument=false']
+    mx_unittest.unittest(
+        unittest_args_tck + extra_vm_arguments_isolate_library + isolate_mode_vm_options + truffle_runtime_options + extra_vm_arguments_spawn_isolate + _POLYGLOT_ISOLATE_SUPPORTED_TESTS)
+
+def _polyglot_isolate_native_unittest(isolate_mode, truffle_runtime_options=None):
+    jdk = mx.get_jdk(tag="graalvm")
+    native_image_path = jdk.exe_path("native-image")
+    if not os.path.exists(native_image_path):
+        mx.warn(f"Skipping polyglot isolate native host unittests because native-image does not exist in JDK {jdk.home}")
+        return
+
+    if not truffle_runtime_options:
+        truffle_runtime_options = []
+
+    truffle_isolate_options = [
+        '--enable-url-protocols=http',
+        '--add-opens org.graalvm.polyglot/org.graalvm.polyglot=ALL-UNNAMED',
+        *mx_sdk_vm_impl.svm_experimental_options([
             # Disable a native-image check of `HostSpot` in element name. JFluid library used by unittest uses such a names.
             # For example, org.graalvm.visualvm.lib.jfluid.heap.NearestGCRoot#initHotSpotReference
-            '-H:-VerifyNamingConventions',
+            '-H:-VerifyNamingConventions'
         ])
-        truffle_isolate_guest_options = truffle_isolate_common_options + [
-            '--add-exports org.graalvm.nativeimage.builder/com.oracle.svm.core.os=ALL-UNNAMED',
-        ]
-        mx_truffle.append_unittest_image_build_time_options(truffle_isolate_guest_options)
-        tests = ['com.oracle.truffle.api.test', 'com.oracle.truffle.tck.tests', 'com.oracle.truffle.sl.test']
-        tests_image_path = _build_polyglot_isolate_library(svmbuild,
-                                                           [
-                                                               'truffle:TRUFFLE_SL_TCK',
-                                                               'truffle:TRUFFLE_TCK_INSTRUMENTATION'
-                                                           ] + mx_truffle.resolve_truffle_dist_names(),
-                                                           truffle_isolate_guest_options,
-                                                           tests)
-        isolate_launcher = next(mx.distribution('sdk:NATIVEBRIDGE_LAUNCHER_RESOURCES').getArchivableResults(use_relpath=False))[0]
-        extra_vm_arguments_isolate_library = ["-Dpolyglot.engine.AllowExperimentalOptions=true",
-                                              '-Dpolyglot.engine.IsolateLibrary=' + tests_image_path,
-                                              '-Dpolyglot.engine.IsolateLauncher=' + isolate_launcher]
-        extra_vm_arguments_spawn_isolate = ["-Dpolyglot.engine.AllowExperimentalOptions=true",
-                                            "-Dpolyglot.engine.SpawnIsolate=true"]
-        unittest_args = ['--verbose']
-        mx_unittest.unittest(
-            unittest_args + extra_vm_arguments_isolate_library + isolate_mode_vm_options + ['com.oracle.truffle.api.test.polyglot.isolate'])
-        mx_unittest.unittest(unittest_args + extra_vm_arguments_isolate_library + isolate_mode_vm_options + extra_vm_arguments_spawn_isolate + [
-            'com.oracle.truffle.sandbox.test.ResourceLimitsTest',
-            'com.oracle.truffle.sandbox.test.HeapMemoryLimitTest'])
-        unittest_args_tck = unittest_args + ['-Dtck.inlineVerifierInstrument=false']
-        mx_unittest.unittest(
-            unittest_args_tck + extra_vm_arguments_isolate_library + isolate_mode_vm_options + extra_vm_arguments_spawn_isolate + tests)
-
-        # Run PolyglotIsolateTest in native-to-native with external truffle isolate library
-        tests = ['com.oracle.truffle.api.test.polyglot.isolate']
-        truffle_isolate_options = truffle_isolate_common_options
-        vm_telemetry_options = ['--enable-monitoring=jvmstat', '--enable-monitoring=threaddump']
-        args = tests + ['--build-args'] + vm_telemetry_options + truffle_isolate_options + isolate_mode_vm_options + ['--run-args'] + extra_vm_arguments_isolate_library + isolate_mode_vm_options
-        mx_truffle.native_truffle_unittest(args)
-    finally:
-        if not mx._opts.verbose:
-            mx.rmtree(svmbuild)
+    ]
+    vm_telemetry_options = ['--enable-monitoring=jvmstat', '--enable-monitoring=threaddump']
+    isolate_mode_vm_options = _isolate_mode_vm_options(isolate_mode)
+    extra_vm_arguments_isolate_library = _isolate_library_vm_options()
+    args = [
+        'com.oracle.truffle.api.test.polyglot.isolate',
+        '--build-args',
+        *truffle_isolate_options,
+        *vm_telemetry_options,
+        *isolate_mode_vm_options,
+        *truffle_runtime_options,
+        '--run-args',
+        *extra_vm_arguments_isolate_library,
+        *isolate_mode_vm_options,
+        *truffle_runtime_options,
+        '-Dpolyglot.engine.WarnMethodScoping=false'
+    ]
+    mx_truffle.native_truffle_unittest(args)
 
 def run_truffle_maven_tests(use_classpath=False, use_native_image=False, use_isolate=False, always_use_fast_build=True, use_default_truffle_runtime=False,
                              select_id=None, truffle_runtime_version=None, polyglot_options=None):
@@ -1309,6 +1448,7 @@ def run_truffle_maven_tests(use_classpath=False, use_native_image=False, use_iso
     snapshot_repository = mx_sdk.maven_deploy_public_repo_dir()
 
     projects = os.path.join(_suite.get_mx_output_dir(), 'maven-test-projects')
+    internal_resource_cache = join(mx.get_env('BUILD_DIR', _suite.get_mx_output_dir()), 'resources')
     # clear previous projects
     mx.rmtree(projects, ignore_errors=True)
     use_hotspot_jvm = not use_native_image
@@ -1371,9 +1511,9 @@ def run_truffle_maven_tests(use_classpath=False, use_native_image=False, use_iso
             additional_vm_args += ['--add-exports', 'org.graalvm.espresso/com.oracle.truffle.espresso.runtime=ALL-UNNAMED']
             additional_vm_args += ['--add-exports', 'org.graalvm.espresso/com.oracle.truffle.espresso.impl=ALL-UNNAMED']
 
-        additional_image_build_args = []
+        additional_image_build_args = [f'-J-Dpolyglot.engine.userResourceCache={internal_resource_cache}']
         if 'wasm' in test.expected_ids:
-            additional_image_build_args += ['-H:+UnlockExperimentalVMOptions', '-H:+VectorAPISupport', '--add-modules=jdk.incubator.vector']
+            additional_image_build_args += ['--add-modules=jdk.incubator.vector']
 
         mx.log(f'{datetime.now():%d %b %Y %H:%M:%S} Creating project for test run {test} in version {test.version}')
 
@@ -1391,6 +1531,8 @@ def run_truffle_maven_tests(use_classpath=False, use_native_image=False, use_iso
         mx.log(f'{datetime.now():%d %b %Y %H:%M:%S} Testing project {project_path}. To reproduce use: ')
 
         polyglot_args = [f'-Dpolyglot.{option}' for option in polyglot_options]
+        polyglot_args.append(f'-Dpolyglot.engine.userResourceCache={internal_resource_cache}')
+        polyglot_args.append('-Dpolyglotimpl.TraceInternalResources=true')
         if use_default_truffle_runtime:
             polyglot_args.append('-Dtruffle.UseFallbackRuntime=true')
         polyglot_args = ' '.join(polyglot_args)

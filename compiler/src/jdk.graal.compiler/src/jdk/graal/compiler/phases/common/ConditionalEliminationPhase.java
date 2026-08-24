@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -55,8 +55,10 @@ import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.graph.NodeMap;
 import jdk.graal.compiler.graph.NodeStack;
+import jdk.graal.compiler.graph.Position;
 import jdk.graal.compiler.nodeinfo.InputType;
 import jdk.graal.compiler.nodes.AbstractBeginNode;
+import jdk.graal.compiler.nodes.AbstractFixedGuardNode;
 import jdk.graal.compiler.nodes.AbstractMergeNode;
 import jdk.graal.compiler.nodes.BeginNode;
 import jdk.graal.compiler.nodes.BinaryOpLogicNode;
@@ -430,6 +432,7 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
         private final ConditionalEliminationUtil.GuardFolding guardFolding;
         protected final ArrayDeque<ConditionalEliminationUtil.GuardedCondition> conditions;
         private final boolean processFieldAccess;
+        private final SafeStampInputSearch safeStampInputSearch;
         private final List<RebuildPiData> piCache = new ArrayList<>(8);
         private final EconomicSet<Pair<Stamp, Stamp>> joinedStamps = EconomicSet.create();
         protected EconomicMap<AbstractBeginNode, Stamp> successorStampCache;
@@ -448,6 +451,7 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
             this.map = graph.createNodeMap();
             this.pendingTests = new ArrayDeque<>();
             this.conditions = new ArrayDeque<>();
+            this.safeStampInputSearch = new SafeStampInputSearch(graph);
             tool = GraphUtil.getDefaultSimplifier(context, false, graph.getAssumptions(), graph.getOptions());
             mergeMaps = EconomicMap.create(Equivalence.IDENTITY);
             infoElementProvider = new ConditionalEliminationUtil.InfoElementProvider() {
@@ -521,17 +525,21 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
             }
         }
 
-        protected void processFixedGuard(FixedGuardNode node) {
+        protected void processFixedGuard(AbstractFixedGuardNode node) {
             if (!tryProveGuardCondition(node, node.condition(), (guard, result, guardedValueStamp, newInput) -> {
                 if (result != node.isNegated()) {
-                    node.replaceAtUsages(guard.asNode());
-                    GraphUtil.unlinkFixedNode(node);
-                    GraphUtil.killWithUnusedFloatingInputs(node);
+                    if (canReplaceAtUsages(node, guard.asNode())) {
+                        node.replaceAtUsages(guard.asNode());
+                        GraphUtil.unlinkFixedNode(node);
+                        GraphUtil.killWithUnusedFloatingInputs(node);
 
-                    if (guard instanceof BeginNode b && b.predecessor() instanceof IfNode ifNode) {
-                        rebuildPiNodes(b, ifNode.condition());
-                    } else if (guard instanceof DeoptimizingGuard dg && !((DeoptimizingGuard) guard).isNegated()) {
-                        rebuildPiNodes(dg, dg.getCondition());
+                        if (guard instanceof BeginNode b && b.predecessor() instanceof IfNode ifNode) {
+                            rebuildPiNodes(b, ifNode.condition());
+                        } else if (guard instanceof DeoptimizingGuard dg && !((DeoptimizingGuard) guard).isNegated()) {
+                            rebuildPiNodes(dg, dg.getCondition());
+                        }
+                    } else {
+                        node.setCondition(LogicConstantNode.forBoolean(result, node.graph()), node.isNegated());
                     }
                 } else {
                     node.setCondition(LogicConstantNode.forBoolean(result, node.graph()), node.isNegated());
@@ -542,6 +550,22 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
             })) {
                 registerNewCondition(node.condition(), node.isNegated(), node);
             }
+        }
+
+        /**
+         * Checks whether replacing a guard with a dominating guard preserves the declared type of
+         * every usage. Some guard users require a concrete guard subtype instead of any
+         * {@link jdk.graal.compiler.nodes.extended.GuardingNode}.
+         */
+        private static boolean canReplaceAtUsages(Node node, Node replacement) {
+            for (Node usage : node.usages()) {
+                for (Position position : usage.inputPositions()) {
+                    if (position.get(usage) == node && !position.getType().isAssignableFrom(replacement.getClass())) {
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
 
         /**
@@ -609,7 +633,8 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                          * just recently skipped. In the optimization (if conditional elimination is
                          * called multiple times).
                          */
-                        if (infoElement.getGuard() != fieldPiGuard && nodeToBlock.get(infoElement.getGuard().asNode()).strictlyDominates(nodeToBlock.get(fieldPiGuard.asNode()))) {
+                        if (infoElement.getGuard() != fieldPiGuard && nodeToBlock.get(infoElement.getGuard().asNode()).strictlyDominates(nodeToBlock.get(fieldPiGuard.asNode())) &&
+                                        ConditionalEliminationUtil.mayRewriteToGuard(infoElement.getGuard())) {
                             final Stamp stamp = infoElement.getStamp();
                             /*
                              * Determine if this pi can be skipped by using a pi based on the stamp
@@ -712,23 +737,49 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
         }
 
         protected void processIf(IfNode node) {
-            tryProveGuardCondition(null, node.condition(), (guard, result, guardedValueStamp, newInput) -> {
-                node.setCondition(LogicConstantNode.forBoolean(result, node.graph()));
-                AbstractBeginNode survivingSuccessor = node.getSuccessor(result);
-                if (survivingSuccessor instanceof LoopExitNode loopExitNode) {
-                    Node replacementForGuardedNodes = graph.unique(new GuardProxyNode(guard, loopExitNode));
-                    survivingSuccessor.replaceAtUsages(replacementForGuardedNodes, InputType.Guard);
-                    if (replacementForGuardedNodes.hasNoUsages()) {
-                        replacementForGuardedNodes.safeDelete();
-                    }
-                } else {
-                    survivingSuccessor.replaceAtUsages(guard.asNode(), InputType.Guard);
-                }
+            boolean successorsHaveGuardUsages = ConditionalEliminationUtil.ifSuccessorsHaveGuardUsages(node);
+            boolean conditionHasUnsafeInputStamp = successorsHaveGuardUsages && ConditionalEliminationUtil.conditionHasUnsafeInputStamp(node.condition(), safeStampInputSearch);
+            boolean proved = conditionHasUnsafeInputStamp ? tryProveIfConditionFromExistingCondition(node) : tryProveIfCondition(node, false);
+            if (!proved && !successorsHaveGuardUsages) {
+                tryProveIfCondition(node, true);
+            }
+        }
 
-                // Don't kill the other branch immediately, see `processGuard`.
-                graph.getOptimizationLog().report(ConditionalEliminationPhase.class, "IfElimination", node);
-                return true;
-            });
+        private boolean tryProveIfCondition(IfNode node, boolean allowControlFlowDependentOtherStamp) {
+            return tryProveGuardCondition(null, node.condition(), (guard, result, guardedValueStamp, newInput) -> {
+                return rewriteIfCondition(node, guard, result);
+            }, allowControlFlowDependentOtherStamp);
+        }
+
+        private boolean tryProveIfConditionFromExistingCondition(IfNode node) {
+            for (ConditionalEliminationUtil.GuardedCondition guardedCondition : conditions) {
+                TriState result = guardedCondition.getCondition().implies(guardedCondition.isNegated(), node.condition());
+                if (result.isKnown()) {
+                    return rewriteIfCondition(node, guardedCondition.getGuard(), result.toBoolean());
+                }
+            }
+            return false;
+        }
+
+        private boolean rewriteIfCondition(IfNode node, GuardingNode guard, boolean result) {
+            if (!ConditionalEliminationUtil.mayRewriteToGuard(guard)) {
+                return false;
+            }
+            AbstractBeginNode survivingSuccessor = node.getSuccessor(result);
+            node.setCondition(LogicConstantNode.forBoolean(result, node.graph()));
+            if (survivingSuccessor instanceof LoopExitNode loopExitNode) {
+                Node replacementForGuardedNodes = graph.unique(new GuardProxyNode(guard, loopExitNode));
+                survivingSuccessor.replaceAtUsages(replacementForGuardedNodes, InputType.Guard);
+                if (replacementForGuardedNodes.hasNoUsages()) {
+                    replacementForGuardedNodes.safeDelete();
+                }
+            } else {
+                survivingSuccessor.replaceAtUsages(guard.asNode(), InputType.Guard);
+            }
+
+            // Don't kill the other branch immediately, see `processGuard`.
+            graph.getOptimizationLog().report(ConditionalEliminationPhase.class, "IfElimination", node);
+            return true;
         }
 
         /**
@@ -748,7 +799,7 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
             ConditionalEliminationUtil.InfoElement infoElement = infoElementProvider.infoElements(piNode.object());
             while (infoElement != null) {
                 Stamp joinedStamp = infoElement.getStamp().join(piNode.piStamp());
-                if (joinedStamp.equals(infoElement.getStamp())) {
+                if (joinedStamp.equals(infoElement.getStamp()) && ConditionalEliminationUtil.mayRewriteToGuard(infoElement.getGuard())) {
                     /*
                      * The PiNode is already proven by a dominating condition. We just re-anchor the
                      * PiNode at the dominating point. If that point already has an equivalent
@@ -855,8 +906,8 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                         return;
                     }
                     processAbstractBegin((AbstractBeginNode) node);
-                } else if (node instanceof FixedGuardNode) {
-                    processFixedGuard((FixedGuardNode) node);
+                } else if (node instanceof AbstractFixedGuardNode) {
+                    processFixedGuard((AbstractFixedGuardNode) node);
                 } else if (node instanceof GuardNode) {
                     processGuard((GuardNode) node);
                 } else if (node instanceof ConditionAnchorNode) {
@@ -895,6 +946,9 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                         ValueNode valueAt = phi.valueAt(i);
                         Stamp curBestStamp = valueAt.stamp(NodeView.DEFAULT);
                         ConditionalEliminationUtil.InfoElement infoElement = phiInfoElements.get(merge.forwardEndAt(i));
+                        if (infoElement != null && !ConditionalEliminationUtil.mayRewriteToGuard(infoElement.getGuard())) {
+                            infoElement = null;
+                        }
                         if (infoElement != null) {
                             curBestStamp = curBestStamp.join(infoElement.getStamp());
                         }
@@ -1008,15 +1062,14 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
              * nodes input pi.
              */
 
+            if (ConditionalEliminationUtil.conditionFoldsWithInputStamps(condition)) {
+                // <PI proven always true>
+                return;
+            }
+
             if (condition instanceof UnaryOpLogicNode) {
                 UnaryOpLogicNode unaryLogicNode = (UnaryOpLogicNode) condition;
                 ValueNode value = unaryLogicNode.getValue();
-
-                TriState unconditionallyFold = unaryLogicNode.tryFold(value.stamp(NodeView.DEFAULT));
-                if (unconditionallyFold.isKnown()) {
-                    // <PI proven always true>
-                    return;
-                }
 
                 if (maybeMultipleUsages(value)) {
                     // getSucceedingStampForValue doesn't take the (potentially a Pi Node) input
@@ -1030,20 +1083,15 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                 ValueNode x = binaryOpLogicNode.getX();
                 ValueNode y = binaryOpLogicNode.getY();
 
-                TriState unconditionallyFold = binaryOpLogicNode.tryFold(x.stamp(NodeView.DEFAULT),
-                                y.stamp(NodeView.DEFAULT));
-                if (unconditionallyFold.isKnown()) {
-                    // <PI proven always true>
-                    return;
-                }
-
                 if (!x.isConstant() && maybeMultipleUsages(x)) {
-                    Stamp newStampX = binaryOpLogicNode.getSucceedingStampForX(negated, ConditionalEliminationUtil.getSafeStamp(x), ConditionalEliminationUtil.getOtherSafeStamp(y));
+                    Stamp newStampX = binaryOpLogicNode.getSucceedingStampForX(negated, ConditionalEliminationUtil.getSafeStamp(x), ConditionalEliminationUtil.getOtherSafeStamp(y,
+                                    safeStampInputSearch));
                     registerNewStamp(x, newStampX, guard);
                 }
 
                 if (!y.isConstant() && maybeMultipleUsages(y)) {
-                    Stamp newStampY = binaryOpLogicNode.getSucceedingStampForY(negated, ConditionalEliminationUtil.getOtherSafeStamp(x), ConditionalEliminationUtil.getSafeStamp(y));
+                    Stamp newStampY = binaryOpLogicNode.getSucceedingStampForY(negated, ConditionalEliminationUtil.getOtherSafeStamp(x, safeStampInputSearch), ConditionalEliminationUtil.getSafeStamp(
+                                    y));
                     registerNewStamp(y, newStampY, guard);
                 }
 
@@ -1058,7 +1106,7 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                              * known to be set.
                              */
                             BinaryOp<Or> op = ArithmeticOpTable.forStamp(x.stamp(NodeView.DEFAULT)).getOr();
-                            IntegerStamp newStampX = (IntegerStamp) op.foldStamp(ConditionalEliminationUtil.getSafeStamp(andX), ConditionalEliminationUtil.getOtherSafeStamp(y));
+                            IntegerStamp newStampX = (IntegerStamp) op.foldStamp(ConditionalEliminationUtil.getSafeStamp(andX), ConditionalEliminationUtil.getOtherSafeStamp(y, safeStampInputSearch));
                             registerNewStamp(andX, newStampX, guard);
                         }
                     }
@@ -1104,14 +1152,15 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
                     ValueNode x = binaryOpLogicNode.getX();
                     ValueNode y = binaryOpLogicNode.getY();
                     if (x == original) {
-                        result = binaryOpLogicNode.tryFold(newStamp, ConditionalEliminationUtil.getOtherSafeStamp(y));
+                        result = binaryOpLogicNode.tryFold(newStamp, ConditionalEliminationUtil.getOtherSafeStamp(y, safeStampInputSearch));
                     } else if (y == original) {
-                        result = binaryOpLogicNode.tryFold(ConditionalEliminationUtil.getOtherSafeStamp(x), newStamp);
+                        result = binaryOpLogicNode.tryFold(ConditionalEliminationUtil.getOtherSafeStamp(x, safeStampInputSearch), newStamp);
                     } else if (binaryOpLogicNode instanceof IntegerEqualsNode && y.isConstant() && x instanceof AndNode) {
                         AndNode and = (AndNode) x;
                         if (and.getY() == y && and.getX() == original) {
                             BinaryOp<And> andOp = ArithmeticOpTable.forStamp(newStamp).getAnd();
-                            result = binaryOpLogicNode.tryFold(andOp.foldStamp(newStamp, ConditionalEliminationUtil.getOtherSafeStamp(y)), ConditionalEliminationUtil.getOtherSafeStamp(y));
+                            Stamp otherSafeStamp = ConditionalEliminationUtil.getOtherSafeStamp(y, safeStampInputSearch);
+                            result = binaryOpLogicNode.tryFold(andOp.foldStamp(newStamp, otherSafeStamp), otherSafeStamp);
                         }
                     }
                 }
@@ -1188,7 +1237,13 @@ public class ConditionalEliminationPhase extends PostRunCanonicalizationPhase<Co
         }
 
         protected boolean tryProveGuardCondition(DeoptimizingGuard thisGuard, LogicNode node, ConditionalEliminationUtil.GuardRewirer rewireGuardFunction) {
-            return ConditionalEliminationUtil.tryProveGuardCondition(infoElementProvider, conditions, guardFolding, thisGuard, node, rewireGuardFunction);
+            return tryProveGuardCondition(thisGuard, node, rewireGuardFunction, false);
+        }
+
+        protected boolean tryProveGuardCondition(DeoptimizingGuard thisGuard, LogicNode node, ConditionalEliminationUtil.GuardRewirer rewireGuardFunction,
+                        boolean allowControlFlowDependentOtherStamp) {
+            return ConditionalEliminationUtil.tryProveGuardCondition(infoElementProvider, conditions, guardFolding, thisGuard, node, rewireGuardFunction, allowControlFlowDependentOtherStamp,
+                            safeStampInputSearch);
         }
 
         protected void registerCondition(LogicNode condition, boolean negated, GuardingNode guard) {

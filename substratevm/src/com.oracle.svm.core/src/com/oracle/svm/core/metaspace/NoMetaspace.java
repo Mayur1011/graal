@@ -79,6 +79,11 @@ public final class NoMetaspace implements Metaspace {
     }
 
     @Override
+    public <T> T allocateObject(Class<T> clazz) {
+        throw VMError.shouldNotReachHere("Must not be called if metaspace support is not available.");
+    }
+
+    @Override
     public void walkObjects(ObjectVisitor visitor) {
         /* Nothing to do. */
     }

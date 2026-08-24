@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -56,13 +56,17 @@ public final class WasmContextOptions {
     @CompilationFinal private boolean memory64;
     @CompilationFinal private boolean extendedConstExpressions;
     @CompilationFinal private boolean multiMemory;
+    @CompilationFinal private boolean wideArithmetic;
     @CompilationFinal private boolean unsafeMemory;
     @CompilationFinal private boolean threads;
     @CompilationFinal private boolean simd;
     @CompilationFinal private boolean relaxedSimd;
     @CompilationFinal private boolean exceptions;
+    @CompilationFinal private boolean legacyExceptions;
     @CompilationFinal private boolean typedFunctionReferences;
     @CompilationFinal private boolean gc;
+    @CompilationFinal private boolean tailCalls;
+    @CompilationFinal private boolean tailCallLoops;
 
     @CompilationFinal private boolean memoryOverheadMode;
     @CompilationFinal private boolean constantRandomGet;
@@ -90,13 +94,18 @@ public final class WasmContextOptions {
         this.memory64 = readBooleanOption(WasmOptions.Memory64);
         this.extendedConstExpressions = readBooleanOption(WasmOptions.ExtendedConstExpressions);
         this.multiMemory = readBooleanOption(WasmOptions.MultiMemory);
+        this.wideArithmetic = readBooleanOption(WasmOptions.WideArithmetic);
         this.threads = readBooleanOption(WasmOptions.Threads);
         this.unsafeMemory = readBooleanOption(WasmOptions.UseUnsafeMemory);
         this.simd = readBooleanOption(WasmOptions.SIMD);
         this.relaxedSimd = readBooleanOption(WasmOptions.RelaxedSIMD);
         this.exceptions = readBooleanOption(WasmOptions.Exceptions);
+        this.legacyExceptions = readBooleanOption(WasmOptions.LegacyExceptions);
         this.typedFunctionReferences = readBooleanOption(WasmOptions.TypedFunctionReferences);
         this.gc = readBooleanOption(WasmOptions.GC);
+        this.tailCalls = readBooleanOption(WasmOptions.TailCalls);
+        // If tail calls are not enabled, disable tail call loops
+        this.tailCallLoops = this.tailCalls && readBooleanOption(WasmOptions.TailCallLoops);
         this.memoryOverheadMode = readBooleanOption(WasmOptions.MemoryOverheadMode);
         this.constantRandomGet = readBooleanOption(WasmOptions.WasiConstantRandomGet);
         this.directByteBufferMemoryAccess = readBooleanOption(WasmOptions.DirectByteBufferMemoryAccess);
@@ -152,6 +161,10 @@ public final class WasmContextOptions {
         return multiMemory;
     }
 
+    public boolean supportWideArithmetic() {
+        return wideArithmetic;
+    }
+
     public boolean supportThreads() {
         return threads;
     }
@@ -172,12 +185,24 @@ public final class WasmContextOptions {
         return exceptions;
     }
 
+    public boolean supportLegacyExceptions() {
+        return legacyExceptions;
+    }
+
     public boolean supportTypedFunctionReferences() {
         return typedFunctionReferences;
     }
 
     public boolean supportGC() {
         return gc;
+    }
+
+    public boolean supportTailCalls() {
+        return tailCalls;
+    }
+
+    public boolean supportTailCallLoops() {
+        return tailCallLoops;
     }
 
     public boolean memoryOverheadMode() {
@@ -210,12 +235,16 @@ public final class WasmContextOptions {
         hash = 53 * hash + (this.memory64 ? 1 : 0);
         hash = 53 * hash + (this.extendedConstExpressions ? 1 : 0);
         hash = 53 * hash + (this.multiMemory ? 1 : 0);
+        hash = 53 * hash + (this.wideArithmetic ? 1 : 0);
         hash = 53 * hash + (this.unsafeMemory ? 1 : 0);
         hash = 53 * hash + (this.simd ? 1 : 0);
         hash = 53 * hash + (this.relaxedSimd ? 1 : 0);
         hash = 53 * hash + (this.exceptions ? 1 : 0);
+        hash = 53 * hash + (this.legacyExceptions ? 1 : 0);
         hash = 53 * hash + (this.typedFunctionReferences ? 1 : 0);
         hash = 53 * hash + (this.gc ? 1 : 0);
+        hash = 53 * hash + (this.tailCalls ? 1 : 0);
+        hash = 53 * hash + (this.tailCallLoops ? 1 : 0);
         hash = 53 * hash + (this.memoryOverheadMode ? 1 : 0);
         hash = 53 * hash + (this.constantRandomGet ? 1 : 0);
         hash = 53 * hash + (this.directByteBufferMemoryAccess ? 1 : 0);
@@ -253,6 +282,9 @@ public final class WasmContextOptions {
         if (this.multiMemory != other.multiMemory) {
             return false;
         }
+        if (this.wideArithmetic != other.wideArithmetic) {
+            return false;
+        }
         if (this.threads != other.threads) {
             return false;
         }
@@ -268,10 +300,19 @@ public final class WasmContextOptions {
         if (this.exceptions != other.exceptions) {
             return false;
         }
+        if (this.legacyExceptions != other.legacyExceptions) {
+            return false;
+        }
         if (this.typedFunctionReferences != other.typedFunctionReferences) {
             return false;
         }
         if (this.gc != other.gc) {
+            return false;
+        }
+        if (this.tailCalls != other.tailCalls) {
+            return false;
+        }
+        if (this.tailCallLoops != other.tailCallLoops) {
             return false;
         }
         if (this.memoryOverheadMode != other.memoryOverheadMode) {

@@ -31,102 +31,10 @@ import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.core.Isolates;
 import com.oracle.svm.core.heap.GCCause;
-import com.oracle.svm.shared.util.BasedOnJDKFile;
-import com.oracle.svm.core.util.TimeUtils;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.core.util.Timer;
-import com.oracle.svm.core.util.UnsignedUtils;
-
-/** Constants for policy tunables. */
-interface AdaptiveCollectionPolicy2Tunables {
-
-    /**
-     * Start out with the same sizes for young and old generation. This leads to less frequent minor
-     * collections and tenuring at startup especially with {@link #YOUNG_GENERATION_SIZE_SUPPLEMENT}
-     * disabled. (The HotSpot NewRatio default is 2, so 1:2 for young:old)
-     */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L553-L557") //
-    int INITIAL_NEW_RATIO = 1;
-
-    /*
-     *
-     * The following are -XX options in HotSpot, refer to their descriptions for details. The values
-     * are HotSpot defaults unless labeled otherwise.
-     *
-     * Don't change these values individually without carefully going over their occurrences in
-     * HotSpot source code, there are dependencies between them that are not handled in our code.
-     *
-     */
-
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L325-L401") // actually:jdk-26+25#L308-L353
-    int ADAPTIVE_SIZE_POLICY_READY_THRESHOLD = 5;
-    int ADAPTIVE_SIZE_POLICY_WEIGHT = 10;
-    int PROMOTED_PADDING = 3;
-    int THRESHOLD_TOLERANCE = 10;
-    /**
-     * Maximum size increment step percentage. We reduce it from HotSpot's default to avoid growing
-     * the heap too eagerly and overshooting.
-     */
-    int YOUNG_GENERATION_SIZE_INCREMENT = 10; // HotSpot default: 20
-    /*
-     * Supplement to accelerate heap expansion at startup. We do not use it to avoid growing the
-     * heap too eagerly and overshooting.
-     */
-    int YOUNG_GENERATION_SIZE_SUPPLEMENT = 0; // HotSpot default: 80
-    int YOUNG_GENERATION_SIZE_SUPPLEMENT_DECAY = 8;
-    double MAX_GC_PAUSE_MILLIS = UnsignedUtils.toDouble(UnsignedUtils.MAX_VALUE.subtract(1));
-    /**
-     * Target for throughput, which is the ratio of mutator wall-clock time to GC wall-clock time.
-     * Eden grows until reaching this ratio. HotSpot's default is 99, so, spending 1% of time in GC.
-     *
-     * With our single-threaded collector, we cannot expect to always scale with the allocations of
-     * a multi-threaded mutator by growing spaces, and often end up with long pause times instead.
-     * Therefore we set this to 1, i.e., 50%. Beyond that, we use {@link #MIN_GC_DISTANCE_SECOND} to
-     * drive eden size, avoiding collecting too frequently and starving the mutator.
-     */
-    int GC_TIME_RATIO = 1;
-    int ADAPTIVE_SIZE_DECREMENT_SCALE_FACTOR = 4;
-    /**
-     * The tenuring threshold at startup (HotSpot default: 7). The policy intentionally never
-     * reduces the tenuring threshold, so this is also its minimum value.
-     */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L576-L581") //
-    int INITIAL_TENURING_THRESHOLD = 7;
-
-    /*
-     * We don't want to limit our freedom to adjust the heap. (Unless set explicitly, these options
-     * are set to these values in ParallelArguments::initialize on HotSpot)
-     */
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelArguments.cpp#L57-L68") //
-    int MIN_HEAP_FREE_RATIO = 0; // %
-    int MAX_HEAP_FREE_RATIO = 100; // %
-    /** On HotSpot, this is the behavior if {@link #MIN_HEAP_FREE_RATIO} is not set explicitly. */
-    boolean SHRINK_OLD_CAUTIOUSLY = true;
-
-    /*
-     *
-     * Constants in class AdaptiveSizePolicy.
-     *
-     */
-
-    /** [0, 1]; closer to 1 means assigning more weight to most recent samples. */
-    double SEQ_DEFAULT_ALPHA_VALUE = 0.75;
-
-    /**
-     * Minimal distance between two consecutive GC pauses; shorter distance (more frequent gc) can
-     * hinder app throughput. Additionally, too frequent gc means objs haven't got time to die yet,
-     * so the number of promoted objs will be high. HotSpot default: 100ms.
-     *
-     * Beyond the minimum throughput via {@link #GC_TIME_RATIO}, we use distance to set eden size so
-     * the mutator can make sufficient progress and to limit overhead from frequent safepoints.
-     * Enforcing longer distance generally results in higher memory usage, and when it does not lead
-     * to a larger share of dying objects, causes longer pauses with little throughput improvement.
-     *
-     * 20ms seems to strike a good balance for us.
-     */
-    double MIN_GC_DISTANCE_SECOND = 0.020;
-
-    int NUM_OF_GC_SAMPLE = 32;
-}
+import com.oracle.svm.shared.util.UnsignedUtils;
+import com.oracle.svm.shared.util.BasedOnJDKFile;
 
 /**
  * A garbage collection policy that balances throughput and memory footprint (and optionally pause
@@ -149,12 +57,12 @@ interface AdaptiveCollectionPolicy2Tunables {
  * been kept mostly the same for comparability. Initial tweaking focused on {@link #GC_TIME_RATIO}
  * and {@link #MIN_GC_DISTANCE_SECOND}, further ideas are tracked in GR-73130.
  */
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psAdaptiveSizePolicy.hpp") // actually:jdk-26+25
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psAdaptiveSizePolicy.cpp") // actually:jdk-26+25
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psScavenge.cpp") // actually:jdk-26+25#L311-L508
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psParallelCompact.cpp") // actually:jdk-26+25#L934-L1055
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psYoungGen.cpp") // actually:jdk-26+25#L325-L423
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelScavengeHeap.cpp") // actually:jdk-26+25#L824-L916
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psAdaptiveSizePolicy.hpp") // actually:jdk-26+25
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psAdaptiveSizePolicy.cpp") // actually:jdk-26+25
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psScavenge.cpp") // actually:jdk-26+25#L311-L508
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psParallelCompact.cpp") // actually:jdk-26+25#L934-L1055
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/psYoungGen.cpp") // actually:jdk-26+25#L325-L423
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelScavengeHeap.cpp") // actually:jdk-26+25#L824-L916
 class AdaptiveCollectionPolicy2 extends AdaptiveCollectionPolicy2Base {
 
     private final AdaptivePaddedAverage avgPromoted = new AdaptivePaddedAverage(ADAPTIVE_SIZE_POLICY_WEIGHT, PROMOTED_PADDING, true);
@@ -180,11 +88,11 @@ class AdaptiveCollectionPolicy2 extends AdaptiveCollectionPolicy2Base {
     }
 
     @Override
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelScavengeHeap.cpp") // actually:jdk-26+25#L372-L421
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelScavengeHeap.cpp") // actually:jdk-26+25#L372-L421
     public boolean shouldCollectCompletely(boolean followingIncrementalCollection, boolean forcedCompleteCollection) { // ParallelScavengeHeap::should_attempt_young_gc
         guaranteeSizeParametersInitialized();
 
-        boolean collectYoungSeparately = CollectionPolicy.shouldCollectYoungGenSeparately(!SerialGCOptions.useCompactingOldGen());
+        boolean collectYoungSeparately = shouldCollectYoungGenSeparately(!SerialGCOptions.useCompactingOldGen());
         if (forcedCompleteCollection && !collectYoungSeparately) {
             return true;
         }
@@ -448,8 +356,8 @@ class AdaptiveCollectionPolicy2 extends AdaptiveCollectionPolicy2Base {
     /** Should be called at the end of a major collection. */
     private void majorCollectionEnd() {
         majorTimer.stop();
+        recordGcDuration(majorTimer.lastStartedNanoTime(), majorTimer.totalNanos());
         double majorPauseInSeconds = TimeUtils.nanosToSecondsDouble(majorTimer.totalNanos());
-        recordGcDuration(majorPauseInSeconds);
         trimmedMajorGcTimeSeconds.add(majorPauseInSeconds);
     }
 
@@ -621,12 +529,104 @@ class AdaptiveCollectionPolicy2 extends AdaptiveCollectionPolicy2Base {
     }
 }
 
+/** Constants for policy tunables. */
+interface AdaptiveCollectionPolicy2Tunables {
+
+    /**
+     * Start out with the same sizes for young and old generation. This leads to less frequent minor
+     * collections and tenuring at startup especially with {@link #YOUNG_GENERATION_SIZE_SUPPLEMENT}
+     * disabled. (The HotSpot NewRatio default is 2, so 1:2 for young:old)
+     */
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L553-L557") //
+    int INITIAL_NEW_RATIO = 1;
+
+    /*
+     *
+     * The following are -XX options in HotSpot, refer to their descriptions for details. The values
+     * are HotSpot defaults unless labeled otherwise.
+     *
+     * Don't change these values individually without carefully going over their occurrences in
+     * HotSpot source code, there are dependencies between them that are not handled in our code.
+     *
+     */
+
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L325-L401") // actually:jdk-26+25#L308-L353
+    int ADAPTIVE_SIZE_POLICY_READY_THRESHOLD = 5;
+    int ADAPTIVE_SIZE_POLICY_WEIGHT = 10;
+    int PROMOTED_PADDING = 3;
+    int THRESHOLD_TOLERANCE = 10;
+    /**
+     * Maximum size increment step percentage. We reduce it from HotSpot's default to avoid growing
+     * the heap too eagerly and overshooting.
+     */
+    int YOUNG_GENERATION_SIZE_INCREMENT = 10; // HotSpot default: 20
+    /*
+     * Supplement to accelerate heap expansion at startup. We do not use it to avoid growing the
+     * heap too eagerly and overshooting.
+     */
+    int YOUNG_GENERATION_SIZE_SUPPLEMENT = 0; // HotSpot default: 80
+    int YOUNG_GENERATION_SIZE_SUPPLEMENT_DECAY = 8;
+    double MAX_GC_PAUSE_MILLIS = UnsignedUtils.toDouble(UnsignedUtils.MAX_VALUE.subtract(1));
+    /**
+     * Target for throughput, which is the ratio of mutator wall-clock time to GC wall-clock time.
+     * Eden grows until reaching this ratio. HotSpot's default is 99, so, spending 1% of time in GC.
+     *
+     * With our single-threaded collector, we cannot expect to always scale with the allocations of
+     * a multi-threaded mutator by growing spaces, and often end up with long pause times instead.
+     * Therefore we set this to 1, i.e., 50%. Beyond that, we use {@link #MIN_GC_DISTANCE_SECOND} to
+     * drive eden size, avoiding collecting too frequently and starving the mutator.
+     */
+    int GC_TIME_RATIO = 1;
+    int ADAPTIVE_SIZE_DECREMENT_SCALE_FACTOR = 4;
+    /**
+     * The tenuring threshold at startup (HotSpot default: 7). The policy intentionally never
+     * reduces the tenuring threshold, so this is also its minimum value.
+     */
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/gc_globals.hpp#L576-L581") //
+    int INITIAL_TENURING_THRESHOLD = 7;
+
+    /*
+     * We don't want to limit our freedom to adjust the heap. (Unless set explicitly, these options
+     * are set to these values in ParallelArguments::initialize on HotSpot)
+     */
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/parallel/parallelArguments.cpp#L57-L68") //
+    int MIN_HEAP_FREE_RATIO = 0; // %
+    int MAX_HEAP_FREE_RATIO = 100; // %
+    /** On HotSpot, this is the behavior if {@link #MIN_HEAP_FREE_RATIO} is not set explicitly. */
+    boolean SHRINK_OLD_CAUTIOUSLY = true;
+
+    /*
+     *
+     * Constants in class AdaptiveSizePolicy.
+     *
+     */
+
+    /** [0, 1]; closer to 1 means assigning more weight to most recent samples. */
+    double SEQ_DEFAULT_ALPHA_VALUE = 0.75;
+
+    /**
+     * Minimal distance between two consecutive GC pauses; shorter distance (more frequent gc) can
+     * hinder app throughput. Additionally, too frequent gc means objs haven't got time to die yet,
+     * so the number of promoted objs will be high. HotSpot default: 100ms.
+     *
+     * Beyond the minimum throughput via {@link #GC_TIME_RATIO}, we use distance to set eden size so
+     * the mutator can make sufficient progress and to limit overhead from frequent safepoints.
+     * Enforcing longer distance generally results in higher memory usage, and when it does not lead
+     * to a larger share of dying objects, causes longer pauses with little throughput improvement.
+     *
+     * 20ms seems to strike a good balance for us.
+     */
+    double MIN_GC_DISTANCE_SECOND = 0.020;
+
+    int NUM_OF_GC_SAMPLE = 32;
+}
+
 /*
  * Code in this class has been adapted from HotSpot class {@code AdaptiveSizePolicy}. Names have
  * been kept mostly the same for comparability.
  */
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.hpp") // actually:jdk-26+25
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.cpp") // actually:jdk-26+25
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.hpp") // actually:jdk-26+25
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.cpp") // actually:jdk-26+25
 abstract class AdaptiveCollectionPolicy2Base extends AbstractCollectionPolicy implements AdaptiveCollectionPolicy2Tunables {
 
     // pause and interval times for collections
@@ -685,15 +685,15 @@ abstract class AdaptiveCollectionPolicy2Base extends AbstractCollectionPolicy im
         return trimmedMajorGcTimeSeconds.getSum();
     }
 
-    void recordGcDuration(double gcDuration) {
-        gcSamples.recordSample(gcDuration);
+    void recordGcDuration(long gcStartNanoTime, long gcDurationNanos) {
+        gcSamples.recordSample(gcStartNanoTime, gcDurationNanos);
     }
 
     /** Percent of GC wall-clock time. */
     double gcTimePercent() {
-        double totalTime = gcSamples.trimmedWindowDuration();
-        double gcTime = gcSamples.durationSum();
-        double gcPercent = gcTime / totalTime;
+        long totalTime = gcSamples.trimmedWindowDurationNanos();
+        long gcTime = gcSamples.durationSumNanos();
+        double gcPercent = (double) gcTime / totalTime;
         assert gcPercent <= 1.0;
         assert gcPercent >= 0;
         return gcPercent;
@@ -768,10 +768,9 @@ abstract class AdaptiveCollectionPolicy2Base extends AbstractCollectionPolicy im
     void minorCollectionEnd(UnsignedWord edenCapacityBytes) {
         minorTimer.stop();
 
-        double minorPauseInSeconds = TimeUtils.nanosToSecondsDouble(minorTimer.totalNanos());
-        double minorPauseInMs = minorPauseInSeconds * 1000;
+        recordGcDuration(minorTimer.lastStartedNanoTime(), minorTimer.totalNanos());
 
-        recordGcDuration(minorPauseInSeconds);
+        double minorPauseInSeconds = TimeUtils.nanosToSecondsDouble(minorTimer.totalNanos());
         trimmedMinorGcTimeSeconds.add(minorPauseInSeconds);
 
         if (!youngGenPolicyIsReady) {
@@ -785,6 +784,7 @@ abstract class AdaptiveCollectionPolicy2Base extends AbstractCollectionPolicy im
         }
 
         double edenSizeInMbytes = UnsignedUtils.toDouble(edenCapacityBytes) / (1024 * 1024);
+        double minorPauseInMs = minorPauseInSeconds * 1000;
         minorPauseYoungEstimator.update(edenSizeInMbytes, minorPauseInMs);
     }
 }
@@ -792,48 +792,45 @@ abstract class AdaptiveCollectionPolicy2Base extends AbstractCollectionPolicy im
 /**
  * A ring buffer with fixed size to record the most recent samples of GC duration (minor and major)
  * so that we can calculate mutator-wall-clock-time percentage for the given window.
+ *
+ * We use nanoseconds in longs to avoid issues from floating-point conversion.
  */
-@BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.hpp") // actually:jdk-26+25
+@BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25-ga/src/hotspot/share/gc/shared/adaptiveSizePolicy.hpp") // actually:jdk-26+25
 final class GCSampleRingBuffer {
-    private final double[] startInstants = new double[NUM_OF_GC_SAMPLE];
-    private final double[] durations = new double[NUM_OF_GC_SAMPLE];
-    private double durationSum = 0.0;
+    private final long[] startInstantsNanos = new long[NUM_OF_GC_SAMPLE];
+    private final long[] durationsNanos = new long[NUM_OF_GC_SAMPLE];
+    private long durationSumNanos = 0L;
     private int sampleIndex = 0;
     private int numOfSamples = 0;
 
-    double durationSum() {
-        return durationSum;
+    long durationSumNanos() {
+        return durationSumNanos;
     }
 
     /** Records a GC duration into the ring buffer. */
-    void recordSample(double gcDuration) {
+    void recordSample(long gcStartNanoTime, long gcDurationNanos) {
         if (numOfSamples < NUM_OF_GC_SAMPLE) {
             numOfSamples++;
         } else {
             assert numOfSamples == NUM_OF_GC_SAMPLE;
-            durationSum -= durations[sampleIndex];
+            durationSumNanos -= durationsNanos[sampleIndex];
         }
-        double gcStartInstant = elapsedTime() - gcDuration;
-        startInstants[sampleIndex] = gcStartInstant;
-        durations[sampleIndex] = gcDuration;
-        durationSum += gcDuration;
+        startInstantsNanos[sampleIndex] = gcStartNanoTime;
+        durationsNanos[sampleIndex] = gcDurationNanos;
+        durationSumNanos += gcDurationNanos;
 
         sampleIndex = (sampleIndex + 1) % NUM_OF_GC_SAMPLE;
     }
 
     /** Returns window length, i.e. time from oldest to now. */
-    double trimmedWindowDuration() {
-        double currentTime = elapsedTime();
-        double oldestGcStartInstant;
+    long trimmedWindowDurationNanos() {
+        long currentTimeNanos = System.nanoTime();
+        long oldestGcStartInstantNanos;
         if (numOfSamples < NUM_OF_GC_SAMPLE) {
-            oldestGcStartInstant = startInstants[0];
+            oldestGcStartInstantNanos = startInstantsNanos[0];
         } else {
-            oldestGcStartInstant = startInstants[sampleIndex];
+            oldestGcStartInstantNanos = startInstantsNanos[sampleIndex];
         }
-        return currentTime - oldestGcStartInstant;
-    }
-
-    private static double elapsedTime() {
-        return TimeUtils.nanosToSecondsDouble(System.nanoTime());
+        return currentTimeNanos - oldestGcStartInstantNanos;
     }
 }

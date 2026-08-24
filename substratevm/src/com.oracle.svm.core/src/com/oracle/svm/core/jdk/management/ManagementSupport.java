@@ -61,7 +61,7 @@ import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.jfr.HasJfrSupport;
-import com.oracle.svm.core.thread.ThreadListener;
+import com.oracle.svm.guest.staging.core.thread.ThreadListener;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
@@ -198,7 +198,7 @@ public final class ManagementSupport implements ThreadListener {
 
     @Uninterruptible(reason = "Only uninterruptible code may be executed before the thread is fully started.")
     @Override
-    public void beforeThreadStart(IsolateThread isolateThread, Thread javaThread) {
+    public void afterThreadStart(IsolateThread isolateThread, Thread javaThread) {
         threadMXBean.noteThreadStart(javaThread);
     }
 

@@ -39,7 +39,19 @@ import com.oracle.svm.core.configure.ConditionalRuntimeValue;
 public interface ReflectionHostedSupport {
     Map<Class<?>, Set<Class<?>>> getReflectionInnerClasses();
 
+    /**
+     * Returns reflection field metadata. This is the only reflection metadata query that may still
+     * be called after {@link #afterRuntimeMetadataEncoding()} if retention was requested through
+     * {@link #retainReflectionFieldsAfterRuntimeMetadataEncoding()}, in which case implementations
+     * can return a retained reporting view instead of their full build-time metadata.
+     */
     Map<AnalysisType, Map<AnalysisField, ConditionalRuntimeValue<Field>>> getReflectionFields();
+
+    /**
+     * Requests that {@link #getReflectionFields()} remains available after
+     * {@link #afterRuntimeMetadataEncoding()}.
+     */
+    void retainReflectionFieldsAfterRuntimeMetadataEncoding();
 
     Map<AnalysisType, Map<AnalysisMethod, ConditionalRuntimeValue<Executable>>> getReflectionExecutables();
 
@@ -57,6 +69,12 @@ public interface ReflectionHostedSupport {
      */
     Set<?> getHidingReflectionMethods();
 
+    /**
+     * Returns record components that can be materialized during image building, or {@code null} if
+     * no record-component metadata should be encoded. Callers must use
+     * {@link #getRecordComponentLookupErrors()} for types whose record-component query should fail
+     * at run time with a preserved lookup error.
+     */
     RecordComponent[] getRecordComponents(Class<?> type);
 
     void registerHeapDynamicHub(Object hub, ScanReason reason);
@@ -77,13 +95,27 @@ public interface ReflectionHostedSupport {
 
     Map<AnalysisType, Set<AnalysisType[]>> getNegativeConstructorQueries();
 
+    /**
+     * Called after runtime metadata encoding has consumed all reflection metadata. Implementations
+     * should release build-time-only state and fail loudly if any later phase tries to query it,
+     * except for {@link #getReflectionFields()} when retention was requested through
+     * {@link #retainReflectionFieldsAfterRuntimeMetadataEncoding()}.
+     */
+    void afterRuntimeMetadataEncoding();
+
     Map<Class<?>, Throwable> getClassLookupErrors();
 
-    Map<Class<?>, Throwable> getFieldLookupErrors();
+    Map<Class<?>, Throwable> getDeclaredFieldLookupErrors();
 
-    Map<Class<?>, Throwable> getMethodLookupErrors();
+    Map<Class<?>, Throwable> getPublicFieldLookupErrors();
 
-    Map<Class<?>, Throwable> getConstructorLookupErrors();
+    Map<Class<?>, Throwable> getDeclaredMethodLookupErrors();
+
+    Map<Class<?>, Throwable> getPublicMethodLookupErrors();
+
+    Map<Class<?>, Throwable> getDeclaredConstructorLookupErrors();
+
+    Map<Class<?>, Throwable> getPublicConstructorLookupErrors();
 
     Map<Class<?>, Throwable> getRecordComponentLookupErrors();
 

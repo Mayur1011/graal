@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.core.code;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.graalvm.nativeimage.Platform;
@@ -34,15 +35,15 @@ import org.graalvm.word.ComparableWord;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.BuildPhaseProvider.AfterCompilation;
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.c.NonmovableObjectArray;
-import com.oracle.svm.core.heap.UnknownObjectField;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
-import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
 import com.oracle.svm.core.nmt.NmtCategory;
+import com.oracle.svm.shared.BuildPhaseProvider.AfterCompilation;
+import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.MultiLayer;
@@ -64,10 +65,13 @@ public class ImageCodeInfo {
     @UnknownPrimitiveField(availability = AfterCompilation.class) private UnsignedWord codeAndDataMemorySize;
     @UnknownPrimitiveField(availability = AfterCompilation.class) private UnsignedWord relativeIPOffset;
     @UnknownPrimitiveField(availability = AfterCompilation.class) private int methodTableFirstId;
+    @UnknownPrimitiveField(availability = AfterCompilation.class) private int methodTableEntryCount;
+    @UnknownPrimitiveField(availability = AfterCompilation.class) private int codeInfoIndexEntriesPerBlock = 1;
 
     private final Object[] objectFields;
     @UnknownObjectField(availability = AfterCompilation.class) byte[] codeInfoIndex;
     @UnknownObjectField(availability = AfterCompilation.class) byte[] codeInfoEncodings;
+    @UnknownObjectField(availability = AfterCompilation.class, canBeNull = true) byte[] codeInfoDefaultFrameInfoIndexes;
     @UnknownObjectField(availability = AfterCompilation.class) byte[] referenceMapEncoding;
     @UnknownObjectField(availability = AfterCompilation.class) byte[] frameInfoEncodings;
     @UnknownObjectField(availability = AfterCompilation.class) Object[] objectConstants;
@@ -113,6 +117,8 @@ public class ImageCodeInfo {
         infoImpl.setRelativeIPOffset(imageCodeInfo.relativeIPOffset);
         infoImpl.setCodeInfoIndex(NonmovableArrays.fromImageHeap(imageCodeInfo.codeInfoIndex));
         infoImpl.setCodeInfoEncodings(NonmovableArrays.fromImageHeap(imageCodeInfo.codeInfoEncodings));
+        infoImpl.setCodeInfoIndexEntriesPerBlock(imageCodeInfo.codeInfoIndexEntriesPerBlock);
+        infoImpl.setCodeInfoDefaultFrameInfoIndexes(NonmovableArrays.fromImageHeap(imageCodeInfo.codeInfoDefaultFrameInfoIndexes));
         infoImpl.setStackReferenceMapEncoding(NonmovableArrays.fromImageHeap(imageCodeInfo.referenceMapEncoding));
         infoImpl.setFrameInfoEncodings(NonmovableArrays.fromImageHeap(imageCodeInfo.frameInfoEncodings));
         infoImpl.setObjectConstants(NonmovableArrays.fromImageHeap(imageCodeInfo.objectConstants));
@@ -121,6 +127,7 @@ public class ImageCodeInfo {
         infoImpl.setOtherStrings(NonmovableArrays.fromImageHeap(imageCodeInfo.otherStrings));
         infoImpl.setMethodTable(NonmovableArrays.fromImageHeap(imageCodeInfo.methodTable));
         infoImpl.setMethodTableFirstId(imageCodeInfo.methodTableFirstId);
+        infoImpl.setMethodCount(imageCodeInfo.methodTableEntryCount);
         infoImpl.setIsAOTImageCode(true);
         infoImpl.setNextImageCodeInfo(next);
     }
@@ -130,6 +137,9 @@ public class ImageCodeInfo {
         config.registerAsImmutable(this);
         config.registerAsImmutable(codeInfoIndex);
         config.registerAsImmutable(codeInfoEncodings);
+        if (codeInfoDefaultFrameInfoIndexes != null) {
+            config.registerAsImmutable(codeInfoDefaultFrameInfoIndexes);
+        }
         config.registerAsImmutable(referenceMapEncoding);
         config.registerAsImmutable(frameInfoEncodings);
         config.registerAsImmutable(objectConstants);
@@ -154,7 +164,20 @@ public class ImageCodeInfo {
     }
 
     public List<Integer> getTotalByteArrayLengths() {
-        return List.of(codeInfoIndex.length, codeInfoEncodings.length, referenceMapEncoding.length, frameInfoEncodings.length, methodTable.length);
+        List<Integer> lengths = new ArrayList<>(6);
+        addByteArrayLength(lengths, codeInfoIndex);
+        addByteArrayLength(lengths, codeInfoEncodings);
+        addByteArrayLength(lengths, codeInfoDefaultFrameInfoIndexes);
+        addByteArrayLength(lengths, referenceMapEncoding);
+        addByteArrayLength(lengths, frameInfoEncodings);
+        addByteArrayLength(lengths, methodTable);
+        return lengths;
+    }
+
+    private static void addByteArrayLength(List<Integer> lengths, byte[] array) {
+        if (array != null) {
+            lengths.add(array.length);
+        }
     }
 
     /**
@@ -259,6 +282,26 @@ public class ImageCodeInfo {
         }
 
         @Override
+        public int getCodeInfoIndexEntriesPerBlock() {
+            return codeInfoIndexEntriesPerBlock;
+        }
+
+        @Override
+        public void setCodeInfoIndexEntriesPerBlock(int entriesPerBlock) {
+            codeInfoIndexEntriesPerBlock = entriesPerBlock;
+        }
+
+        @Override
+        public NonmovableArray<Byte> getCodeInfoDefaultFrameInfoIndexes() {
+            return NonmovableArrays.fromImageHeap(codeInfoDefaultFrameInfoIndexes);
+        }
+
+        @Override
+        public void setCodeInfoDefaultFrameInfoIndexes(NonmovableArray<Byte> array) {
+            codeInfoDefaultFrameInfoIndexes = NonmovableArrays.getHostedArray(array);
+        }
+
+        @Override
         public void setStackReferenceMapEncoding(NonmovableArray<Byte> array) {
             referenceMapEncoding = NonmovableArrays.getHostedArray(array);
         }
@@ -331,6 +374,16 @@ public class ImageCodeInfo {
         @Override
         public void setMethodTableFirstId(int methodId) {
             methodTableFirstId = methodId;
+        }
+
+        @Override
+        public int getMethodCount() {
+            return methodTableEntryCount;
+        }
+
+        @Override
+        public void setMethodCount(int count) {
+            methodTableEntryCount = count;
         }
 
         @Override

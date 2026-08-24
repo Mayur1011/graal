@@ -32,9 +32,9 @@ import com.oracle.svm.core.IsolateListenerSupport;
 import com.oracle.svm.core.IsolateListenerSupport.IsolateListener;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
+import com.oracle.svm.guest.staging.jdk.RuntimeSupport;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.RuntimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.SingleLayer;
 import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.InitialLayerOnly;
@@ -58,6 +58,7 @@ public interface SignalHandlerSupport extends IsolateListener {
 @SingletonTraits(access = RuntimeAccessOnly.class, layeredCallbacks = SingleLayer.class, layeredInstallationKind = InitialLayerOnly.class)
 class NoSignalHandlerSupport implements SignalHandlerSupport {
     @Override
+    @Uninterruptible(reason = "Signal handlers can be installed during early isolate startup before thread state is set up.")
     public void tryInstallHandlersForIgnoredSignals() {
         /* Nothing to do. */
     }
@@ -73,7 +74,6 @@ class NoSignalHandlerSupport implements SignalHandlerSupport {
     }
 }
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = SingleLayer.class)
 @AutomaticallyRegisteredFeature
 class SignalHandlerFeature implements InternalFeature {
     @Override

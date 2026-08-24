@@ -28,6 +28,7 @@ import os
 import tempfile
 import zipfile
 import re
+import json
 from glob import glob
 from pathlib import Path
 from typing import List, Optional
@@ -305,7 +306,7 @@ class BaristaNativeImageBenchmarkSuite(mx_sdk_benchmark.BaristaBenchmarkSuite, m
         return super().default_stages()
 
     def layers(self, bm_suite_args: List[str]) -> List[Layer]:
-        layered_benchmarks = ["micronaut-pegasus", "micronaut-shopcart"]
+        layered_benchmarks = ["micronaut-hello-world", "micronaut-pegasus", "micronaut-shopcart"]
         if self.benchmarkName() in layered_benchmarks:
             return [Layer(0, True), Layer(1, False)]
         # Support for other benchmarks, or even suites? (GR-64772)
@@ -429,7 +430,7 @@ class BaristaNativeImageBenchmarkSuite(mx_sdk_benchmark.BaristaBenchmarkSuite, m
         """Generates the NIB file for the app-layer pair associated with the current benchmark stage."""
         nib_generation_cmd = [str(self.baristaBuilderPath()), app_name]
         if layer_info is not None:
-            assert app_name in ["micronaut-pegasus", "micronaut-shopcart"], f"Cannot generate a layer bundle for '{app_name}' app!"
+            assert app_name in ["micronaut-hello-world", "micronaut-pegasus", "micronaut-shopcart"], f"Cannot generate a layer bundle for '{app_name}' app!"
             assert layer_info.index in [0, 1], f"Cannot generate layer#{layer_info.index} bundle for '{app_name}' app!"
             if layer_info.index == 0:
                 nib_generation_cmd += ["-m=-Pbase-layer"]
@@ -523,6 +524,61 @@ class BaristaNativeImageBenchmarkSuite(mx_sdk_benchmark.BaristaBenchmarkSuite, m
             """
             return super().produceHarnessCommand(cmd, suite)
 
+        def _setup_graalhost(self, cmd, suite):
+            output_dir = bm_exec_context().get("vm").config.output_dir
+            graalhost_config_file = output_dir / "graalhost-config.json"
+            with open(graalhost_config_file, "w", encoding="utf-8") as graalhost_config_handle:
+                ports = {
+                    "vanilla-hello-world": 8010,
+                    "micronaut-hello-world": 8000,
+                    "micronaut-shopcart": 8001,
+                    "micronaut-similarity": 8002,
+                    "micronaut-pegasus": 21000,
+                    "quarkus-hello-world": 8003,
+                    "quarkus-tika": 8004,
+                    "spring-hello-world": 8005,
+                    "spring-petclinic": 8006,
+                    "helidon-hello-world": 8007,
+                    "vertx-hello-world": 8011,
+                    "ktor-hello-world": 8008,
+                    "play-scala-hello-world": 8009,
+                }
+                port = ports[suite.benchmarkName()]
+                graalhost_config = {
+                    "default_socket": {
+                        "port": port,
+                    },
+                    "listen_socket": {
+                        "port": port,
+                    },
+                    "fsmappings": [
+                        {"concrete": "/dev/null", "virt": "/dev/null", "mutable": True},
+                        {"concrete": "/", "virt": "/", "mutable": True},
+                        {"concrete": str(output_dir), "virt": str(output_dir), "mutable": True},
+                        {"using": {"handler": "pseudo_fs"}, "concrete": "/proc/mounts", "virt": "/proc/mounts"},
+                    ],
+                    "testing_default_mappings": True,
+                    "working_dir": "/",
+                    "fd_limit": 4096,
+                }
+                # Quarkus Tika loads JDK shared libraries at run time. They are
+                # emitted next to the application image and must be included in
+                # GraalHost's verified set. They are not needed by the other
+                # Barista benchmarks.
+                if suite.benchmarkName() == "quarkus-tika":
+                    graalhost_config["env"] = {"LD_LIBRARY_PATH": str(output_dir)}
+                    graalhost_config["fsmappings"].extend(
+                        {"concrete": str(library), "virt": str(library), "verif": True}
+                        for library in sorted(output_dir.glob("lib*.so"))
+                    )
+                json.dump(graalhost_config, graalhost_config_handle, indent=4)
+
+            graalhost_cmd = ["graalhost", "--enable_resolving_env_refs", f"--run_config=@{graalhost_config_file}", "--log_to=syslog", "--run"]
+            self._updateCommandOption(cmd, "--cmd-app-prefix", "-p", " ".join(graalhost_cmd), append=True)
+            taskset_cmd = ["taskset", "-c", "0-3"]
+            self._updateCommandOption(cmd, "--startup-cmd-app-prefix", None, " ".join(taskset_cmd))
+            self._updateCommandOption(cmd, "--startup-cmd-app-prefix", None, " ".join(graalhost_cmd), append=True)
+
         def produceHarnessCommand(self, cmd, suite):
             """Maps a NativeImageVM command into a command tailored for the Barista harness.
 
@@ -565,11 +621,11 @@ class BaristaNativeImageBenchmarkSuite(mx_sdk_benchmark.BaristaBenchmarkSuite, m
             barista_bench_name = suite.baristaHarnessBenchmarkName()
             barista_workload = suite.baristaHarnessBenchmarkWorkload()
 
-            # Provide image built in the previous stage to the Barista harnesss using the `--app-executable` option
+            # Provide image built in the previous stage to the Barista harness using the `--app-executable` option
             ni_barista_cmd = [str(suite.baristaHarnessPath()), "--mode", "native", "--app-executable", app_image]
             if barista_workload is not None:
                 ni_barista_cmd.append(f"--config={barista_workload}")
-            ni_barista_cmd += suite.runArgs(bm_suite_args) + self._energyTrackerExtraOptions(suite)
+            ni_barista_cmd += suite.runArgs(bm_suite_args) + self._energyTrackerExtraOptions(suite) + self._pagefaultsTrackerExtraOptions(suite)
             ni_barista_cmd += parse_prefixed_args("-Dnative-image.benchmark.extra-jvm-arg=", bm_suite_args)
             if stage.is_instrument():
                 # Make instrument run short
@@ -581,8 +637,11 @@ class BaristaNativeImageBenchmarkSuite(mx_sdk_benchmark.BaristaBenchmarkSuite, m
             else:
                 # Add explicit run stage args
                 ni_barista_cmd += parse_prefixed_args("-Dnative-image.benchmark.extra-run-arg=", bm_suite_args)
+            if not stage.is_instrument() and bm_exec_context().get("vm").graalhost_graalos:
+                # Don't run instrument stages on graalhost because of issues regarding the iprof generation
+                self._setup_graalhost(ni_barista_cmd, suite)
             if nivm_cmd_prefix:
-                self._updateCommandOption(ni_barista_cmd, "--cmd-app-prefix", "-p", " ".join(nivm_cmd_prefix))
+                self._updateCommandOption(ni_barista_cmd, "--cmd-app-prefix", "-p", " ".join(nivm_cmd_prefix), append=True)
             if nivm_app_options:
                 self._updateCommandOption(ni_barista_cmd, "--app-args", "-a", " ".join(nivm_app_options))
             ni_barista_cmd += [barista_bench_name]
@@ -880,13 +939,6 @@ _scala_dacapo_iterations = {
     'tmt'           : 12,
 }
 
-_SCALA_DACAPO_EXTRA_IMAGE_BUILD_ARGS = {
-    'scalariform'   : ['--allow-incomplete-classpath'],
-    'scalatest'     : ['--allow-incomplete-classpath'],
-    'specs'         : ['--allow-incomplete-classpath'],
-    'tmt'           : ['--allow-incomplete-classpath'],
-}
-
 _scala_daCapo_exclude_lib = {
     'scalariform' : ['scala-library-2.8.0.jar'],
     'scalap'      : ['scala-library-2.8.0.jar'],
@@ -943,10 +995,6 @@ class ScalaDaCapoNativeImageBenchmarkSuite(mx_sdk_benchmark.ScalaDaCapoBenchmark
             return user_args
         else:
             return []
-
-    def extra_image_build_argument(self, benchmark, args):
-        default_args = _SCALA_DACAPO_EXTRA_IMAGE_BUILD_ARGS[benchmark] if benchmark in _SCALA_DACAPO_EXTRA_IMAGE_BUILD_ARGS else []
-        return default_args + super().extra_image_build_argument(benchmark, args)
 
     def createCommandLineArgs(self, benchmarks, bmSuiteArgs):
         if benchmarks is None:
@@ -1012,15 +1060,25 @@ class SpecJVM2008NativeImageBenchmarkSuite(mx_sdk_benchmark.SpecJvm2008Benchmark
     def extra_agent_run_arg(self, benchmark, args, image_run_args):
         return super().extra_agent_run_arg(benchmark, args, image_run_args) + SpecJVM2008NativeImageBenchmarkSuite.short_run_args
 
+    def native_image_run_system_properties(self, args):
+        _, _, _, system_properties, _, _, _ = mx_sdk_benchmark.NativeImageVM.extract_benchmark_arguments(
+            args, self.all_command_line_args_are_vm_args())
+        return system_properties
+
+    def native_image_run_args(self, args, image_run_args, stage_run_args):
+        return self.native_image_run_system_properties(args) + ["--"] + image_run_args + stage_run_args
+
     def extra_profile_run_arg(self, benchmark, args, image_run_args, should_strip_run_args):
-        return super().extra_profile_run_arg(benchmark, args, image_run_args, should_strip_run_args) + SpecJVM2008NativeImageBenchmarkSuite.short_run_args
+        image_run_args = super().extra_profile_run_arg(benchmark, args, image_run_args, should_strip_run_args)
+        return self.native_image_run_args(args, image_run_args, SpecJVM2008NativeImageBenchmarkSuite.short_run_args)
 
     def extra_image_build_argument(self, benchmark, args):
         # The reason to add `-H:CompilationExpirationPeriod` is that we encounter non-deterministic compiler crash due to expiration (GR-50701).
-        return super().extra_image_build_argument(benchmark, args) + ['-H:CompilationExpirationPeriod=600']
+        return super().extra_image_build_argument(benchmark, args) + ['-H:CompilationExpirationPeriod=600', '-H:+StrictRuntimeJavaOptions']
 
     def extra_run_arg(self, benchmark, args, image_run_args):
-        return super().extra_run_arg(benchmark, args, image_run_args) + SpecJVM2008NativeImageBenchmarkSuite.long_run_args
+        image_run_args = super().extra_run_arg(benchmark, args, image_run_args)
+        return self.native_image_run_args(args, image_run_args, SpecJVM2008NativeImageBenchmarkSuite.long_run_args)
 
     def successPatterns(self):
         return super().successPatterns() + SUCCESSFUL_STAGE_PATTERNS

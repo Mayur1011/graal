@@ -35,9 +35,9 @@ import com.oracle.svm.core.c.NonmovableObjectArray;
 import com.oracle.svm.core.code.CodeInfoDecoder.FrameInfoState;
 import com.oracle.svm.core.code.FrameInfoQueryResult.ValueInfo;
 import com.oracle.svm.core.code.FrameInfoQueryResult.ValueType;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
-import com.oracle.svm.core.jdk.UninterruptibleUtils;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.meta.SubstrateObjectConstant;
 import com.oracle.svm.core.util.NonmovableByteArrayTypeReader;
@@ -433,10 +433,13 @@ public class FrameInfoDecoder {
             if (deoptMethodIndex < 0) {
                 /*
                  * Negative number is a reference to the target method (runtime compilations only).
+                 * The method can also be recorded for interpreter methods that do not have an AOT
+                 * deopt target so stack walking can recover the Ristretto source information from
+                 * the interpreter method.
                  */
                 cur.deoptMethod = (SharedMethod) NonmovableArrays.getObject(CodeInfoAccess.getObjectConstants(info), -1 - deoptMethodIndex);
                 cur.deoptMethodOffset = cur.deoptMethod.getImageCodeDeoptOffset();
-                assert cur.deoptMethodOffset != 0;
+                assert cur.deoptMethodOffset != 0 || cur.deoptMethod.hasInterpreterMethod();
             } else if (deoptMethodIndex > 0) {
                 /*
                  * Positive number is a directly encoded method offset (AOT compilations only, to

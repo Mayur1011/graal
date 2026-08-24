@@ -29,9 +29,6 @@ import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.shared.option.HostedOptionValues;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 
 import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
 import jdk.graal.compiler.core.common.GraalOptions;
@@ -47,6 +44,27 @@ import jdk.graal.compiler.replacements.SnippetIntegerHistogram;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaField;
+
+/**
+ * Disables snippet counters because they need a {@link SnippetReflectionProvider} which is not
+ * fully supported for cross-isolate compilations.
+ *
+ * In general snippets counters should only enabled if the flag SnippetCounters is set.
+ */
+@AutomaticallyRegisteredFeature
+final class DisableSnippetCountersFeature implements InternalFeature {
+    @Override
+    public boolean isInConfiguration(IsInConfigurationAccess access) {
+        return SubstrateOptions.SupportCompileInIsolates.getValue() || !GraalOptions.SnippetCounters.getValue(HostedOptionValues.singleton().get());
+    }
+
+    @Override
+    public void registerGraphBuilderPlugins(Providers providers, GraphBuilderConfiguration.Plugins plugins, ParsingReason reason) {
+        if (reason == ParsingReason.JITCompilation) {
+            plugins.appendNodePlugin(new DisableSnippetCountersPlugin());
+        }
+    }
+}
 
 /**
  * Adapted from code of {@link SymbolicSnippetEncoder}.
@@ -70,27 +88,5 @@ final class DisableSnippetCountersPlugin implements NodePlugin {
             return true;
         }
         return false;
-    }
-}
-
-/**
- * Disables snippet counters because they need a {@link SnippetReflectionProvider} which is not
- * fully supported for cross-isolate compilations.
- *
- * In general snippets counters should only enabled if the flag SnippetCounters is set.
- */
-@AutomaticallyRegisteredFeature
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class)
-final class DisableSnippetCountersFeature implements InternalFeature {
-    @Override
-    public boolean isInConfiguration(IsInConfigurationAccess access) {
-        return SubstrateOptions.supportCompileInIsolates() || !GraalOptions.SnippetCounters.getValue(HostedOptionValues.singleton().get());
-    }
-
-    @Override
-    public void registerGraphBuilderPlugins(Providers providers, GraphBuilderConfiguration.Plugins plugins, ParsingReason reason) {
-        if (reason == ParsingReason.JITCompilation) {
-            plugins.appendNodePlugin(new DisableSnippetCountersPlugin());
-        }
     }
 }

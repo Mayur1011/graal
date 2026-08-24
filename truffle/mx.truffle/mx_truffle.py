@@ -359,6 +359,8 @@ class TruffleUnittestConfig(mx_unittest.MxUnittestConfig):
 
         # Disable VirtualThread warning
         vmArgs = [*vmArgs, "-Dpolyglot.engine.WarnVirtualThreadSupport=false"]
+        # Disable MethodScoping warning
+        vmArgs = [*vmArgs, "-Dpolyglot.engine.WarnMethodScoping=false"]
         append_unittest_image_build_time_options(vmArgs)
         enable_truffle_native_access(vmArgs)
         enable_sun_misc_unsafe(vmArgs)
@@ -618,7 +620,9 @@ class TruffleGateTags:
     truffle_jvm = ["truffle-jvm"]
     truffle_jvm_lite = ["truffle-jvm-lite", "truffle-jvm"]
     truffle_native = ["truffle-native"]
-    truffle_native_lite = ["truffle-native-lite", "truffle-native"]
+    truffle_native0 = ["truffle-native0", "truffle-native"]
+    truffle_native1 = ["truffle-native1", "truffle-native"]
+    truffle_native_lite = ["truffle-native-lite", "truffle-native0", "truffle-native"]
     # LibC Musl tests need special setup so we can't run them in truffle-native
     truffle_native_libcmusl_static = ["truffle-native-libcmusl-static"]
 
@@ -710,21 +714,21 @@ def gate_truffle_jvm(tasks):
 
 
 def gate_truffle_native(tasks):
-    with Task("Truffle SL Native ModulePath", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle SL Native ModulePath", tasks, tags=TruffleGateTags.truffle_native0) as t:
         if t:
             _sl_native_fallback_gate_tests(force_cp=False)
             _sl_native_optimized_gate_tests(force_cp=False)
 
-    with Task("Truffle SL Native Open World Test", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle SL Native Open World Test", tasks, tags=TruffleGateTags.truffle_native0) as t:
         if t:
             _sl_native_open_world_gate_tests(force_cp=False)
 
-    with Task("Truffle SL Native ClassPath", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle SL Native ClassPath", tasks, tags=TruffleGateTags.truffle_native0) as t:
         if t:
             _sl_native_fallback_gate_tests(force_cp=True)
             _sl_native_optimized_gate_tests(force_cp=True)
 
-    with Task("Truffle Native Unit Preinitialization Tests", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle Native Unit Preinitialization Tests", tasks, tags=TruffleGateTags.truffle_native0) as t:
         if t:
             truffle_native_context_preinitialization_tests()
 
@@ -732,11 +736,11 @@ def gate_truffle_native(tasks):
         if t:
             truffle_native_unit_tests_gate(use_optimized_runtime=True)
 
-    with Task("Truffle Native Unit Tests Fallback", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle Native Unit Tests Fallback", tasks, tags=TruffleGateTags.truffle_native1) as t:
         if t:
             truffle_native_unit_tests_gate(use_optimized_runtime=False)
 
-    with Task("Truffle Native Unit Tests Quick Build", tasks, tags=TruffleGateTags.truffle_native) as t:
+    with Task("Truffle Native Unit Tests Quick Build", tasks, tags=TruffleGateTags.truffle_native1) as t:
         if t:
             truffle_native_unit_tests_gate(use_optimized_runtime=True, build_args=["-Ob"])
 
@@ -1355,6 +1359,12 @@ def _collect_distributions_by_service(required_services, entries_collector):
 
 class _TCKUnittestConfig(mx_unittest.MxUnittestConfig):
     lookupTCKProviders = False
+    # Include NativeBridge when the TCK runs with engine.SpawnIsolate=true.
+    # This dependency is normally supplied by the standard <language>-isolate JAR.
+    # However, TCK tests use a custom library that bundles the tested language and
+    # SimpleLanguage instead of the standard language library, and provide it via
+    # the engine.IsolateLibrary option.
+    includeNativeBridge = False
 
     def __init__(self):
         super().__init__(name="truffle-tck")
@@ -1369,6 +1379,10 @@ class _TCKUnittestConfig(mx_unittest.MxUnittestConfig):
             mx.logv(f'Truffle runtime used by the TCK {",".join([d.name for d in truffle_runtime])}')
             deps.update(tck_providers)
             deps.update(truffle_runtime)
+            if _TCKUnittestConfig.includeNativeBridge:
+                native_bridge = mx.distribution("sdk:NATIVEBRIDGE")
+                mx.logv(f'NativeBridge distribution to add for polyglot isolate TCK {native_bridge.name}')
+                deps.add(native_bridge)
             mx.logv(f'Merged unittest distributions {",".join([d.name for d in deps])}')
         else:
             mx.logv("Truffle TCK unnittest config is ignored because _shouldRunTCKUnittestConfig is False.")
@@ -1387,6 +1401,8 @@ class _TCKUnittestConfig(mx_unittest.MxUnittestConfig):
         if not _TCKUnittestConfig._has_disable_assertions_option(vmArgs):
             # Assert for enter/return parity of ProbeNode
             vmArgs = [*vmArgs, "-Dpolyglot.engine.AssertProbes=true", "-Dpolyglot.engine.AllowExperimentalOptions=true"]
+        if _TCKUnittestConfig.includeNativeBridge:
+            vmArgs = [*vmArgs, "--add-modules=org.graalvm.nativebridge"]
         return (vmArgs, mainClass, mainClassArgs)
 
 
@@ -1536,31 +1552,33 @@ def tck(args):
     unitTestOptions = args_no_tests[0 : max(index - (1 if has_separator_arg else 0), 0)]
     unitTestOptions.append("--lookup-truffle-tck-providers")
     jvmOptions = args_no_tests[index : len(args_no_tests)]
-    if tckConfiguration == "default":
-        unittest([*unitTestOptions, "--", *jvmOptions, *tests])
-    elif tckConfiguration == "debugger":
-        with mx_util.SafeFileCreation(os.path.join(tempfile.gettempdir(), "debugalot")) as sfc:
-            _execute_debugger_test(tests, sfc.tmpPath, False, unitTestOptions, jvmOptions)
-    elif tckConfiguration == "compile":
-        if "--use-graalvm" in unitTestOptions:
-            jdk = mx.get_jdk(tag="graalvm")
-        else:
-            jdk = mx.get_jdk()
-        if not mx_sdk.GraalVMJDKConfig.is_graalvm(jdk.home):
-            mx.abort(
-                "The 'compile' TCK configuration requires graalvm execution, "
-                "run with --java-home=<path_to_graalvm> or run with --use-graalvm."
-            )
-        compileOptions = [
-            "-Dpolyglot.engine.AllowExperimentalOptions=true",
-            "-Dpolyglot.engine.Mode=latency",
-            # "-Dpolyglot.engine.CompilationFailureAction=Throw", GR-49399
-            "-Djdk.graal.CompilationFailureAction=ExitVM",
-            "-Dpolyglot.engine.CompileImmediately=true",
-            "-Dpolyglot.engine.BackgroundCompilation=false",
-            "-Dtck.inlineVerifierInstrument=false",
-        ]
-        unittest([*unitTestOptions, "--", *jvmOptions, *compileOptions, *tests])
+    spawn_isolate = any(arg.startswith("-Dpolyglot.engine.SpawnIsolate=") and not arg.endswith("=false") for arg in jvmOptions)
+    previous_include_native_bridge = _TCKUnittestConfig.includeNativeBridge
+    try:
+        _TCKUnittestConfig.includeNativeBridge = spawn_isolate
+        if tckConfiguration == "default":
+            unittest([*unitTestOptions, "--", *jvmOptions, *tests])
+        elif tckConfiguration == "debugger":
+            with mx_util.SafeFileCreation(os.path.join(tempfile.gettempdir(), "debugalot")) as sfc:
+                _execute_debugger_test(tests, sfc.tmpPath, False, unitTestOptions, jvmOptions)
+        elif tckConfiguration == "compile":
+            if not mx_sdk.GraalVMJDKConfig.is_graalvm(mx.get_jdk().home):
+                mx.abort(
+                    "The 'compile' TCK configuration requires graalvm execution, "
+                    "run with --java-home=<path_to_graalvm> or run with --use-graalvm."
+                )
+            compileOptions = [
+                "-Dpolyglot.engine.AllowExperimentalOptions=true",
+                "-Dpolyglot.engine.Mode=latency",
+                # "-Dpolyglot.engine.CompilationFailureAction=Throw", GR-49399
+                "-Djdk.graal.CompilationFailureAction=ExitVM",
+                "-Dpolyglot.engine.CompileImmediately=true",
+                "-Dpolyglot.engine.BackgroundCompilation=false",
+                "-Dtck.inlineVerifierInstrument=false",
+            ]
+            unittest([*unitTestOptions, "--", *jvmOptions, *compileOptions, *tests])
+    finally:
+        _TCKUnittestConfig.includeNativeBridge = previous_include_native_bridge
 
 
 mx.update_commands(
@@ -1885,7 +1903,7 @@ def register_polyglot_isolate_distributions(
     :param str maven_group_id: The maven language group id.
     :param str | list | language_license: Language licence(s).
     :param list isolate_build_options: additional options passed to a native image to build the isolate library.
-    :param list platforms: supported platforms, defaults to ['linux-amd64', 'linux-aarch64', 'darwin-amd64', 'darwin-aarch64', 'windows-amd64']
+    :param list platforms: supported platforms, defaults to ['linux-amd64', 'linux-aarch64', 'darwin-aarch64', 'windows-amd64']
     :param list additional_image_path_artifacts: additional artifacts to include in the polyglot isolate library image path
     :param list additional_language_ids: language ids of additional languages added into polyglot isolate library
     """
@@ -1937,7 +1955,6 @@ def register_polyglot_isolate_distributions(
         platforms = [
             "linux-amd64",
             "linux-aarch64",
-            "darwin-amd64",
             "darwin-aarch64",
             "windows-amd64",
         ]
@@ -2048,7 +2065,7 @@ def register_polyglot_isolate_distributions(
             deps=resources_dist_dependencies,
             mainClass=None,
             excludedLibs=[],
-            distDependencies=["truffle:TRUFFLE_RUNTIME"],
+            distDependencies=["sdk:NATIVEBRIDGE","truffle:TRUFFLE_API"],
             javaCompliance=str(build_internal_resource.javaCompliance) + "+",
             platformDependent=True,
             theLicense=licenses,
@@ -2138,7 +2155,10 @@ class PolyglotIsolateProject(mx_sdk_vm_ng.NativeImageLibraryProject):
         super().__init__(
             language_suite,
             f"{language_id}.isolate",
-            isolate_deps,
+            [
+                'sdk:NATIVEBRIDGE',
+                *isolate_deps
+            ],
             ["Truffle"],
             None,
             f"{language_id}vm",
@@ -2365,7 +2385,7 @@ class LibffiBuilderProject(mx_native.MultitargetProject):
             else:
                 assert toolchain.spec.target.os == "linux"
 
-                configure_arch = {"amd64": "x86_64", "aarch64": "aarch64"}.get(toolchain.spec.target.arch)
+                configure_arch = {"amd64": "x86_64", "aarch64": "aarch64", "riscv64": "riscv64"}.get(toolchain.spec.target.arch)
                 assert configure_arch, "translation to configure style arch is not supported yet for " + str(
                     toolchain.spec.target.arch
                 )
@@ -2544,9 +2564,7 @@ mx_sdk_vm.register_graalvm_component(
             "GraalVM Launcher Common",
         ],
         jar_distributions=[],
-        jvmci_parent_jars=[
-            "truffle:LOCATOR",
-        ],
+        jvmci_parent_jars=[],
         stability="supported",
     )
 )

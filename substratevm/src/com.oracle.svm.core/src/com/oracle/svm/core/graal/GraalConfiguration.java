@@ -61,7 +61,6 @@ import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.phases.BasePhase;
 import jdk.graal.compiler.phases.PhaseSuite;
 import jdk.graal.compiler.phases.common.LoweringPhase;
-import jdk.graal.compiler.phases.constantblinding.ConstantBlindingPhase;
 import jdk.graal.compiler.phases.constantblinding.ConstantPreBlindingPhase;
 import jdk.graal.compiler.phases.schedule.SchedulePhase.FinalSchedulePhase;
 import jdk.graal.compiler.phases.tiers.HighTierContext;
@@ -70,6 +69,7 @@ import jdk.graal.compiler.phases.tiers.Suites;
 import jdk.graal.compiler.phases.util.Providers;
 import jdk.graal.compiler.vector.lir.aarch64.AArch64VectorNodeMatchRules;
 import jdk.graal.compiler.vector.lir.amd64.AMD64VectorNodeMatchRules;
+import jdk.graal.compiler.vector.phases.LoopVectorizationPhase;
 import jdk.vm.ci.aarch64.AArch64;
 import jdk.vm.ci.amd64.AMD64;
 import jdk.vm.ci.code.Architecture;
@@ -128,33 +128,50 @@ public class GraalConfiguration {
     }
 
     public Suites createSuites(OptionValues options, boolean hosted, Architecture arch) {
-        Suites suites = ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getSuitesCreator().createSuites(options, arch);
+        Suites suites = ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getSuitesCreator().createSuites(withSubstrateSuiteOptions(options), arch);
         maybeAddRuntimeConstantBlinding(options, hosted, suites);
         return suites;
     }
 
-    public Suites createFirstTierSuites(OptionValues options, @SuppressWarnings("unused") boolean hosted, Architecture arch) {
-        return ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getFirstTierSuitesCreator().createSuites(options, arch);
+    public Suites createFirstTierSuites(OptionValues options, boolean hosted, Architecture arch) {
+        Suites suites = ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getFirstTierSuitesCreator().createSuites(withSubstrateSuiteOptions(options), arch);
+        maybeAddRuntimeConstantBlinding(options, hosted, suites);
+        return suites;
     }
 
-    public Suites createFallbackSuites(OptionValues options, @SuppressWarnings("unused") boolean hosted, Architecture arch) {
-        return ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getFallbackSuitesCreator().createSuites(options, arch);
+    public Suites createFallbackSuites(OptionValues options, boolean hosted, Architecture arch) {
+        Suites suites = ImageSingletons.lookup(SubstrateSuitesCreatorProvider.class).getFallbackSuitesCreator().createSuites(withSubstrateSuiteOptions(options), arch);
+        maybeAddRuntimeConstantBlinding(options, hosted, suites);
+        return suites;
     }
 
-    protected static void maybeAddRuntimeConstantBlinding(OptionValues options, boolean hosted, Suites suites) {
+    /**
+     * Disables optimizations that are incompatible with SubstrateVM deoptimization.
+     */
+    protected static OptionValues withSubstrateSuiteOptions(OptionValues options) {
+        return new OptionValues(options, LoopVectorizationPhase.Options.VectorizeDeopts, false);
+    }
+
+    protected static void maybeAddRuntimeConstantBlinding(@SuppressWarnings("unused") OptionValues options, boolean hosted, Suites suites) {
         /*
          * Constant blinding only makes sense for JIT compilation, not for native image builds.
+         * Runtime suites are cached before sandbox policy may enable BlindConstants, so install the
+         * phases eagerly and let their shouldApply checks decide whether they run for each graph.
          */
-        if (ConstantBlindingPhase.Options.BlindConstants.getValue(options) && !hosted) {
+        if (!hosted) {
             PhaseSuite<LowTierContext> lowTier = suites.getLowTier();
-            ListIterator<BasePhase<? super LowTierContext>> iterator = lowTier.findPhase(FinalSchedulePhase.class);
-            if (iterator.hasPrevious()) {
-                iterator.previous();
+            if (lowTier.findPhase(SubstrateRuntimeConstantBlindingPhase.class) == null) {
+                ListIterator<BasePhase<? super LowTierContext>> iterator = lowTier.findPhase(FinalSchedulePhase.class);
+                if (iterator.hasPrevious()) {
+                    iterator.previous();
+                }
+                iterator.add(new SubstrateRuntimeConstantBlindingPhase());
             }
-            iterator.add(new SubstrateRuntimeConstantBlindingPhase());
-            iterator = lowTier.findPhase(LoweringPhase.class);
-            iterator.previous();
-            iterator.add(new ConstantPreBlindingPhase());
+            if (lowTier.findPhase(ConstantPreBlindingPhase.class) == null) {
+                ListIterator<BasePhase<? super LowTierContext>> iterator = lowTier.findPhase(LoweringPhase.class);
+                iterator.previous();
+                iterator.add(new ConstantPreBlindingPhase());
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -57,7 +57,7 @@ public class SpectestModule extends BuiltinModule {
 
     @Override
     protected WasmModule createModule(WasmLanguage language, WasmContext context, String name) {
-        WasmModule module = WasmModule.createBuiltin(name);
+        WasmModule module = WasmModule.createBuiltin(language, name);
         defineFunction(context, module, "print", types(), types(), new PrintNode(language, module));
         defineFunction(context, module, "print_i32", types(I32_TYPE), types(), new PrintNode(language, module));
         defineFunction(context, module, "print_i64", types(I64_TYPE), types(), new PrintNode(language, module));
@@ -69,7 +69,10 @@ public class SpectestModule extends BuiltinModule {
         defineGlobal(module, "global_i64", I64_TYPE, Mutability.CONSTANT, 666L);
         defineGlobal(module, "global_f32", F32_TYPE, Mutability.CONSTANT, 666.6f);
         defineGlobal(module, "global_f64", F64_TYPE, Mutability.CONSTANT, 666.6);
-        defineTable(context, module, "table", 10, 20, WasmType.FUNCREF_TYPE);
+        defineTable(context, module, "table", 10, 20, false, WasmType.FUNCREF_TYPE);
+        if (context.getContextOptions().supportMemory64()) {
+            defineTable(context, module, "table64", 10, 20, true, WasmType.FUNCREF_TYPE);
+        }
         defineMemory(context, module, "memory", 1, 2, false, false);
         if (context.getContextOptions().supportThreads() && context.getContextOptions().useUnsafeMemory()) {
             defineMemory(context, module, "shared_memory", 1, 2, false, true);

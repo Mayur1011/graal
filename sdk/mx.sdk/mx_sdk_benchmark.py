@@ -418,8 +418,8 @@ class NativeImageBenchmarkConfig:
             base_image_build_args += ['-Ob']
         if vm.graalos or vm.graalhost_graalos:
             base_image_build_args += ['-H:+GraalOS']
-        if vm.use_string_inlining:
-            base_image_build_args += ['-H:+UseStringInlining']
+        if vm.layered:
+            base_image_build_args += ['-H:+WarnOnSharedLayerSetRuntimeOptions']
         if vm.static:
             base_image_build_args += ['--static', '--libc=musl']
         if vm.mostly_static:
@@ -432,11 +432,11 @@ class NativeImageBenchmarkConfig:
             base_image_build_args += ['--features=org.graalvm.home.HomeFinderFeature'] + ['--tool:llvm-backend',
                                                                                           '-H:DeadlockWatchdogInterval=0']
         if vm.gc:
-            base_image_build_args += ['--gc=' + vm.gc] + ['-H:+SpawnIsolates']
+            base_image_build_args += ['--gc=' + vm.gc]
         if vm.native_architecture:
             base_image_build_args += ['-march=native']
         if vm.crema:
-            base_image_build_args += ["-H:+RuntimeClassLoading", "-H:EnableURLProtocols=jar"]
+            base_image_build_args += ["-H:+RuntimeClassLoading"]
         if vm.preserve_all:
             base_image_build_args += ['-H:Preserve=all']
         if vm.preserve_classpath:
@@ -865,6 +865,7 @@ class NativeImageVM(StageAwareGraalVm):
         # When this is set, run the instrumentation-image and instrumentation-run stages.
         # Does not necessarily do instrumentation.
         self.pgo_instrumentation = False
+        self.pgo_layouting = False
         self.pgo_exclude_conditional = False
         self.pgo_sampler_only = False
         self.pgo_use_perf = False
@@ -873,9 +874,7 @@ class NativeImageVM(StageAwareGraalVm):
         self.is_quickbuild = False
         self.graalos = False
         self.graalhost_graalos = False
-        self.pie = False
         self.layered = False
-        self.use_string_inlining = False
         self.static = False
         self.mostly_static = False
         self.is_llvm = False
@@ -888,6 +887,7 @@ class NativeImageVM(StageAwareGraalVm):
         self.use_upx = False
         self.use_open_type_world = False
         self.copyingoldgen_oldpolicy = False # for later removal: GR-73132
+        self.product_profile = False
         self.graalvm_edition = None
         self.config: NativeImageBenchmarkConfig | None = None
         self.stages: StagesContext | None = None
@@ -925,8 +925,6 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["native-architecture"]
         if self.crema is True:
             config += ["crema"]
-        if self.use_string_inlining is True:
-            config += ["string-inlining"]
         if self.static is True:
             config += ["static"]
         if self.mostly_static is True:
@@ -943,8 +941,6 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["graalos"]
         if self.graalhost_graalos is True:
             config += ["graalhost-graalos"]
-        if self.pie is True:
-            config += ["pie"]
         if self.layered is True:
             config += ["layered"]
         if self.future_defaults_all is True:
@@ -957,6 +953,8 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["quickbuild"]
         if self.gc == "G1":
             config += ["g1gc"]
+        if self.product_profile is True:
+            config += ["product"]
         if self.is_llvm is True:
             config += ["llvm"]
         is_pgo_set = False
@@ -964,7 +962,9 @@ class NativeImageVM(StageAwareGraalVm):
             config += ["pgo-sampler"]
             is_pgo_set = True
         # pylint: disable=too-many-boolean-expressions
-        if not is_pgo_set and self.pgo_instrumentation is True \
+        if self.pgo_layouting is True:
+            config += ["pgo-layouting"]
+        elif not is_pgo_set and self.pgo_instrumentation is True \
                 and self.jdk_profiles_collect is False \
                 and self.adopted_jdk_pgo is False \
                 and self.safepoint_sampler is False \
@@ -1027,10 +1027,10 @@ class NativeImageVM(StageAwareGraalVm):
 
         # This defines the allowed config names for NativeImageVM. The ones registered will be available via --jvm-config
         # Note: the order of entries here must match the order of statements in NativeImageVM.config_name()
-        rule = r'^(?P<native_architecture>native-architecture-)?(?P<string_inlining>string-inlining-)?(?P<static>mostly-static-|static-)?(?P<otw>otw-)?(?P<copyingoldgen_oldpolicy>copyingoldgen-oldpolicy-)?(?P<crema>crema-)?' \
-               r'(?P<preserve_all>preserve-all-)?(?P<preserve_classpath>preserve-classpath-)?(?P<graalos>graalos-)?(?P<graalhost_graalos>graalhost-graalos-)?(?P<pie>pie-)?(?P<layered>layered-)?' \
+        rule = r'^(?P<native_architecture>native-architecture-)?(?P<static>mostly-static-|static-)?(?P<otw>otw-)?(?P<copyingoldgen_oldpolicy>copyingoldgen-oldpolicy-)?(?P<crema>crema-)?' \
+               r'(?P<preserve_all>preserve-all-)?(?P<preserve_classpath>preserve-classpath-)?(?P<graalos>graalos-)?(?P<graalhost_graalos>graalhost-graalos-)?(?P<layered>layered-)?' \
                r'(?P<future_defaults_all>future-defaults-all-)?(?P<gate>gate-)?(?P<upx>upx-)?(?P<quickbuild>quickbuild-)?(?P<gc>g1gc-)?' \
-               r'(?P<llvm>llvm-)?(?P<pgo>pgo-|pgo-sampler-|pgo-perf-sampler-invoke-multiple-|pgo-perf-sampler-invoke-|pgo-perf-sampler-)?(?P<inliner>inline-)?' \
+               r'(?P<product>product-)?(?P<llvm>llvm-)?(?P<pgo>pgo-|pgo-layouting-|pgo-sampler-|pgo-perf-sampler-invoke-multiple-|pgo-perf-sampler-invoke-|pgo-perf-sampler-)?(?P<inliner>inline-)?' \
                r'(?P<analysis_context_sensitivity>insens-|allocsens-|1obj-|2obj1h-|3obj2h-|4obj3h-)?(?P<jdk_profiles>jdk-profiles-collect-|adopted-jdk-pgo-)?' \
                r'(?P<profile_inference>profile-inference-feature-extraction-|profile-inference-call-count-|profile-inference-call-count-conservative-|profile-inference-call-count-aggressive-|profile-inference-pgo-|profile-inference-debug-)?' \
                r'(?P<sampler>safepoint-sampler-|async-sampler-)?(?P<optimization_level>O0-|O1-|O2-|O3-|Os-)?(default-)?(?P<edition>ce-|ee-)?$'
@@ -1065,10 +1065,6 @@ class NativeImageVM(StageAwareGraalVm):
             mx.logv(f"'graalhost-graalos' is enabled for {config_name}")
             self.graalhost_graalos = True
 
-        if matching.group("pie") is not None:
-            mx.logv(f"'pie' is enabled for {config_name}")
-            self.pie = True
-
         if matching.group("layered") is not None:
             mx.logv(f"'layered' is enabled for {config_name}")
             self.layered = True
@@ -1076,10 +1072,6 @@ class NativeImageVM(StageAwareGraalVm):
         if matching.group("future_defaults_all") is not None:
             mx.logv(f"'future-defaults-all' is enabled for {config_name}")
             self.future_defaults_all = True
-
-        if matching.group("string_inlining") is not None:
-            mx.logv(f"'string-inlining' is enabled for {config_name}")
-            self.use_string_inlining = True
 
         if matching.group("static") is not None:
             static_mode = matching.group("static")[:-1]
@@ -1120,6 +1112,11 @@ class NativeImageVM(StageAwareGraalVm):
             else:
                 mx.abort(f"Unknown GC: {gc}")
 
+        if matching.group("product") is not None:
+            # Language benchmarks interpret this as their released-product launcher configuration.
+            mx.logv(f"'product' mode is enabled for {config_name}")
+            self.product_profile = True
+
         if matching.group("llvm") is not None:
             mx.logv(f"'llvm' mode is enabled for {config_name}")
             self.is_llvm = True
@@ -1129,6 +1126,9 @@ class NativeImageVM(StageAwareGraalVm):
             if pgo_mode == "pgo":
                 mx.logv(f"'pgo' is enabled for {config_name}")
                 self.pgo_instrumentation = True
+            elif pgo_mode == "pgo-layouting":
+                self.pgo_instrumentation = True
+                self.pgo_layouting = True
             elif pgo_mode == "pgo-sampler":
                 self.pgo_instrumentation = True
                 self.pgo_sampler_only = True
@@ -1145,6 +1145,9 @@ class NativeImageVM(StageAwareGraalVm):
                 self.pgo_perf_invoke_profile_collection_strategy = PerfInvokeProfileCollectionStrategy.MULTIPLE_CALLEES
             else:
                 mx.abort(f"Unknown pgo mode: {pgo_mode}")
+
+        if self.product_profile and self.pgo_instrumentation:
+            mx.abort("'product' and benchmark-collected PGO modes cannot be combined.")
 
         if matching.group("jdk_profiles") is not None:
             config = matching.group("jdk_profiles")[:-1]
@@ -1403,7 +1406,10 @@ class NativeImageVM(StageAwareGraalVm):
         return dims
 
     def _get_pgo_dimension(self) -> str:
-        if self.pgo_instrumentation:
+        if self.product_profile and self.graalvm_edition == "ee":
+            # Product EE configs report as PGO because language build code supplies the product profile.
+            return "pgo"
+        elif self.pgo_instrumentation:
             if self.pgo_sampler_only:
                 return "sampler-only"
             else:
@@ -1696,6 +1702,8 @@ class NativeImageVM(StageAwareGraalVm):
             instrument_args += svm_experimental_options([f'-H:PGOPerfSourceMappings={self.config.source_mappings_path}'])
         else:
             instrument_args += ['--pgo-sampling' if self.pgo_sampler_only else '--pgo-instrument', f"-R:ProfilesDumpFile={self.config.profile_path}"]
+            if self.pgo_layouting:
+                instrument_args += svm_experimental_options(['-H:+ProfileMethodTimestamps', '-H:-IncludeCallingContextInMethodTimestampProfiles', '-H:+ProfileObjectAccesses', '-H:+PrintAccessedCAHPsStats'])
 
         if self.jdk_profiles_collect:
             instrument_args += svm_experimental_options(['-H:+AOTPriorityInline', '-H:-SamplingCollect',
@@ -1804,10 +1812,6 @@ class NativeImageVM(StageAwareGraalVm):
         current_stage = self.stages_info.current_stage
         layer_aware_build_args = []
 
-        if self.pie and (not self.layered or not current_stage.layer_info.is_shared_library):
-            # This option should not be applied to base layers
-            layer_aware_build_args += ["-H:NativeLinkerOption=-pie"]
-
         if self.layered and not current_stage.layer_info.is_shared_library:
             # Set LinkerRPath to point to the directories containing the shared objects of underlying layers
             shared_library_stages = [stage for stage in self.stages_info.complete_stage_list
@@ -1864,6 +1868,8 @@ class NativeImageVM(StageAwareGraalVm):
             jdk_profiles_args = []
         if self.pgo_exclude_conditional:
             pgo_args += svm_experimental_options(['-H:PGOExcludeProfiles=CONDITIONAL'])
+        if self.pgo_layouting:
+            pgo_args += svm_experimental_options(['-H:CodeSectionLayoutOptimization=OrderByFirstCall', '-H:ImageHeapObjectSortStrategy=ClusterAccessed', '-H:+PGOIgnoreVersionCheck', '-H:+PrintImageHeapSortDiagnostics'])
 
         if self.profile_inference_feature_extraction:
             ml_args = svm_experimental_options(['-H:+MLGraphFeaturesExtraction', '-H:+ProfileInferenceDumpFeatures'])
@@ -2187,15 +2193,14 @@ class PolyBenchPyodideGuestVm(PolyBenchEmscriptenGuestVm):
 class GraalHostPolyBenchStagingVm(PolyBenchStagingVm):
     """
     Stages a PolyBench benchmark and configures a GraalHost boot script that runs the benchmark.
-    * In the image stage: First stages the benchmark to the target language and then runs
-                          the graalos-run-config tool to create a boot script that executes the staged
+    * In the image stage: First stages the benchmark to the target language and then generates
+                          a GraalHost endpoint configuration and boot script that execute the staged
                           benchmark with GraalHost.
     * In the run stage:   Executes the GraalHost boot script.
 
     Relies on the following environment variables:
     * GRAALOS_BUILD pointing to the GraalOS build directdory.
     * ROOTFS pointing to the GraalOS language launcher (e.g. CPython) file-system root.
-      This directory should contain a venv/bin subdirectory containing the graalos-run-config tool.
     """
     GRAALHOST_FSMAPPING_TEMPLATE: Template = Template("""
     {
@@ -2204,10 +2209,14 @@ class GraalHostPolyBenchStagingVm(PolyBenchStagingVm):
       ]
     }
     """)
-
-    def __init__(self, name, config_name, language, launcher, ext, extra_java_args=None, extra_launcher_args=None):
-        super().__init__(name, config_name, language, launcher, ext, extra_java_args, extra_launcher_args)
-        self.run_script_file_name: str | None = None
+    GRAALHOST_TOOLCHAIN_FSMAPPING_TEMPLATE: Template = Template("""
+    {
+      "concrete": "${concrete}",
+      "virt": "${virt}",
+      "verif": true
+    }
+    """)
+    GRAALHOST_TOOLCHAIN_LIBRARIES: tuple[str, ...] = ("libc++.so.1", "libc++abi.so.1", "libunwind.so.1")
 
     def _prepare_for_running(self, args, out, err, cwd, nonZeroIsFatal):
         super()._prepare_for_running(args, out, err, cwd, nonZeroIsFatal)
@@ -2219,25 +2228,9 @@ class GraalHostPolyBenchStagingVm(PolyBenchStagingVm):
     def run_stage_image(self):
         # Start with resolving prerequisite environment variables
         build_dir = self._resolve_graalos_build_dir()
-        graalos_run_config = self._resolve_graalos_configuration_script()
         # Stage benchmark
         super().run_stage_image()
-        # Prepare command that will configure graalhost to run staged benchmark
-        bench_dir_mapping_config = self._create_staged_benchmark_fs_mapping_file()
-        graalos_run_config_cmd = [str(graalos_run_config), "--graalos-build-path", str(build_dir)]
-        graalos_run_config_cmd += ["--extra-config-path", str(bench_dir_mapping_config)]
-        graalos_run_config_cmd += [self.launcher, str(self.staged_program_file_path)]
-        # Run the graalhost configuration and handle output
-        out = mx.OutputCapture()
-        err = mx.OutputCapture()
-        rc = mx.run(graalos_run_config_cmd, out=out, err=err, nonZeroIsFatal=False)
-        mx.log(out.data)
-        if rc != 0:
-            mx.log(err.data)
-            raise ChildProcessError(f"GraalHost configuration command finished unsuccessfully with return code {rc}!")
-        m = re.search(r"^run script: (.+)$", out.data)
-        if m:
-            self.run_script_file_name = m.group(1)
+        self._create_staged_benchmark_run_config_file(build_dir)
 
     @staticmethod
     def _resolve_graalos_build_dir() -> Path:
@@ -2250,53 +2243,139 @@ class GraalHostPolyBenchStagingVm(PolyBenchStagingVm):
             raise ValueError(f"Environment variable 'GRAALOS_BUILD' points to '{build_dir}' which is not a directory!")
         return build_dir
 
-    def _resolve_graalos_configuration_script(self) -> Path:
-        """
-        Verifies that the ROOTFS env var is set and points to a directory containing a valid 'venv' subdirectory.
-        Returns the path to the virtual environment's 'graalos-run-config' tool.
-        """
+    @staticmethod
+    def _resolve_rootfs() -> Path:
+        """Verifies that the ROOTFS env var is set and points to a directory. Returns the directory path."""
         rootfs_env_var = os.getenv("ROOTFS")
         if rootfs_env_var is None:
             raise ValueError("Environment variable 'ROOTFS' is unset! It must point to the CPython file-system root!")
         rootfs = Path(rootfs_env_var).resolve()
         if not rootfs.is_dir():
             raise ValueError(f"Environment variable 'ROOTFS' points to '{rootfs}' which is not a directory!")
-        venv_bin = rootfs / "venv" / "bin"
-        if not venv_bin.is_dir():
-            raise ValueError(f"Environment variable 'ROOTFS' points to '{rootfs}' which does not contain a 'venv/bin' subdirectory!")
-        graalos_run_config = venv_bin / "graalos-run-config"
-        if not graalos_run_config.is_file():
-            raise ValueError(f"Environment variable 'ROOTFS' points to '{rootfs}' which does not contain a 'graalos-run-config' file in its 'venv/bin' subdirectory!")
-        return graalos_run_config
+        return rootfs
+
+    @staticmethod
+    def _require_executable(path: Path, description: str) -> Path:
+        if not path.is_file():
+            raise ValueError(f"{description} '{path}' does not exist!")
+        if not os.access(path, os.X_OK):
+            raise ValueError(f"{description} '{path}' is not executable!")
+        return path
+
+    @staticmethod
+    def _resolve_graalhost_binary(build_dir: Path) -> Path:
+        """Resolve the GraalHost binary from the GraalOS build directory."""
+        return GraalHostPolyBenchStagingVm._require_executable(build_dir / "graalhost" / "graalhost", "GraalHost binary")
+
+    @staticmethod
+    def _resolve_graalos_config_util() -> Path:
+        """Resolve the graalos-config-util CLI from PATH."""
+        config_util = shutil.which("graalos-config-util")
+        if config_util is None:
+            raise ValueError("Could not resolve 'graalos-config-util' from PATH!")
+        return GraalHostPolyBenchStagingVm._require_executable(Path(config_util).resolve(), "graalos-config-util")
+
+    def _get_staged_benchmark_run_config_path(self) -> Path:
+        return self.output_dir / "staged_benchmark_run_config.json"
+
+    @staticmethod
+    def _merge_graalhost_config_values(base: object, extra: object) -> object:
+        if isinstance(base, dict) and isinstance(extra, dict):
+            merged = dict(base)
+            for key, value in extra.items():
+                if key == "fsmappings" and isinstance(merged.get(key), list) and isinstance(value, list):
+                    merged[key] = [*merged[key], *value]
+                elif key in merged:
+                    merged[key] = GraalHostPolyBenchStagingVm._merge_graalhost_config_values(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
+        return extra
+
+    @staticmethod
+    def _resolve_graalhost_toolchain_lib_dir(vm: "GraalHostPolyBenchStagingVm", args: list[str]) -> Path | None:
+        toolchain_lib_dir = vm.bmSuite.polybench_bench_suite_args(args).graalhost_toolchain_lib_dir
+        if toolchain_lib_dir is None:
+            return None
+        toolchain_lib_path = Path(toolchain_lib_dir).resolve()
+        if not toolchain_lib_path.is_dir():
+            raise ValueError(f"GraalHost toolchain library directory '{toolchain_lib_path}' is not a directory!")
+        return toolchain_lib_path
+
+    @staticmethod
+    def _graalhost_toolchain_fs_mapping(toolchain_lib_dir: Path, library_name: str) -> dict[str, object]:
+        return json.loads(
+            GraalHostPolyBenchStagingVm.GRAALHOST_TOOLCHAIN_FSMAPPING_TEMPLATE.substitute(
+                concrete=str((toolchain_lib_dir / library_name).resolve()),
+                virt=f"/lib/{library_name}",
+            )
+        )
 
     def _create_staged_benchmark_fs_mapping_file(self) -> Path:
         """
         Create a graalhost configuration file that contains a single fs-mapping entry,
         exposing the staged benchmark directory to the isolate.
         """
-        file_name = "staged_benchmark_fs_mapping.json"
-        file_path = self.output_dir / file_name
+        # The staged PolyBench artifact is produced on the host side, so GraalHost needs an explicit
+        # fs-mapping for this output dir or the benchmark file is not visible inside the isolate.
+        file_path = self.output_dir / "staged_benchmark_fs_mapping.json"
         with open(file_path, "w", encoding='utf-8') as f:
-            fs_mapping = self.GRAALHOST_FSMAPPING_TEMPLATE.substitute(path=self.output_dir)
-            f.write(fs_mapping)
+            fs_mapping_config = json.loads(self.GRAALHOST_FSMAPPING_TEMPLATE.substitute(path=self.output_dir))
+            toolchain_lib_dir = self._resolve_graalhost_toolchain_lib_dir(self, self.staging_args)
+            if toolchain_lib_dir is not None:
+                extra_config = {
+                    'fsmappings': [self._graalhost_toolchain_fs_mapping(toolchain_lib_dir, library_name)
+                                   for library_name in self.GRAALHOST_TOOLCHAIN_LIBRARIES],
+                }
+                fs_mapping_config = self._merge_graalhost_config_values(fs_mapping_config, extra_config)
+            json.dump(fs_mapping_config, f)
         return file_path
 
-    def _get_run_script_file_name(self):
-        """Returns the name of the run script - the script that starts graalhost and runs the staged benchmark on it."""
-        if self.run_script_file_name is not None:
-            return self.run_script_file_name
-        # Fallback value to enable running just the 'run' stage of the benchmark
-        launcher_file_name = Path(self.launcher).name
-        return f"run_config_{launcher_file_name}.sh"
+    def _create_staged_benchmark_run_config_file(self, build_dir: Path) -> Path:
+        """Create the GraalHost endpoint/run configuration JSON for the staged benchmark directory."""
+        rootfs = self._resolve_rootfs()
+        file_path = self._get_staged_benchmark_run_config_path()
+        binsweep = self._require_executable(build_dir / "binsweep" / "home" / "bin" / "binsweep", "binsweep")
+
+        extra_config_path = self._create_staged_benchmark_fs_mapping_file()
+        config_util = self._resolve_graalos_config_util()
+        cmd = [
+            str(config_util),
+            "--host-dir", str(rootfs),
+            "--binsweep", str(binsweep),
+            "--endpoint-config", str(file_path),
+            "--extra-config-path", str(extra_config_path),
+        ]
+        out = mx.OutputCapture()
+        err = mx.OutputCapture()
+        rc = mx.run(cmd, out=out, err=err, nonZeroIsFatal=False)
+        mx.log(out.data)
+        if rc != 0:
+            mx.log(err.data)
+            raise ChildProcessError(f"graalos-config-util finished unsuccessfully with return code {rc}!")
+        return file_path
 
     def run_stage_run(self):
+        rootfs = self._resolve_rootfs()
+        build_dir = self._resolve_graalos_build_dir()
+        graalhost = self._resolve_graalhost_binary(build_dir)
+        run_config_path = self._get_staged_benchmark_run_config_path()
+        if not run_config_path.is_file():
+            raise ValueError(f"Expected staged GraalHost run config at '{run_config_path}' but it does not exist!")
+        ephemeral_dir = tempfile.mkdtemp(prefix="graalhost_staged_benchmark_", dir=rootfs / "tmp")
         with self.get_stage_runner() as s:
-            # Unfortunately, the 'graalos-run-config' tool always outputs the run script into the working dir and
-            # does not allow modifying the output path.
-            # Both the run script and the accompanying graalhost configuration file end up in the current working
-            # directory.
-            run_script_file_path = str(Path.cwd() / self._get_run_script_file_name())
-            s.execute_command(self, [run_script_file_path])
+            cmd = [
+                str(graalhost),
+                f"--ephemeral_dir={ephemeral_dir}",
+                "--enable_resolving_env_refs",
+                "--visorcalloutput=@none",
+                "--log_to=file",
+                f"--run_config=@{run_config_path}",
+                "--run",
+                self.launcher,
+                str(self.staged_program_file_path),
+            ]
+            s.execute_command(self, cmd)
 
 
 def register_graalvm_vms():
@@ -2314,6 +2393,12 @@ def register_graalvm_vms():
             config_names = []
             for main_config in ['default', 'gate', 'llvm', 'native-architecture', 'crema', 'future-defaults-all', 'preserve-all', 'preserve-classpath'] + analysis_context_sensitivity + (['g1gc', 'pgo', 'g1gc-pgo'] if config_suffix != '-ce' else []):
                 config_names.append(f'{main_config}{config_suffix}')
+
+            # Product profile configs are used to benchmark language launchers similar to how they are released.
+            if config_suffix == '-ce':
+                config_names.append('product-ce')
+            elif config_suffix == '-ee':
+                config_names += ['product-ee', 'g1gc-product-ee']
 
             for optimization_level in optimization_levels:
                 config_names.append(f'{optimization_level}{config_suffix}')
@@ -3855,21 +3940,26 @@ class BaristaBenchmarkSuite(mx_benchmark.CustomHarnessBenchmarkSuite):
                     return m
             return None
 
-        def _updateCommandOption(self, cmd, option_name, option_short_name, new_value):
-            """Updates command option value, concatenates the new value with the existing one, if it is present.
+        def _updateCommandOption(self, cmd, option_name, option_short_name, new_value, append=False):
+            """Updates a command option value in place.
 
             :param list[str] cmd: Command to be updated.
             :param str option_name: Name of the option to be updated.
-            :param str option_short_name: Short name of the option to be updated.
-            :param str new_value: New value for the option, to be concatenated to the existing value, if it is present.
-            :return: Updated command.
-            :rtype: list[str]
+            :param str option_short_name: Short name of the option to be updated, if there is one.
+            :param str new_value: New value for the option, to be concatenated with the existing value if it is present.
+            :param bool append: If true, append the new value after the existing one instead of prepending it.
             """
-            option_pattern = f"^(?:{option_name}=|{option_short_name}=)(.+)$"
+            option_prefixes = [re.escape(option_name)]
+            if option_short_name:
+                option_prefixes.append(re.escape(option_short_name))
+            option_pattern = f"^(?:{'|'.join(prefix + '=' for prefix in option_prefixes)})(.+)$"
             existing_option_match = self._regexFindInCommand(cmd, option_pattern)
             if existing_option_match:
                 cmd.remove(existing_option_match.group(0))
-                new_value = f"{new_value} {existing_option_match.group(1)}"
+                if append:
+                    new_value = f"{existing_option_match.group(1)} {new_value}"
+                else:
+                    new_value = f"{new_value} {existing_option_match.group(1)}"
             cmd.append(f"{option_name}={new_value}")
 
         def _energyTrackerExtraOptions(self, suite: BaristaBenchmarkSuite):
@@ -3894,6 +3984,14 @@ class BaristaBenchmarkSuite(mx_benchmark.CustomHarnessBenchmarkSuite):
             extra_options += ["--warmup-iteration-count", "0"]
             extra_options += ["--throughput-iteration-count", "0"]
             return extra_options
+
+        def _pagefaultsTrackerExtraOptions(self, suite: BaristaBenchmarkSuite):
+            """Returns extra options necessary for correct benchmark results when using the 'pagefaults' tracker."""
+            if not isinstance(suite._tracker, mx_benchmark.PagefaultsTracker):
+                return []
+
+            # Give the pagefaults tracker time to initialize before locating the app process.
+            return ["--cmd-app-prefix-init-sleep", "3"]
 
         def produceHarnessCommand(self, cmd, suite):
             """Maps a JVM command into a command tailored for the Barista harness.
@@ -4772,13 +4870,24 @@ class NativeImageBenchmarkMixin(StageAwareBenchmarkMixin):
 
     def is_native_mode(self, bm_suite_args: list[str]):
         """Checks whether the given arguments request a Native Image benchmark"""
-        jvm_flag = self.jvm(bm_suite_args)
-        if not jvm_flag:
-            # In case the --jvm argument was not given explicitly, let the registry load the appropriate vm and extract
-            # the name from there.
-            # This is much more expensive, so it is only used as a fallback
-            jvm_flag = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args).name()
-        return "native-image" in jvm_flag
+        vm_args = self.vmAndRunArgs(bm_suite_args)[0]
+        if "--guest" not in vm_args:
+            # The common non-guest path can avoid registry resolution unless --jvm was omitted.
+            jvm_flag = self.jvm(bm_suite_args)
+            if not jvm_flag:
+                # In case the --jvm argument was not given explicitly, let the registry load the appropriate vm and extract
+                # the name from there.
+                # This is much more expensive, so it is only used as a fallback
+                jvm_flag = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args).name()
+            return "native-image" in jvm_flag
+
+        # Guest syntax selects the guest VM as the effective VM. For native PolyBench dispatch we still need to look
+        # through it and treat a native-image host as native mode.
+        vm = self.get_vm_registry().get_vm_from_suite_args(bm_suite_args, quiet=True)
+        if isinstance(vm, mx_benchmark.GuestVm):
+            host_vm = vm.host_vm()
+            return host_vm is not None and "native-image" in host_vm.name()
+        return "native-image" in vm.name()
 
     def apply_command_mapper_hooks(self, cmd, vm):
         return mx.apply_command_mapper_hooks(cmd, vm.command_mapper_hooks)

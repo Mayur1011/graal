@@ -31,7 +31,6 @@ import java.nio.file.Path;
 
 import jdk.jfr.Recording;
 import org.junit.Test;
-import com.oracle.svm.core.jfr.HasJfrSupport;
 import com.oracle.svm.core.jfr.JfrSymbolRepository;
 import com.oracle.svm.core.jfr.SubstrateJVM;
 import com.oracle.svm.shared.Uninterruptible;
@@ -43,14 +42,10 @@ import static org.junit.Assert.assertTrue;
 public class TestJfrSymbolRepository extends JfrRecordingTest {
     private static final String EMBEDDED_NUL_SYMBOL = "modified-symbol\0encoding";
     private static final String EMOJI_SYMBOL = "modified-symbol \uD83D\uDE80";
+    private static final String MALFORMED_SURROGATE_SYMBOL = "modified-symbol \uD83D x";
 
     @Test
     public void test() throws Throwable {
-        if (!HasJfrSupport.get()) {
-            /* Prevent that the code below is reachable on platforms that don't support JFR. */
-            return;
-        }
-
         // Ensure JFR is created in case this is the first test to run
         String[] events = new String[]{};
         Path path = createTempJfrFile();
@@ -67,6 +62,7 @@ public class TestJfrSymbolRepository extends JfrRecordingTest {
 
         assertSymbolUsesUTF8Encoding(path, EMBEDDED_NUL_SYMBOL);
         assertSymbolUsesUTF8Encoding(path, EMOJI_SYMBOL);
+        assertSymbolUsesUTF8Encoding(path, MALFORMED_SURROGATE_SYMBOL);
     }
 
     @Uninterruptible(reason = "Needed for JfrSymbolRepository.getSymbolId().")
@@ -84,6 +80,8 @@ public class TestJfrSymbolRepository extends JfrRecordingTest {
         long embeddedNul2 = getSymbolId(repo, EMBEDDED_NUL_SYMBOL);
         long emoji1 = getSymbolId(repo, EMOJI_SYMBOL);
         long emoji2 = getSymbolId(repo, EMOJI_SYMBOL);
+        long malformedSurrogate1 = getSymbolId(repo, MALFORMED_SURROGATE_SYMBOL);
+        long malformedSurrogate2 = getSymbolId(repo, MALFORMED_SURROGATE_SYMBOL);
         long nullId = getSymbolId(repo, null);
 
         assertNotEquals(0, id1);
@@ -101,6 +99,12 @@ public class TestJfrSymbolRepository extends JfrRecordingTest {
         assertNotEquals(id1, emoji1);
         assertNotEquals(id2, emoji1);
         assertNotEquals(embeddedNul1, emoji1);
+        assertNotEquals(0, malformedSurrogate1);
+        assertEquals(malformedSurrogate1, malformedSurrogate2);
+        assertNotEquals(id1, malformedSurrogate1);
+        assertNotEquals(id2, malformedSurrogate1);
+        assertNotEquals(embeddedNul1, malformedSurrogate1);
+        assertNotEquals(emoji1, malformedSurrogate1);
         assertEquals(0, nullId);
     }
 

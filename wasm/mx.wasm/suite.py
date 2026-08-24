@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2018, 2026, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # The Universal Permissive License (UPL), Version 1.0
@@ -40,11 +40,11 @@
 #
 
 suite = {
-  "mxversion": "7.65.0",
+  "mxversion": "7.81.0",
   "name" : "wasm",
   "groupId" : "org.graalvm.wasm",
-  "version" : "25.1.0",
-  "release" : False,
+  "version_from" : "truffle",
+  "release_from" : "truffle",
   "versionConflictResolution" : "latest",
   "url" : "http://graalvm.org/webassembly",
   "developer" : {
@@ -153,6 +153,9 @@ suite = {
         "truffle:TRUFFLE_TCK",
         "mx:JUNIT",
       ],
+      "requires" : [
+        "java.logging",
+      ],
       "checkstyle" : "org.graalvm.wasm",
       "javaCompliance" : "17+",
       "annotationProcessors" : ["truffle:TRUFFLE_DSL_PROCESSOR"],
@@ -253,6 +256,11 @@ suite = {
 
     "graalwasm_thin_launcher": {
       "class": "ThinLauncherProject",
+      "multitarget": [
+        {"os": ["linux"], "libc": ["glibc", "default"], "compiler": ["llvm-toolchain", "host", "*"]},
+        {"os": ["linux"], "libc": ["musl"], "variant": ["swcfi"]},
+        {"os": ["windows", "darwin"], "libc": ["default"]},
+      ],
       "mainClass": "org.graalvm.wasm.launcher.WasmLauncher",
       "jar_distributions": ["wasm:WASM_LAUNCHER"],
       "relative_home_paths": {
@@ -528,7 +536,7 @@ suite = {
           "extracted-dependency:WASM_GRAALVM_SUPPORT",
           "dependency:graalwasm_licenses/*",
         ],
-        "bin/<exe:wasm>": "dependency:graalwasm_thin_launcher",
+        "bin/<exe:wasm>": "dependency:graalwasm_thin_launcher/<os>-<arch>/<multitarget_libc_selection>/<exe:graalwasm_thin_launcher>",
         "release": "dependency:sdk:STANDALONE_JAVA_HOME/release",
       },
     },
@@ -591,6 +599,7 @@ suite = {
 
     "GRAALWASM_JVM_STANDALONE_RELEASE_ARCHIVE": {
         "class": "DeliverableStandaloneArchive",
+        "deploy": False,
         "platformDependent": True,
         "standalone_dist": "GRAALWASM_JVM_STANDALONE",
         "language_id": "wasm",

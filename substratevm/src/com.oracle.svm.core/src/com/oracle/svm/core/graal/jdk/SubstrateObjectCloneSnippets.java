@@ -47,12 +47,13 @@ import com.oracle.svm.core.hub.DynamicHubSupport;
 import com.oracle.svm.core.hub.HubType;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.meta.SharedType;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.snippets.SnippetRuntime;
 import com.oracle.svm.core.snippets.SnippetRuntime.SubstrateForeignCallDescriptor;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
 import com.oracle.svm.shared.util.BasedOnJDKFile;
-import com.oracle.svm.core.util.UnsignedUtils;
+import com.oracle.svm.shared.util.UnsignedUtils;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.replacements.Snippet;
@@ -92,7 +93,7 @@ public final class SubstrateObjectCloneSnippets extends SubstrateTemplates imple
     }
 
     @SubstrateForeignCallTarget(stubCallingConvention = false)
-    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+13/src/hotspot/share/prims/jvm.cpp#L645-L694")
+    @BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25+13/src/hotspot/share/prims/jvm.cpp#L645-L694")
     private static Object doClone(Object original) throws CloneNotSupportedException {
         if (original == null) {
             throw new NullPointerException();
@@ -100,7 +101,7 @@ public final class SubstrateObjectCloneSnippets extends SubstrateTemplates imple
             throw new CloneNotSupportedException("Object is no instance of Cloneable: " + original.getClass().getName());
         }
 
-        DynamicHub hub = KnownIntrinsics.readHub(original);
+        DynamicHub hub = DynamicHubIntrinsics.readHub(original);
         if (hub.getHubType() == HubType.REFERENCE_INSTANCE) {
             throw new CloneNotSupportedException("Subclasses of java.lang.ref.Reference are not cloneable: " + hub.getName());
         }

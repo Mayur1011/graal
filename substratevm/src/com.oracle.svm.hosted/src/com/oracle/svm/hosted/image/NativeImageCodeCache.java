@@ -41,10 +41,10 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -68,8 +68,9 @@ import com.oracle.graal.pointsto.reports.ReportUtils;
 import com.oracle.graal.pointsto.util.CompletionExecutor;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.svm.common.meta.MethodVariant;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoEncoder;
@@ -79,11 +80,13 @@ import com.oracle.svm.core.code.FrameInfoDecoder;
 import com.oracle.svm.core.code.FrameInfoDecoder.ConstantAccess;
 import com.oracle.svm.core.code.FrameInfoEncoder;
 import com.oracle.svm.core.code.FrameInfoQueryResult;
+import com.oracle.svm.core.code.FrameSourceInfo;
 import com.oracle.svm.core.code.ImageCodeInfo.HostedImageCodeInfo;
 import com.oracle.svm.core.configure.ConditionalRuntimeValue;
 import com.oracle.svm.core.deopt.DeoptEntryInfopoint;
 import com.oracle.svm.core.graal.code.SubstrateDataBuilder;
 import com.oracle.svm.core.graal.nodes.TLABObjectHeaderConstant;
+import com.oracle.svm.core.heap.Heap;
 import com.oracle.svm.core.interpreter.InterpreterSupport;
 import com.oracle.svm.core.meta.CompressedNullConstant;
 import com.oracle.svm.core.meta.MethodPointer;
@@ -113,6 +116,7 @@ import com.oracle.svm.shared.util.VMError;
 import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
 import jdk.graal.compiler.code.CompilationResult;
 import jdk.graal.compiler.code.DataSection;
+import jdk.graal.compiler.core.common.NumUtil;
 import jdk.graal.compiler.core.common.type.CompressibleConstant;
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.options.Option;
@@ -122,6 +126,7 @@ import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.code.site.Call;
 import jdk.vm.ci.code.site.ConstantReference;
 import jdk.vm.ci.code.site.DataPatch;
+import jdk.vm.ci.code.site.DataSectionReference;
 import jdk.vm.ci.code.site.Infopoint;
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.JavaConstant;
@@ -143,7 +148,7 @@ public abstract class NativeImageCodeCache {
     protected final NativeImageHeap imageHeap;
 
     /** The entirety of compilations in this code cache. */
-    private Map<HostedMethod, CompilationResult> compilations;
+    protected Map<HostedMethod, CompilationResult> compilationsMap;
 
     private List<Pair<HostedMethod, CompilationResult>> orderedCompilations;
 
@@ -170,27 +175,44 @@ public abstract class NativeImageCodeCache {
     }
 
     public void purge() {
-        assert compilations != null && orderedCompilations != null && deterministicCompilationUnitOrderForConstantLayout != null : "Code cache already purged";
-        compilations = null;
+        assert compilationsMap != null && orderedCompilations != null && deterministicCompilationUnitOrderForConstantLayout != null : "Code cache already purged";
+        compilationsMap = null;
         orderedCompilations = null;
         deterministicCompilationUnitOrderForConstantLayout = null;
     }
 
     @SuppressWarnings("this-escape")//
-    public NativeImageCodeCache(Map<HostedMethod, CompilationResult> compilations, NativeImageHeap imageHeap, Platform targetPlatform) {
-        this.compilations = compilations;
+    public NativeImageCodeCache(Map<HostedMethod, CompilationResult> compilationsMap, NativeImageHeap imageHeap, Platform targetPlatform) {
+        this.compilationsMap = compilationsMap;
         this.imageHeap = imageHeap;
         this.dataSection = new DataSection();
         this.targetPlatform = targetPlatform;
         this.orderedCompilations = layoutCompilations();
-        this.deterministicCompilationUnitOrderForConstantLayout = doLayoutWithLayouter(compilations, new SortByMethodNameCodeSectionLayouter());
+        this.deterministicCompilationUnitOrderForConstantLayout = doLayoutCompilations(compilationsMap, new SortByMethodNameCodeSectionLayouter());
     }
 
     public abstract int getCodeCacheSize();
 
+    /**
+     * Some code cache implementations emit their method code into a separate linker input. In that
+     * case, the native image object file still needs a text section while it is being built, but
+     * that section must not define the final code section boundary symbols.
+     */
+    public boolean definesTextSectionBoundarySymbols() {
+        return true;
+    }
+
+    public NativeImageHeap getImageHeap() {
+        return imageHeap;
+    }
+
     public int getCodeAreaSize() {
         assert codeAreaSize >= 0;
         return codeAreaSize;
+    }
+
+    public int getCodeAreaCompilationCount() {
+        return getOrderedCompilations().size();
     }
 
     public void setCodeAreaSize(int size) {
@@ -207,43 +229,55 @@ public abstract class NativeImageCodeCache {
         return orderedCompilations.getLast();
     }
 
-    private List<Pair<HostedMethod, CompilationResult>> layoutCompilations() {
+    protected List<Pair<HostedMethod, CompilationResult>> layoutCompilations() {
+        return doLayoutCompilations(compilationsMap, ImageSingletons.lookup(CodeSectionLayouter.class), getInvalidCodeAddressHandler(imageHeap.hMetaAccess));
+    }
 
-        /* We force this method to be at code offset 0 to make that offset and address invalid. */
-        HostedMethod invalidMethod = getInvalidCodeAddressHandler(imageHeap.hMetaAccess);
+    /**
+     * Returns the ordered list of compilations from {@code compilationMap} using {@code layouter} as the ordering strategy.
+     * If {@code invalidMethod} is not null it will be at index 0 in the returned ordered list.
+     */
+    protected static List<Pair<HostedMethod, CompilationResult>> doLayoutCompilations(Map<HostedMethod, CompilationResult> compilationMap, CodeSectionLayouter layouter, HostedMethod invalidMethod) {
+        List<Pair<HostedMethod, CompilationResult>> orderedCompilations = new ArrayList<>(compilationMap.size());
 
-        var ordCompilations = new ArrayList<Pair<HostedMethod, CompilationResult>>();
         if (invalidMethod != null) {
-            ordCompilations.add(Pair.create(invalidMethod, compilations.get(invalidMethod)));
+            /*
+             * We force this method to be at code offset 0 to make that offset and address invalid.
+             */
+            orderedCompilations.add(Pair.create(invalidMethod, compilationMap.get(invalidMethod)));
         }
 
-        var orderedMethods = doLayout(compilations, ImageSingletons.lookup(CodeSectionLayouter.class));
-        for (Pair<HostedMethod, CompilationResult> pair : orderedMethods) {
-            HostedMethod method = pair.getLeft();
-            if (!Objects.equals(invalidMethod, method)) {
-                ordCompilations.add(pair);
+        for (HostedMethod method : layouter.layout(compilationMap)) {
+            if (!method.equals(invalidMethod)) {
+                orderedCompilations.add(Pair.create(method, compilationMap.get(method)));
             }
         }
-        return ordCompilations;
+
+        assert orderedCompilations.size() == compilationMap.size();
+        return orderedCompilations;
     }
 
-    protected List<Pair<HostedMethod, CompilationResult>> doLayout(Map<HostedMethod, CompilationResult> compilationMap, CodeSectionLayouter layouter) {
-        return doLayoutWithLayouter(compilationMap, layouter);
+    protected static List<Pair<HostedMethod, CompilationResult>> doLayoutCompilations(Map<HostedMethod, CompilationResult> compilationMap, CodeSectionLayouter layouter) {
+        return doLayoutCompilations(compilationMap, layouter, null);
     }
 
-    private static List<Pair<HostedMethod, CompilationResult>> doLayoutWithLayouter(Map<HostedMethod, CompilationResult> compilationMap, CodeSectionLayouter layouter) {
-        return layouter.layout(compilationMap).stream()
-                        .map(hm -> Pair.create(hm, compilationMap.get(hm)))
-                        .collect(Collectors.toCollection(() -> new ArrayList<>(compilationMap.size())));
-    }
-
-    private static HostedMethod getInvalidCodeAddressHandler(HostedMetaAccess metaAccess) {
+    protected static HostedMethod getInvalidCodeAddressHandler(HostedMetaAccess metaAccess) {
         Method invalidCodeMethod = MethodPointerInvalidHandlerFeature.getInvalidCodeAddressHandler();
         return (invalidCodeMethod == null) ? null : metaAccess.lookupJavaMethod(invalidCodeMethod);
     }
 
     public List<Pair<HostedMethod, CompilationResult>> getOrderedCompilations() {
+        assert orderedCompilations != null;
         return orderedCompilations;
+    }
+
+    /**
+     * Builds the image-wide data section's emitted-item view for resolving
+     * {@link DataSectionReference data-section references} after merging all per-compilation data
+     * sections.
+     */
+    public DataSection.EmittedItems buildDataSectionEmittedItems() {
+        return dataSection.buildEmittedItems(HostedOptionValues.singleton().get(), 1, SubstrateTarget.getArchitecture().getByteOrder());
     }
 
     /**
@@ -256,7 +290,7 @@ public abstract class NativeImageCodeCache {
     public abstract int codeSizeFor(HostedMethod method);
 
     public CompilationResult compilationResultFor(HostedMethod method) {
-        return compilations.get(method);
+        return compilationsMap.get(method);
     }
 
     public abstract void layoutMethods(DebugContext debug, BigBang bb);
@@ -434,19 +468,31 @@ public abstract class NativeImageCodeCache {
             runtimeMetadataEncoder.addClassLookupError(type, error);
         });
 
-        reflectionSupport.getFieldLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredFieldLookupErrors = reflectionSupport.getDeclaredFieldLookupErrors();
+        Map<Class<?>, Throwable> publicFieldLookupErrors = reflectionSupport.getPublicFieldLookupErrors();
+        Set<Class<?>> fieldLookupErrorClasses = new HashSet<>(declaredFieldLookupErrors.keySet());
+        fieldLookupErrorClasses.addAll(publicFieldLookupErrors.keySet());
+        fieldLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addFieldLookupError(type, error);
+            runtimeMetadataEncoder.addFieldLookupErrors(type, declaredFieldLookupErrors.get(clazz), publicFieldLookupErrors.get(clazz));
         });
 
-        reflectionSupport.getMethodLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredMethodLookupErrors = reflectionSupport.getDeclaredMethodLookupErrors();
+        Map<Class<?>, Throwable> publicMethodLookupErrors = reflectionSupport.getPublicMethodLookupErrors();
+        Set<Class<?>> methodLookupErrorClasses = new HashSet<>(declaredMethodLookupErrors.keySet());
+        methodLookupErrorClasses.addAll(publicMethodLookupErrors.keySet());
+        methodLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addMethodLookupError(type, error);
+            runtimeMetadataEncoder.addMethodLookupErrors(type, declaredMethodLookupErrors.get(clazz), publicMethodLookupErrors.get(clazz));
         });
 
-        reflectionSupport.getConstructorLookupErrors().forEach((clazz, error) -> {
+        Map<Class<?>, Throwable> declaredConstructorLookupErrors = reflectionSupport.getDeclaredConstructorLookupErrors();
+        Map<Class<?>, Throwable> publicConstructorLookupErrors = reflectionSupport.getPublicConstructorLookupErrors();
+        Set<Class<?>> constructorLookupErrorClasses = new HashSet<>(declaredConstructorLookupErrors.keySet());
+        constructorLookupErrorClasses.addAll(publicConstructorLookupErrors.keySet());
+        constructorLookupErrorClasses.forEach(clazz -> {
             HostedType type = hMetaAccess.lookupJavaType(clazz);
-            runtimeMetadataEncoder.addConstructorLookupError(type, error);
+            runtimeMetadataEncoder.addConstructorLookupErrors(type, declaredConstructorLookupErrors.get(clazz), publicConstructorLookupErrors.get(clazz));
         });
 
         reflectionSupport.getRecordComponentLookupErrors().forEach((clazz, error) -> {
@@ -766,7 +812,7 @@ public abstract class NativeImageCodeCache {
 
     /*
      * Constants and code objects are all assigned offsets in the heap. Reference constants can
-     * refer to other heap objects. TODO: is it true that that all code-->data references go via a
+     * refer to other heap objects. TODO: is it true that all code-->data references go via a
      * Constant? It appears so, but I'm not sure. -srk
      */
 
@@ -776,7 +822,25 @@ public abstract class NativeImageCodeCache {
 
     public void writeConstants(NativeImageHeapWriter writer, RelocatableBuffer buffer) {
         ByteBuffer bb = buffer.getByteBuffer();
-        dataSection.buildDataSection(bb, (position, constant) -> writer.writeReference(buffer, position, (JavaConstant) constant, "VMConstant: " + constant));
+        dataSection.buildDataSection(bb, (position, constant) -> {
+            if (constant instanceof TLABObjectHeaderConstant objectHeaderConstant) {
+                writeTLABObjectHeader(buffer, position, objectHeaderConstant);
+            } else {
+                writer.writeReference(buffer, position, (JavaConstant) constant, "VMConstant: " + constant);
+            }
+        });
+    }
+
+    private void writeTLABObjectHeader(RelocatableBuffer buffer, int position, TLABObjectHeaderConstant constant) {
+        JavaConstant hub = constant.hub();
+        long hubOffsetFromHeapBase = imageHeap.getConstantInfo(hub).getOffset();
+        VMError.guarantee(hubOffsetFromHeapBase != 0, "hub must be non-null: %s", hub);
+        long targetValue = Heap.getHeap().getObjectHeader().encodeAsTLABObjectHeader(hubOffsetFromHeapBase);
+        if (constant.getJavaKind() == JavaKind.Long) {
+            buffer.getByteBuffer().putLong(position, targetValue);
+        } else {
+            buffer.getByteBuffer().putInt(position, NumUtil.safeToUInt(targetValue));
+        }
     }
 
     public abstract NativeTextSectionImpl getTextSectionImpl(RelocatableBuffer buffer, ObjectFile objectFile, NativeImageCodeCache codeCache);
@@ -828,6 +892,15 @@ public abstract class NativeImageCodeCache {
         }
 
         @Override
+        protected int computeSourceMethodFlags(ResolvedJavaMethod method, boolean isHidden, boolean isLambdaFormCompiled) {
+            return FrameSourceInfo.MethodFlags.computeSourceMethodFlags(method.getModifiers(), isHidden, isLambdaFormCompiled, isInterpreterBytecodeHandlerStub(method));
+        }
+
+        private static boolean isInterpreterBytecodeHandlerStub(ResolvedJavaMethod method) {
+            return InterpreterSupport.isEnabled() && InterpreterSupport.singleton().isInterpreterBytecodeHandlerStub(method);
+        }
+
+        @Override
         protected boolean storeDeoptTargetMethod() {
             return false;
         }
@@ -850,20 +923,22 @@ public abstract class NativeImageCodeCache {
 
         @Override
         protected boolean includeLocalValues(ResolvedJavaMethod method, Infopoint infopoint, boolean isDeoptEntry) {
-            if (isDeoptEntry || ((HostedMethod) method).compilationInfo.canDeoptForTesting()) {
+            if (isDeoptEntry || ((HostedMethod) method).compilationInfo.canDeoptForTesting() || isInterpreterBytecodeHandlerStub(method)) {
                 /*
-                 * Need to restore locals from deoptimization source.
+                 * Need to restore locals from deoptimization source, or preserve the threaded
+                 * handler arguments used by stack walking.
                  */
                 return true;
             }
 
             BytecodeFrame topFrame = infopoint.debugInfo.frame();
             for (BytecodeFrame frame = topFrame; frame != null; frame = frame.caller()) {
-                if (SubstrateCompilationDirectives.singleton().isFrameInformationRequired(frame.getMethod())) {
+                if (SubstrateCompilationDirectives.singleton().isFrameInformationRequired(frame.getMethod()) || isInterpreterBytecodeHandlerStub(frame.getMethod())) {
                     /*
                      * Somewhere in the inlining hierarchy is a method for which frame information
-                     * was explicitly requested. For simplicity, we output frame information for all
-                     * methods in the inlining chain.
+                     * was explicitly requested, or a threaded handler stub whose inlined Java
+                     * handler owns the BCI needed during stack walking. For simplicity, we output
+                     * frame information for all methods in the inlining chain.
                      *
                      * We require frame information, for example, for frames that must be visible to
                      * SubstrateStackIntrospection.
@@ -906,11 +981,11 @@ public abstract class NativeImageCodeCache {
 
         void addClassLookupError(HostedType declaringClass, Throwable exception);
 
-        void addFieldLookupError(HostedType declaringClass, Throwable exception);
+        void addFieldLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
-        void addMethodLookupError(HostedType declaringClass, Throwable exception);
+        void addMethodLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
-        void addConstructorLookupError(HostedType declaringClass, Throwable exception);
+        void addConstructorLookupErrors(HostedType declaringClass, Throwable declaredException, Throwable publicException);
 
         void addRecordComponentsLookupError(HostedType declaringClass, Throwable exception);
 

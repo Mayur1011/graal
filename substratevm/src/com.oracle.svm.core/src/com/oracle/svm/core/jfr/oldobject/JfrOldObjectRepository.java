@@ -32,7 +32,7 @@ import org.graalvm.nativeimage.StackValue;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.guest.staging.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.jfr.JfrBuffer;
 import com.oracle.svm.core.jfr.JfrBufferAccess;
@@ -43,7 +43,7 @@ import com.oracle.svm.core.jfr.JfrNativeEventWriterData;
 import com.oracle.svm.core.jfr.JfrNativeEventWriterDataAccess;
 import com.oracle.svm.core.jfr.JfrRepository;
 import com.oracle.svm.core.jfr.JfrType;
-import com.oracle.svm.core.jfr.traceid.JfrTraceIdEpoch;
+import com.oracle.svm.core.jfr.traceid.JfrEpoch;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.shared.Uninterruptible;
 
@@ -135,21 +135,13 @@ public final class JfrOldObjectRepository implements JfrRepository {
         int textLength = UninterruptibleUtils.String.utf8Length(text);
         int maxTextLength = OBJECT_DESCRIPTION_MAX_LENGTH - prefixLength;
         boolean tooLong = textLength > maxTextLength;
-        int maxEncodedTextLength = tooLong ? maxTextLength - ELLIPSIS_LENGTH : maxTextLength;
+        if (tooLong) {
+            maxTextLength -= ELLIPSIS_LENGTH;
+        }
 
         Pointer pos = UninterruptibleUtils.String.toUTF8(prefix, buffer, bufferEnd);
-        int encodedTextLength = 0;
-        for (int index = 0; index < text.length();) {
-            int codePoint = UninterruptibleUtils.String.codePointAt(text, index);
-            int byteLength = UninterruptibleUtils.String.utf8Length(codePoint);
-            int remaining = maxEncodedTextLength - encodedTextLength;
-            if (remaining < byteLength) {
-                break;
-            }
-            pos = UninterruptibleUtils.String.writeUTF8(pos, codePoint);
-            index += UninterruptibleUtils.String.charCount(codePoint);
-            encodedTextLength += byteLength;
-        }
+        int encodedTextLength = UninterruptibleUtils.String.toUTF8UntilLimit(text, pos, bufferEnd, maxTextLength);
+        pos = pos.add(encodedTextLength);
 
         if (tooLong) {
             pos = UninterruptibleUtils.String.toUTF8(ELLIPSIS, pos, bufferEnd);
@@ -180,7 +172,7 @@ public final class JfrOldObjectRepository implements JfrRepository {
 
     @Uninterruptible(reason = "Result is only valid until epoch changes.", callerMustBe = true)
     private JfrOldObjectEpochData getEpochData(boolean previousEpoch) {
-        boolean epoch = previousEpoch ? JfrTraceIdEpoch.getInstance().previousEpoch() : JfrTraceIdEpoch.getInstance().currentEpoch();
+        boolean epoch = previousEpoch ? JfrEpoch.getInstance().previousEpoch() : JfrEpoch.getInstance().currentEpoch();
         return epoch ? epochData0 : epochData1;
     }
 

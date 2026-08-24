@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -112,13 +112,17 @@ public class WasmOptions {
     @Option(help = "Enable bulk-memory operations and support for reference types", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "true|false") //
     public static final OptionKey<Boolean> BulkMemoryAndRefTypes = new OptionKey<>(true);
 
-    @Option(help = "Enable support for 64-bit memory addresses", //
+    @Option(help = "Enable support for 64-bit memory and table addresses", //
                     category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> Memory64 = new OptionKey<>(false);
 
     @Option(help = "Enable support for multiple memories within a single module", //
                     category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> MultiMemory = new OptionKey<>(true);
+
+    @Option(help = "Enable support for wide integer arithmetic", //
+                    category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
+    public static final OptionKey<Boolean> WideArithmetic = new OptionKey<>(false);
 
     @Option(help = "Enable support for threads and atomics", //
                     category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
@@ -139,11 +143,21 @@ public class WasmOptions {
     @Option(help = "Enable support for exception handling", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> Exceptions = new OptionKey<>(true);
 
+    @Option(help = "Enable support for legacy exception handling", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
+    public static final OptionKey<Boolean> LegacyExceptions = new OptionKey<>(false);
+
     @Option(help = "Enable support for typed function references", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> TypedFunctionReferences = new OptionKey<>(true);
 
     @Option(help = "Enable support for garbage collected types", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> GC = new OptionKey<>(true);
+
+    @Option(help = "Enable support for tail calls", category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
+    public static final OptionKey<Boolean> TailCalls = new OptionKey<>(true);
+
+    @Option(help = "Enable the transformation of direct recursive tail calls (functions calling themselves) into loops. This option only takes effect if tail calls are enabled.", //
+                    category = OptionCategory.EXPERT, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
+    public static final OptionKey<Boolean> TailCallLoops = new OptionKey<>(true);
 
     @Option(help = "In this mode memories and tables are not initialized.", category = OptionCategory.INTERNAL, stability = OptionStability.EXPERIMENTAL, usageSyntax = "false|true") //
     public static final OptionKey<Boolean> MemoryOverheadMode = new OptionKey<>(false);

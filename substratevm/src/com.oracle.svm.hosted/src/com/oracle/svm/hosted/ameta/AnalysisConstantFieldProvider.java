@@ -31,14 +31,14 @@ import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.graal.pointsto.heap.ImageHeapConstant;
 import com.oracle.graal.pointsto.meta.AnalysisField;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.SVMHost;
 import com.oracle.svm.hosted.classinitialization.SimulateClassInitializerSupport;
 import com.oracle.svm.hosted.jdk.JDKInitializationFeature;
 import com.oracle.svm.hosted.jdk.VarHandleFeature;
 import com.oracle.svm.hosted.meta.SharedConstantFieldProvider;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.virtual.phases.ea.PartialEscapePhase;
 import jdk.internal.vm.annotation.Stable;
@@ -95,7 +95,7 @@ public class AnalysisConstantFieldProvider extends SharedConstantFieldProvider {
     @Override
     protected void onStableFieldRead(ResolvedJavaField field, JavaConstant value, ConstantFieldTool<?> tool) {
         if (value.isDefaultForKind() && !BuildPhaseProvider.isAnalysisFinished() && !field.isFinal() &&
-                        AnnotationUtil.isAnnotationPresent(field, Stable.class)) {
+                        GuestAnnotationAccess.isAnnotationPresent(field, Stable.class)) {
             if (field.getName().equals("enableNativeAccess") && field.getDeclaringClass().getName().equals("Ljava/lang/Module;")) {
                 /* Edge case 1) */
                 return;

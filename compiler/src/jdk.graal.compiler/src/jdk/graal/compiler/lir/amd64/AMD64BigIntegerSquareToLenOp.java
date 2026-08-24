@@ -58,17 +58,17 @@ import jdk.vm.ci.meta.Value;
 // @formatter:off
 @SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/x86/stubGenerator_x86_64.cpp#L3254-L3299",
           sha1 = "b002fbc3aef7b27914cb3dbf66e27e94ffc2d8d9")
-@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L6868-L7181",
+@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/58853f39377ea6168c4570327347294899d51f95/src/hotspot/cpu/x86/macroAssembler_x86.cpp#L6880-L7193",
           sha1 = "2e4ea1436904cbd5a933eb8c687296d9bbefe4f0")
 // @formatter:on
 public final class AMD64BigIntegerSquareToLenOp extends AMD64LIRInstruction {
 
     public static final LIRInstructionClass<AMD64BigIntegerSquareToLenOp> TYPE = LIRInstructionClass.create(AMD64BigIntegerSquareToLenOp.class);
 
-    @Use({OperandFlag.REG}) private Value xValue;
-    @Use({OperandFlag.REG}) private Value lenValue;
-    @Use({OperandFlag.REG}) private Value zValue;
-    @Use({OperandFlag.REG}) private Value zlenValue;
+    @Alive({OperandFlag.REG}) private Value xValue;
+    @UseKill({OperandFlag.REG}) private Value lenValue;
+    @Alive({OperandFlag.REG}) private Value zValue;
+    @UseKill({OperandFlag.REG}) private Value zlenValue;
 
     @Temp({OperandFlag.REG}) private Value tmp1Value;
     @Temp({OperandFlag.REG}) private Value[] tmpValues;
@@ -83,8 +83,8 @@ public final class AMD64BigIntegerSquareToLenOp extends AMD64LIRInstruction {
                     Value zlenValue) {
         super(TYPE);
 
-        // Due to lack of allocatable registers, we use fixed registers and mark them as @Use+@Temp.
-        // This allows the fixed registers to be reused for hosting temporary values.
+        // This stub uses fixed registers. len/zlen are preserved across the instruction while the
+        // temporary set contains only the real scratch registers.
         GraalError.guarantee(asRegister(xValue).equals(rdi), "expect xValue at rdi, but was %s", xValue);
         GraalError.guarantee(asRegister(lenValue).equals(rsi), "expect lenValue at rsi, but was %s", lenValue);
         GraalError.guarantee(asRegister(zValue).equals(r11), "expect zValue at r11, but was %s", zValue);
@@ -105,14 +105,10 @@ public final class AMD64BigIntegerSquareToLenOp extends AMD64LIRInstruction {
 
         this.tmpValues = new Value[]{
                         rax.asValue(),
-                        rcx.asValue(),
                         rdx.asValue(),
                         rbx.asValue(),
-                        rsi.asValue(),
-                        rdi.asValue(),
                         r9.asValue(),
                         r10.asValue(),
-                        r11.asValue(),
                         r13.asValue(),
         };
     }

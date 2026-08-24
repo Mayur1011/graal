@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -61,6 +61,7 @@ import jdk.graal.compiler.core.common.type.PrimitiveStamp;
 import jdk.graal.compiler.core.common.type.Stamp;
 import jdk.graal.compiler.core.match.ComplexMatchResult;
 import jdk.graal.compiler.debug.GraalError;
+import jdk.graal.compiler.lir.ConstantValue;
 import jdk.graal.compiler.lir.Variable;
 import jdk.graal.compiler.lir.amd64.AMD64AddressValue;
 import jdk.graal.compiler.lir.amd64.vector.AMD64VectorBinary.AVXBinaryMemoryOp;
@@ -222,11 +223,14 @@ public class AMD64VectorNodeMatchRules extends AMD64NodeMatchRules {
             VexRVMOp op = switch (scalarKind(simdStamp)) {
                 case WORD -> VexRVMOp.VPMULLW;
                 case DWORD -> VexRVMOp.VPMULLD;
-                case QWORD -> VexRVMOp.EVPMULLQ;
+                case QWORD -> simdEncoding == AMD64SIMDInstructionEncoding.EVEX ? VexRVMOp.EVPMULLQ : null;
                 case SINGLE -> VexRVMOp.VMULPS;
                 case DOUBLE -> VexRVMOp.VMULPD;
                 default -> throw GraalError.shouldNotReachHereUnexpectedValue(scalarKind(simdStamp));
             };
+            if (op == null) {
+                return null;
+            }
             return binaryRead(op, size, value, access);
         } else if (stamp instanceof FloatStamp) {
             VexRVMOp op = ((FloatStamp) stamp).getBits() == 32 ? VMULSS : VMULSD;
@@ -468,7 +472,11 @@ public class AMD64VectorNodeMatchRules extends AMD64NodeMatchRules {
             JavaConstant lshiftConst = lshift.getY().asJavaConstant();
             JavaConstant rshiftConst = rshift.getY().asJavaConstant();
             if (supportsVectorRotate() && isRotateElementSizeSupported(simdStamp) && (lshift.getShiftAmountMask() & (lshiftConst.asInt() + rshiftConst.asInt())) == 0) {
-                return builder -> getArithmeticLIRGenerator().emitRol(operand(lshift.getX()), operand(lshift.getY()));
+                return builder -> {
+                    Value input = operand(lshift.getX());
+                    Value rotateCount = new ConstantValue(LIRKind.value(AMD64Kind.DWORD), lshiftConst);
+                    return getArithmeticLIRGenerator().emitRol(input, rotateCount);
+                };
             }
             return null;
         } else {

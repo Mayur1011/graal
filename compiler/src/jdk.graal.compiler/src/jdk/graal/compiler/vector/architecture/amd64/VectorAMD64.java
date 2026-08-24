@@ -249,6 +249,34 @@ public final class VectorAMD64 extends VectorArchitecture {
     }
 
     @Override
+    public boolean supportsPairwiseMultiplyAdd(Stamp inputElementStamp, Stamp resultElementStamp, int resultLength, ArithmeticOpTable.Op resultOp) {
+        if (!(inputElementStamp instanceof IntegerStamp) || !(resultElementStamp instanceof IntegerStamp)) {
+            return false;
+        }
+        int inputBits = PrimitiveStamp.getBits(inputElementStamp);
+        int resultBits = PrimitiveStamp.getBits(resultElementStamp);
+        boolean supportedOp = (IntegerStamp.OPS.getAdd().equals(resultOp) && inputBits == Short.SIZE && resultBits == Integer.SIZE) ||
+                        (IntegerStamp.OPS.getSAdd().equals(resultOp) && inputBits == Byte.SIZE && resultBits == Short.SIZE);
+        if (!supportedOp) {
+            return false;
+        }
+
+        int inputLength = 2 * resultLength;
+        int vectorBytes = resultLength * getVectorStride(resultElementStamp);
+        /*
+         * The pairwise multiply-add operations match VPMADDWD and VPMADDUBSW.
+         * The XMM forms are available with AVX. The wider YMM and ZMM forms need AVX2 and
+         * AVX512BW, respectively.
+         */
+        if ((vectorBytes > AVXSize.XMM.getBytes() && !arch.getFeatures().contains(CPUFeature.AVX2)) ||
+                        (vectorBytes > AVXSize.YMM.getBytes() && !arch.getFeatures().contains(CPUFeature.AVX512BW))) {
+            return false;
+        }
+        return getSupportedVectorMoveLength(inputElementStamp, inputLength) == inputLength &&
+                        getSupportedVectorMoveLength(resultElementStamp, resultLength) == resultLength;
+    }
+
+    @Override
     public int getSupportedVectorShiftWithScalarCount(Stamp stamp, int maxLength, ArithmeticOpTable.Op op) {
         if (!hasMinimumVectorizationRequirements(maxLength)) {
             return 1;
@@ -673,6 +701,38 @@ public final class VectorAMD64 extends VectorArchitecture {
     }
 
     @Override
+    public boolean supportsVectorInsert(SimdStamp vectorStamp, SimdStamp valueStamp, int offset) {
+        if (!valueStamp.getComponent(0).isCompatible(vectorStamp.getComponent(0))) {
+            return false;
+        } else if (offset < 0 || valueStamp.getVectorLength() + offset > vectorStamp.getVectorLength()) {
+            return false;
+        } else {
+            int elementBytes = getVectorStride(vectorStamp.getComponent(0));
+            int vectorSizeInBytes = vectorStamp.getVectorLength() * elementBytes;
+            int valueSizeInBytes = valueStamp.getVectorLength() * elementBytes;
+            int offsetInBytes = offset * elementBytes;
+            int maxSupportedAVXBytes = getMaxSupportedAVXSize(arch.getFeatures()).getBytes();
+            if (vectorSizeInBytes > maxSupportedAVXBytes) {
+                return false;
+            } else if (valueSizeInBytes == Byte.BYTES || valueSizeInBytes == Short.BYTES || valueSizeInBytes == Integer.BYTES || valueSizeInBytes == Long.BYTES) {
+                /*
+                 * InsertOp can materialize sub-128-bit vector inserts on AMD64 if the insert is
+                 * aligned to the inserted value size and stays within a single XMM lane. Wider
+                 * inserts are lowered to this case lane-by-lane in AMD64VectorLoweringPhase.
+                 */
+                int offsetWithinXmmLane = offsetInBytes % AVXSize.XMM.getBytes();
+                return offsetInBytes % valueSizeInBytes == 0 && offsetWithinXmmLane + valueSizeInBytes <= AVXSize.XMM.getBytes();
+            } else if (valueSizeInBytes == AVXSize.XMM.getBytes()) {
+                return vectorSizeInBytes > AVXSize.XMM.getBytes() && offsetInBytes % AVXSize.XMM.getBytes() == 0;
+            } else if (valueSizeInBytes == AVXSize.YMM.getBytes()) {
+                return vectorSizeInBytes > AVXSize.YMM.getBytes() && maxSupportedAVXBytes >= AVXSize.ZMM.getBytes() && offsetInBytes % AVXSize.YMM.getBytes() == 0;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    @Override
     public boolean supportsAES() {
         return arch.getFeatures().contains(CPUFeature.AES) && arch.getFeatures().contains(CPUFeature.AVX);
     }
@@ -897,7 +957,7 @@ public final class VectorAMD64 extends VectorArchitecture {
                                             op(BYTE_BITS, null),
                                             op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
                                             op(DWORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512F_VL),
-                                            op(QWORD_BITS, VectorFeatureAssertion.AVX512DQ_VL)),
+                                            op(QWORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512DQ_VL)),
 
                             entry(IntegerStamp.OPS.getMulHigh(),
                                             op(BYTE_BITS, null),
@@ -969,6 +1029,30 @@ public final class VectorAMD64 extends VectorArchitecture {
 
                             entry(IntegerStamp.OPS.getUMin(),
                                             REGULAR_INTEGER_MINMAX),
+
+                            entry(IntegerStamp.OPS.getSAdd(),
+                                            op(BYTE_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(DWORD_BITS, null),
+                                            op(QWORD_BITS, null)),
+
+                            entry(IntegerStamp.OPS.getSSub(),
+                                            op(BYTE_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(DWORD_BITS, null),
+                                            op(QWORD_BITS, null)),
+
+                            entry(IntegerStamp.OPS.getSUAdd(),
+                                            op(BYTE_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(DWORD_BITS, null),
+                                            op(QWORD_BITS, null)),
+
+                            entry(IntegerStamp.OPS.getSUSub(),
+                                            op(BYTE_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(WORD_BITS, VectorFeatureAssertion.AVX1_AVX2_AVX512BW_VL),
+                                            op(DWORD_BITS, null),
+                                            op(QWORD_BITS, null)),
 
                             entry(IntegerStamp.OPS.getCompress(),
                                             op(BYTE_BITS, null),

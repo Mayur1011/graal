@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2023, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,8 +29,8 @@ import static com.oracle.svm.interpreter.InterpreterOptions.DebuggerWithInterpre
 import static com.oracle.svm.interpreter.InterpreterOptions.InterpreterTraceSupport;
 import static com.oracle.svm.interpreter.InterpreterUtil.traceInterpreter;
 
-import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.MissingReflectionRegistrationError;
@@ -44,12 +44,14 @@ import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.classinitialization.EnsureClassInitializedNode;
 import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
 import com.oracle.svm.core.hub.DynamicHubUtils;
+import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.meta.MethodRef;
 import com.oracle.svm.core.monitor.MonitorInflationCause;
 import com.oracle.svm.core.monitor.MonitorSupport;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.espresso.shared.resolver.CallKind;
 import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 import com.oracle.svm.interpreter.metadata.CremaResolvedJavaMethodImpl;
@@ -59,11 +61,14 @@ import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedObjectType;
 import com.oracle.svm.interpreter.metadata.MetadataUtil;
 import com.oracle.svm.interpreter.metadata.ReferenceConstant;
+import com.oracle.svm.shared.AlwaysInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.util.VMError;
 
 import jdk.graal.compiler.api.directives.GraalDirectives;
 import jdk.graal.compiler.core.common.SuppressFBWarnings;
 import jdk.graal.compiler.nodes.java.ArrayLengthNode;
+import jdk.graal.compiler.nodes.java.ClassIsAssignableFromNode;
 import jdk.internal.misc.Unsafe;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
@@ -134,13 +139,26 @@ public final class InterpreterToVM {
     }
 
     public static byte getArrayByte(int index, Object array) throws SemanticJavaException {
+        if (array instanceof byte[] byteArray) {
+            return getArrayByteInternal(index, byteArray);
+        } else {
+            return getArrayBooleanInternal(index, (boolean[]) array);
+        }
+    }
+
+    static byte getArrayByteInternal(int index, byte[] array) throws SemanticJavaException {
         assert array != null;
         try {
-            if (array instanceof byte[]) {
-                return ((byte[]) array)[index];
-            } else {
-                return ((boolean[]) array)[index] ? (byte) 1 : 0;
-            }
+            return array[index];
+        } catch (ArrayIndexOutOfBoundsException e) {
+            throw SemanticJavaException.raise(e);
+        }
+    }
+
+    static byte getArrayBooleanInternal(int index, boolean[] array) throws SemanticJavaException {
+        assert array != null;
+        try {
+            return array[index] ? (byte) 1 : 0;
         } catch (ArrayIndexOutOfBoundsException e) {
             throw SemanticJavaException.raise(e);
         }
@@ -214,13 +232,26 @@ public final class InterpreterToVM {
     }
 
     public static void setArrayByte(byte value, int index, /* byte[].class or boolean[].class */ Object array) throws SemanticJavaException {
+        if (array instanceof byte[] byteArray) {
+            setArrayByteInternal(value, index, byteArray);
+        } else {
+            setArrayBooleanInternal(value, index, (boolean[]) array);
+        }
+    }
+
+    static void setArrayByteInternal(byte value, int index, byte[] array) throws SemanticJavaException {
         assert array != null;
         try {
-            if (array instanceof byte[]) {
-                ((byte[]) array)[index] = value;
-            } else {
-                ((boolean[]) array)[index] = (value & 1) != 0; // masked from Java 9+.
-            }
+            array[index] = value;
+        } catch (ArrayIndexOutOfBoundsException e) {
+            throw SemanticJavaException.raise(e);
+        }
+    }
+
+    static void setArrayBooleanInternal(byte value, int index, boolean[] array) throws SemanticJavaException {
+        assert array != null;
+        try {
+            array[index] = (value & 1) != 0; // masked from Java 9+.
         } catch (ArrayIndexOutOfBoundsException e) {
             throw SemanticJavaException.raise(e);
         }
@@ -244,13 +275,24 @@ public final class InterpreterToVM {
         }
     }
 
+    @AlwaysInline("Keep the common array store checks on the handler fast path")
     public static void setArrayObject(Object value, int index, Object[] array) throws SemanticJavaException {
         assert array != null;
-        try {
-            array[index] = value;
-        } catch (ArrayIndexOutOfBoundsException | ArrayStoreException e) {
-            throw SemanticJavaException.raise(e);
+        if (Integer.compareUnsigned(index, array.length) >= 0) {
+            throw SemanticJavaException.raiseArrayIndexOutOfBoundsException(index, array.length);
         }
+        long offset = Unsafe.ARRAY_OBJECT_BASE_OFFSET + (long) index * Unsafe.ARRAY_OBJECT_INDEX_SCALE;
+        if (value == null) {
+            U.putReference(array, offset, null);
+            return;
+        }
+
+        DynamicHub componentHub = DynamicHubIntrinsics.readHub(array).getComponentHub();
+        DynamicHub valueHub = DynamicHubIntrinsics.readHub(value);
+        if (!ClassIsAssignableFromNode.isAssignableFrom(componentHub, valueHub, true)) {
+            throw SemanticJavaException.raiseArrayStoreException(valueHub);
+        }
+        U.putReference(array, offset, value);
     }
 
     // endregion Set (array) operations
@@ -259,8 +301,13 @@ public final class InterpreterToVM {
 
     public static void monitorEnter(InterpreterFrame frame, Object obj) throws SemanticJavaException {
         assert obj != null;
-        MonitorSupport.singleton().monitorEnter(obj, MonitorInflationCause.MONITOR_ENTER);
+        monitorEnterImpl(obj);
         frame.addLock(obj);
+    }
+
+    @NeverInline("Keep runtime monitor acquisition out of bytecode-handler stubs")
+    private static void monitorEnterImpl(Object obj) throws SemanticJavaException {
+        MonitorSupport.singleton().monitorEnter(obj, MonitorInflationCause.MONITOR_ENTER);
     }
 
     public static void registerHeldMonitor(InterpreterFrame frame, Object obj) {
@@ -268,34 +315,54 @@ public final class InterpreterToVM {
         frame.addLock(obj);
     }
 
-    @SuppressFBWarnings(value = "IMSE_DONT_CATCH_IMSE", justification = "Intentional.")
     public static void monitorExit(InterpreterFrame frame, Object obj) throws SemanticJavaException {
         assert obj != null;
+        if (!frame.removeLock(obj)) {
+            // SVM enforces structured locking for interpreted monitor bytecodes.
+            throw SemanticJavaException.raiseIllegalMonitorStateException();
+        }
+        monitorExitImpl(obj);
+    }
+
+    @NeverInline("Keep runtime monitor release out of bytecode-handler stubs")
+    @SuppressFBWarnings(value = "IMSE_DONT_CATCH_IMSE", justification = "Intentional.")
+    private static void monitorExitImpl(Object obj) throws SemanticJavaException {
         try {
             MonitorSupport.singleton().monitorExit(obj, MonitorInflationCause.VM_INTERNAL);
-            // GR-55049: Ensure that SVM doesn't allow non-structured locking.
-            frame.removeLock(obj);
         } catch (IllegalMonitorStateException e) {
             // GR-55050: Hide intermediate frames on exception.
-            throw SemanticJavaException.raise(e);
+            throw SemanticJavaException.raiseInlined(e);
         }
     }
 
+    /**
+     * Releases all frame-local monitor state. For synchronized methods, the method epilogue releases
+     * whatever monitor remains in lock slot 0, matching HotSpot's treatment of bytecode-level
+     * monitorenter/monitorexit on the method monitor slot.
+     */
     @SuppressFBWarnings(value = "IMSE_DONT_CATCH_IMSE", justification = "Intentional.")
-    public static void releaseInterpreterFrameLocks(@SuppressWarnings("unused") InterpreterFrame frame) throws SemanticJavaException {
+    public static void releaseInterpreterFrameLocks(InterpreterFrame frame, boolean synchronizedMethod) {
         Object[] locks = frame.getLocks();
-        for (int i = 0; i < locks.length; ++i) {
+        boolean illegalMonitorState = false;
+        if (synchronizedMethod) {
+            if (locks.length == 0 || locks[0] == null) {
+                illegalMonitorState = true;
+            } else {
+                MonitorSupport.singleton().monitorExit(locks[0], MonitorInflationCause.VM_INTERNAL);
+                locks[0] = null;
+            }
+        }
+        for (int i = locks.length - 1; i >= 0; --i) {
             Object ref = locks[i];
             if (ref != null) {
-                try {
-                    MonitorSupport.singleton().monitorExit(ref, MonitorInflationCause.VM_INTERNAL);
-                    // GR-55049: Ensure that SVM doesn't allow non-structured locking.
-                    locks[i] = null;
-                } catch (IllegalMonitorStateException e) {
-                    // GR-55050: Hide intermediate frames on exception.
-                    throw SemanticJavaException.raise(e);
-                }
+                MonitorSupport.singleton().monitorExit(ref, MonitorInflationCause.VM_INTERNAL);
+                // Clean up leaked bytecode monitors before reporting the structured-locking error.
+                locks[i] = null;
+                illegalMonitorState = true;
             }
+        }
+        if (illegalMonitorState) {
+            throw new IllegalMonitorStateException();
         }
     }
 
@@ -318,19 +385,27 @@ public final class InterpreterToVM {
     }
 
     public static WordBase getFieldWord(Object obj, InterpreterResolvedJavaField wordField) throws SemanticJavaException {
+        return getFieldWord(obj, wordField, false);
+    }
+
+    public static WordBase getFieldWord(Object obj, InterpreterResolvedJavaField wordField, boolean skipVerification) throws SemanticJavaException {
         assert obj != null;
         assert wordField.isWordStorage();
         return switch (SubstrateTarget.getWordKind()) {
-            case Long -> Word.signed(getFieldLong(obj, wordField));
-            case Int -> Word.signed(getFieldInt(obj, wordField));
+            case Long -> Word.signed(getFieldLong(obj, wordField, skipVerification));
+            case Int -> Word.signed(getFieldInt(obj, wordField, skipVerification));
             default -> throw VMError.shouldNotReachHere("Unexpected word kind " + SubstrateTarget.getWordKind());
         };
     }
 
     public static boolean getFieldBoolean(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldBoolean(obj, field, false);
+    }
+
+    public static boolean getFieldBoolean(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return field.getUnmaterializedConstant().asBoolean();
@@ -343,9 +418,13 @@ public final class InterpreterToVM {
     }
 
     public static int getFieldInt(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldInt(obj, field, false);
+    }
+
+    public static int getFieldInt(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return field.getUnmaterializedConstant().asInt();
@@ -358,9 +437,13 @@ public final class InterpreterToVM {
     }
 
     public static long getFieldLong(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldLong(obj, field, false);
+    }
+
+    public static long getFieldLong(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return field.getUnmaterializedConstant().asLong();
@@ -373,9 +456,13 @@ public final class InterpreterToVM {
     }
 
     public static byte getFieldByte(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldByte(obj, field, false);
+    }
+
+    public static byte getFieldByte(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return (byte) field.getUnmaterializedConstant().asInt();
@@ -388,9 +475,13 @@ public final class InterpreterToVM {
     }
 
     public static short getFieldShort(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldShort(obj, field, false);
+    }
+
+    public static short getFieldShort(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return (short) field.getUnmaterializedConstant().asInt();
@@ -403,9 +494,13 @@ public final class InterpreterToVM {
     }
 
     public static float getFieldFloat(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldFloat(obj, field, false);
+    }
+
+    public static float getFieldFloat(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return field.getUnmaterializedConstant().asFloat();
@@ -418,9 +513,13 @@ public final class InterpreterToVM {
     }
 
     public static double getFieldDouble(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldDouble(obj, field, false);
+    }
+
+    public static double getFieldDouble(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return field.getUnmaterializedConstant().asDouble();
@@ -433,9 +532,13 @@ public final class InterpreterToVM {
     }
 
     public static Object getFieldObject(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldObject(obj, field, false);
+    }
+
+    public static Object getFieldObject(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             JavaConstant constant = field.getUnmaterializedConstant();
@@ -454,9 +557,13 @@ public final class InterpreterToVM {
     }
 
     public static char getFieldChar(Object obj, InterpreterResolvedJavaField field) {
+        return getFieldChar(obj, field, false);
+    }
+
+    public static char getFieldChar(Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        if (field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot load undefined field: " + field);
+        if (!skipVerification) {
+            InterpreterUtil.guarantee(!field.isUndefined(), "Cannot load undefined field: %s", field);
         }
         if (field.isUnmaterializedConstant()) {
             return (char) field.getUnmaterializedConstant().asInt();
@@ -469,8 +576,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldBoolean(boolean value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldBoolean(value, obj, field, false);
+    }
+
+    public static void setFieldBoolean(boolean value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putBooleanVolatile(obj, field.getOffset(), value);
         } else {
@@ -479,8 +592,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldByte(byte value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldByte(value, obj, field, false);
+    }
+
+    public static void setFieldByte(byte value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putByteVolatile(obj, field.getOffset(), value);
         } else {
@@ -489,8 +608,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldChar(char value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldChar(value, obj, field, false);
+    }
+
+    public static void setFieldChar(char value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putCharVolatile(obj, field.getOffset(), value);
         } else {
@@ -499,8 +624,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldShort(short value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldShort(value, obj, field, false);
+    }
+
+    public static void setFieldShort(short value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putShortVolatile(obj, field.getOffset(), value);
         } else {
@@ -509,8 +640,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldInt(int value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldInt(value, obj, field, false);
+    }
+
+    public static void setFieldInt(int value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         assert field.getJavaKind() == JavaKind.Int || field.isWordStorage();
         if (field.isVolatile()) {
             U.putIntVolatile(obj, field.getOffset(), value);
@@ -520,8 +657,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldLong(long value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldLong(value, obj, field, false);
+    }
+
+    public static void setFieldLong(long value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         assert field.getJavaKind() == JavaKind.Long || field.isWordStorage();
         if (field.isVolatile()) {
             U.putLongVolatile(obj, field.getOffset(), value);
@@ -531,18 +674,30 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldWord(WordBase value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldWord(value, obj, field, false);
+    }
+
+    public static void setFieldWord(WordBase value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         switch (SubstrateTarget.getWordKind()) {
-            case Int -> setFieldInt((int) value.rawValue(), obj, field);
-            case Long -> setFieldLong(value.rawValue(), obj, field);
+            case Int -> setFieldInt((int) value.rawValue(), obj, field, true);
+            case Long -> setFieldLong(value.rawValue(), obj, field, true);
             default -> throw VMError.shouldNotReachHere("Unexpected word kind " + SubstrateTarget.getWordKind());
         }
     }
 
     public static void setFieldFloat(float value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldFloat(value, obj, field, false);
+    }
+
+    public static void setFieldFloat(float value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putFloatVolatile(obj, field.getOffset(), value);
         } else {
@@ -551,8 +706,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldDouble(double value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldDouble(value, obj, field, false);
+    }
+
+    public static void setFieldDouble(double value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putDoubleVolatile(obj, field.getOffset(), value);
         } else {
@@ -561,8 +722,14 @@ public final class InterpreterToVM {
     }
 
     public static void setFieldObject(Object value, Object obj, InterpreterResolvedJavaField field) {
+        setFieldObject(value, obj, field, false);
+    }
+
+    public static void setFieldObject(Object value, Object obj, InterpreterResolvedJavaField field, boolean skipVerification) {
         assert obj != null;
-        ensureMaterialized(field);
+        if (!skipVerification) {
+            ensureMaterialized(field);
+        }
         if (field.isVolatile()) {
             U.putReferenceVolatile(obj, field.getOffset(), value);
         } else {
@@ -570,12 +737,9 @@ public final class InterpreterToVM {
         }
     }
 
-    private static void ensureMaterialized(InterpreterResolvedJavaField field) {
-        if (RuntimeClassLoading.isSupported() && field.isUndefined()) {
-            throw VMError.shouldNotReachHere("Cannot set undefined field " + field);
-        } else {
-            InterpreterUtil.assertion(field.getOffset() >= 0, "Bad field offset");
-        }
+    public static void ensureMaterialized(InterpreterResolvedJavaField field) {
+        InterpreterUtil.guarantee(!RuntimeClassLoading.isSupported() || !field.isUndefined(), "Cannot set undefined field %s", field);
+        InterpreterUtil.assertion(field.getOffset() >= 0, "Bad field offset");
     }
 
     /**
@@ -602,21 +766,13 @@ public final class InterpreterToVM {
         return classToCheck.isAssignableFrom(instance.getClass());
     }
 
-    private static String cannotCastMsg(Object instance, Class<?> clazz) {
-        return "Cannot cast " + instance.getClass().getName() + " to " + clazz.getName();
-    }
-
     public static Object checkCast(Object instance, Class<?> classToCheck) throws SemanticJavaException {
         assert classToCheck != null;
         // Avoid Class#cast since it pollutes stack traces.
         if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, instance != null && !instanceOf(instance, classToCheck))) {
-            throw SemanticJavaException.raise(new ClassCastException(cannotCastMsg(instance, classToCheck)));
+            throw SemanticJavaException.raiseClassCastException(instance, classToCheck);
         }
         return instance;
-    }
-
-    public static Object checkCast(Object instance, InterpreterResolvedJavaType typeToCheck) throws SemanticJavaException {
-        return checkCast(instance, typeToCheck.getJavaClass());
     }
 
     public static int arrayLength(Object array) {
@@ -627,22 +783,26 @@ public final class InterpreterToVM {
     public static Object createNewReference(InterpreterResolvedJavaType klass) throws SemanticJavaException {
         assert !klass.isPrimitive();
         Class<?> clazz = klass.getJavaClass();
+        validateNewReferenceClass(clazz);
         ensureClassInitialized(clazz);
-        try {
-            // GR-55050: Ensure that the type can be allocated on SVM.
-            // At this point failing allocation should only imply OutOfMemoryError or
-            // StackOverflowError which are handled specially by the interpreter.
-            // GR-55050: Hide/remove the Unsafe#allocateInstance frame e.g. use a
-            // DynamicNewInstanceNode intrinsic.
-            return U.allocateInstance(clazz);
-        } catch (InstantiationException e) {
+        /*
+         * The class and initialization checks above leave only OutOfMemoryError and
+         * StackOverflowError to be reported by the intrinsic allocation path.
+         */
+        return KnownIntrinsics.unvalidatedAllocateInstance(clazz);
+    }
+
+    private static void validateNewReferenceClass(Class<?> clazz) throws SemanticJavaException {
+        DynamicHub hub = DynamicHub.fromClass(clazz);
+        int layoutEncoding = hub.getLayoutEncoding();
+        if (!hub.isInstanceClass() || LayoutEncoding.isSpecial(layoutEncoding) || LayoutEncoding.isHybrid(layoutEncoding) || Modifier.isAbstract(hub.getModifiers())) {
             /*
-             * Bytecode execution reports this case as InstantiationError, so translate the
-             * allocation failure to preserve the interpreter's execution semantics.
+             * Bytecode execution reports invalid NEW targets as InstantiationError instead of the
+             * reflection-specific InstantiationException used by Unsafe.allocateInstance.
              */
-            throw SemanticJavaException.raise(new InstantiationError(clazz.getName()));
-        } catch (IllegalArgumentException | MissingReflectionRegistrationError e) {
-            throw SemanticJavaException.raise(e);
+            throw SemanticJavaException.raiseInstantiationError(clazz.getName());
+        } else if (!hub.isInstantiated()) {
+            throw InterpreterUtil.shouldNotReachHere("Cannot allocate type that is not marked as instantiated: %s", clazz.getName());
         }
     }
 
@@ -669,15 +829,21 @@ public final class InterpreterToVM {
         assert !componentType.getJavaKind().isPrimitive();
         assert getDimensions(componentType) + 1 <= 255;
         if (length < 0) {
-            throw SemanticJavaException.raise(new NegativeArraySizeException(String.valueOf(length)));
+            throw SemanticJavaException.raiseNegativeArraySizeException(length);
         }
-        // GR-55050: Ensure that the array type can be allocated on SVM.
-        // At this point failing allocation should only imply OutOfMemoryError or
-        // StackOverflowError which are handled specially by the interpreter.
-        // GR-55050: Hide/remove the Array.newInstance (and other intermediate) frames
-        // e.g. use a DynamicNewArrayInstanceNode intrinsic.
+        return createNewReferenceArrayImpl(componentType, length);
+    }
+
+    @NeverInline("Keep reference-array allocation and class-loading scope out of bytecode-handler stubs")
+    private static Object createNewReferenceArrayImpl(InterpreterResolvedJavaType componentType, int length) throws SemanticJavaException {
         try (var _ = ClassLoading.allowArbitraryClassLoading(RuntimeClassLoading.isSupported())) {
-            return Array.newInstance(componentType.getJavaClass(), length);
+            /*
+             * The intrinsic performs SVM array-hub validation without introducing reflection helper
+             * frames into user-visible stack traces.
+             */
+            return KnownIntrinsics.unvalidatedNewArray(componentType.getJavaClass(), length);
+        } catch (IllegalArgumentException | MissingReflectionRegistrationError e) {
+            throw SemanticJavaException.raiseInlined(e);
         }
     }
 
@@ -693,19 +859,32 @@ public final class InterpreterToVM {
         assert dimensions.length > 0;
         assert getDimensions(multiArrayType) >= dimensions.length;
         assert getDimensions(multiArrayType) <= 255;
-        // GR-55050: Ensure that the array type can be allocated on SVM.
-        InterpreterResolvedJavaType component = multiArrayType;
         for (int d : dimensions) {
             if (d < 0) {
-                throw SemanticJavaException.raise(new NegativeArraySizeException(String.valueOf(d)));
+                throw SemanticJavaException.raiseNegativeArraySizeException(d);
             }
-            component = (InterpreterResolvedJavaType) component.getComponentType();
         }
-        // At this point failing allocation should only imply OutOfMemoryError or
-        // StackOverflowError which are handled specially by the interpreter.
-        // GR-55050: Hide/remove the Array.newInstance (and other intermediate) frames
-        // e.g. use a DynamicNewArrayInstanceNode intrinsic.
-        return Array.newInstance(component.getJavaClass(), dimensions);
+        try (var _ = ClassLoading.allowArbitraryClassLoading(RuntimeClassLoading.isSupported())) {
+            /*
+             * Allocate each dimension through the intrinsic so recursive multi-array creation has
+             * the same frame-hiding behavior as single-dimensional array bytecodes.
+             */
+            return createMultiArrayAtDimension(multiArrayType, dimensions, 0);
+        } catch (IllegalArgumentException | MissingReflectionRegistrationError e) {
+            throw SemanticJavaException.raise(e);
+        }
+    }
+
+    private static Object createMultiArrayAtDimension(InterpreterResolvedJavaType arrayType, int[] dimensions, int dimension) {
+        InterpreterResolvedJavaType componentType = (InterpreterResolvedJavaType) arrayType.getComponentType();
+        Object array = KnownIntrinsics.unvalidatedNewArray(componentType.getJavaClass(), dimensions[dimension]);
+        if (dimension + 1 < dimensions.length) {
+            Object[] objectArray = (Object[]) array;
+            for (int i = 0; i < objectArray.length; i++) {
+                objectArray[i] = createMultiArrayAtDimension(componentType, dimensions, dimension + 1);
+            }
+        }
+        return array;
     }
 
     public static void ensureClassInitialized(InterpreterResolvedObjectType type) {
@@ -744,7 +923,7 @@ public final class InterpreterToVM {
         return (CFunctionPointer) codePointer;
     }
 
-    private static InterpreterResolvedJavaMethod peekAtInterpreterVTable(InterpreterResolvedObjectType seedType, Class<?> thisClass, int vTableIndex) {
+    private static InterpreterResolvedJavaMethod peekAtInterpreterVTable(InterpreterResolvedObjectType seedType, Class<?> thisClass, int vTableIndex, boolean interfaceDispatch) {
         ResolvedJavaType thisType;
         if (RuntimeClassLoading.isSupported()) {
             thisType = DynamicHub.fromClass(thisClass).getInterpreterType();
@@ -761,15 +940,18 @@ public final class InterpreterToVM {
         VMError.guarantee(vTable != null);
 
         int idx;
-        if (SubstrateOptions.useClosedTypeWorldHubLayout() || !seedType.isInterface()) {
+        if (SubstrateOptions.useClosedTypeWorldHubLayout() || !interfaceDispatch) {
             idx = vTableIndex;
         } else {
             idx = vTableIndex + objectType.determineITableStartingIndex(seedType);
         }
-        VMError.guarantee(idx >= 0 && idx < vTable.length);
+        if (idx < 0 || idx >= vTable.length) {
+            throw VMError.shouldNotReachHere(MetadataUtil.fmt("Invalid vtable index: %s, for vtable length: %s, and receiver type: %s", idx, vTable.length, objectType));
+        }
         return vTable[idx];
     }
 
+    @NeverInline("Keep invocation dispatch implementation out of bytecode-handler stubs")
     public static Object dispatchInvocation(InterpreterResolvedJavaMethod seedMethod, Object[] calleeArgs, CallKind callKind,
                     boolean forceStayInInterpreter, boolean preferStayInInterpreter, boolean quiet)
                     throws SemanticJavaException {
@@ -780,14 +962,10 @@ public final class InterpreterToVM {
 
         // First, find the target method.
         InterpreterResolvedJavaMethod target = resolveCallSiteTarget(seedMethod, calleeArgs, callKind, quiet);
-
-        // GR-74743: Should be an entry in the ITable throwing IllegalAccessError.
-        if (callKind == CallKind.ITABLE_LOOKUP && !target.isPublic() && !target.isPrivate()) {
-            throw SemanticJavaException.raise(new IllegalAccessError(MetadataUtil.fmt("invokeinterface selected method must be public or private: %s", target)));
-        }
+        boolean callRuntimeLoadedJNI = target.isNative() && target instanceof CremaResolvedJavaMethodImpl;
 
         // Next, determine whether the call should stay in interpreter or call the compiled target.
-        boolean callAOTEntryPoint = shouldCallAOTEntryPoint(forceStayInInterpreter, preferStayInInterpreter, target, quiet);
+        boolean callAOTEntryPoint = !callRuntimeLoadedJNI && shouldCallAOTEntryPoint(forceStayInInterpreter, preferStayInInterpreter, target, quiet);
 
         InterpreterUtil.guarantee(target.getSymbolicName() == seedMethod.getSymbolicName() && target.getSymbolicSignature() == seedMethod.getSymbolicSignature(),
                         "Erroneous dispatching for seed: %s%n  With dispatch index: %s%n  Resulted in : %s", seedMethod, seedMethod.getVTableIndex(), target);
@@ -796,7 +974,7 @@ public final class InterpreterToVM {
         if (InterpreterOptions.InterpreterTraceSupport.getValue() && !quiet) {
             traceInterpreter()
                             .string(" -> calling (")
-                            .string(callAOTEntryPoint ? "compiled" : "interp").string(") ")
+                            .string(callRuntimeLoadedJNI ? "jni" : (callAOTEntryPoint ? "compiled" : "interp")).string(") ")
                             .string(target.hasNativeEntryPoint() ? "(compiled entry available) " : "");
             if (target.hasNativeEntryPoint()) {
                 traceInterpreter("(addr: ").hex(target.getNativeEntryPoint()).string(" ) ");
@@ -809,18 +987,20 @@ public final class InterpreterToVM {
 
         // All done, we can do the call.
         try {
-            if (callAOTEntryPoint) {
+            if (callRuntimeLoadedJNI) {
+                return Interpreter.JNIDowncallRoot.execute(target, calleeArgs);
+            } else if (callAOTEntryPoint) {
                 return InterpreterStubSection.leaveInterpreter(target.getNativeEntryPoint(), target, calleeArgs);
             } else {
                 // Note: this call may still end up in compiled code if JIT code is available.
                 return InterpreterStubSection.call(target, calleeArgs, false);
             }
         } catch (Throwable t) {
-            throw SemanticJavaException.raise(t);
+            throw SemanticJavaException.raiseInlined(t);
         }
     }
 
-    private static InterpreterResolvedJavaMethod resolveCallSiteTarget(InterpreterResolvedJavaMethod seedMethod, Object[] calleeArgs, CallKind callKind, boolean quiet) {
+    static InterpreterResolvedJavaMethod resolveCallSiteTarget(InterpreterResolvedJavaMethod seedMethod, Object[] calleeArgs, CallKind callKind, boolean quiet) {
         boolean isVirtual = callKind.hasLookup();
         if (callKind.isStatic()) {
             InterpreterUtil.guarantee(seedMethod.isStatic(), "Statically calling a non-static method: %s", seedMethod);
@@ -829,14 +1009,14 @@ public final class InterpreterToVM {
         } else if (isVirtual && seedMethod.hasDispatchIndex()) {
             InterpreterUtil.guarantee(
                             // Ensure itable lookup happens only for interface method seeds.
-                            seedMethod.getDeclaringClass().isInterface() == (callKind == CallKind.ITABLE_LOOKUP),
+                            callKind != CallKind.ITABLE_LOOKUP || seedMethod.getDeclaringClass().isInterface(),
                             "Wrong call kind (%s) for the given method: %s", callKind.toString(), seedMethod);
             Class<?> receiverClass = calleeArgs[0].getClass();
             if (receiverClass.isArray()) {
                 // Arrays do not have a vtable
                 return seedMethod;
             } else {
-                return peekAtInterpreterVTable(seedMethod.getDeclaringClass(), receiverClass, seedMethod.getVTableIndex());
+                return peekAtInterpreterVTable(seedMethod.getDeclaringClass(), receiverClass, seedMethod.getVTableIndex(), callKind == CallKind.ITABLE_LOOKUP);
             }
         } else if (isVirtual && seedMethod.isDevirtualized()) {
             InterpreterResolvedJavaMethod target = seedMethod.devirtualizationTarget();
@@ -855,7 +1035,7 @@ public final class InterpreterToVM {
                         (RuntimeClassLoading.isSupported() && target.isSignaturePolymorphicIntrinsic());
         boolean canBeAOTCalled = target.hasNativeEntryPoint() &&
                         target.getNativeEntryPoint().isNonNull() &&
-                        !target.getNativeEntryPoint().equal(InterpreterNotCompiledMethodPointerHolder.getMethodNotCompiledHandler());
+                        !target.getNativeEntryPoint().equal(InterpreterKnownCompiledEntryPoints.getMethodNotCompiledHandler());
 
         if (!canBeInterpreterInvoked && !canBeAOTCalled) {
             String source;
@@ -863,16 +1043,14 @@ public final class InterpreterToVM {
 
             if (target instanceof CremaResolvedJavaMethodImpl) {
                 source = "runtime-loaded";
-                if (target.isNative()) {
-                    reason = "Linking native methods not yet supported.";
-                }
+                assert !target.isNative() : "Shouldn't be called for native methods.";
             } else {
                 source = "AOT";
-                String dotPkg = target.getDeclaringClass().getSymbolicRuntimePackage().toString().replace('/', '.');
-                if (!DynamicHub.fromClass(target.getDeclaringClass().getJavaClass()).isPreserved()) {
+                String dotPkg = target.getDeclaringClass().getHub().getPackageName();
+                if (!target.getDeclaringClass().getHub().isPreserved()) {
                     reason = MetadataUtil.fmt("Class %s was not preserved during image build.%nConsider using '-H:Preserve=package=%s'.", target.getDeclaringClass().toClassName(), dotPkg);
                 }
-                if (target.getNativeEntryPoint().equal(InterpreterNotCompiledMethodPointerHolder.getMethodNotCompiledHandler())) {
+                if (target.getNativeEntryPoint().equal(InterpreterKnownCompiledEntryPoints.getMethodNotCompiledHandler())) {
                     reason = MetadataUtil.fmt(
                                     "Trying to dispatch to compiled code for AOT method %s but it was not compiled because it was not seen as reachable by analysis.%nConsider using '-H:Preserve=package=%s'",
                                     target, dotPkg);
@@ -931,9 +1109,9 @@ public final class InterpreterToVM {
     }
 
     public static Object nullCheck(Object value) throws SemanticJavaException {
-        if (GraalDirectives.injectBranchProbability(GraalDirectives.FASTPATH_PROBABILITY, value != null)) {
-            return value;
+        if (GraalDirectives.injectBranchProbability(GraalDirectives.SLOWPATH_PROBABILITY, value == null)) {
+            throw SemanticJavaException.raiseNullPointerException();
         }
-        throw SemanticJavaException.raise(new NullPointerException());
+        return value;
     }
 }

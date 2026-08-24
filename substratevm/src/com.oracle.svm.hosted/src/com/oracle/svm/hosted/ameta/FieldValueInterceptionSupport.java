@@ -41,7 +41,6 @@ import org.graalvm.word.impl.Word;
 import com.oracle.graal.pointsto.heap.ImageHeapConstant;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisType;
-import com.oracle.svm.core.RuntimeAssertionsSupport;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.InjectAccessors;
@@ -49,11 +48,14 @@ import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.fieldvaluetransformer.FieldValueTransformerWithAvailability;
 import com.oracle.svm.core.fieldvaluetransformer.JVMCIFieldValueTransformerWithAvailability;
 import com.oracle.svm.core.fieldvaluetransformer.JVMCIFieldValueTransformerWithReceiverBasedAvailability;
-import com.oracle.svm.core.heap.UnknownObjectField;
-import com.oracle.svm.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.core.fieldvaluetransformer.JavaConstantWrapper;
 import com.oracle.svm.core.layered.LayeredFieldValue;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.guest.staging.core.heap.UnknownObjectField;
+import com.oracle.svm.guest.staging.core.heap.UnknownPrimitiveField;
+import com.oracle.svm.guest.staging.layered.LayeredFieldValueTransformer;
 import com.oracle.svm.hosted.analysis.FieldValueComputer;
+import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.imagelayer.HostedImageLayerBuildingSupport;
 import com.oracle.svm.hosted.imagelayer.LayeredFieldValueTransformerImpl;
 import com.oracle.svm.hosted.imagelayer.LayeredFieldValueTransformerSupport;
@@ -67,8 +69,8 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ClassUtil;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.util.GuestAccess;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.JVMCIFieldValueTransformer;
 import com.oracle.svm.util.OriginalClassProvider;
 import com.oracle.svm.util.OriginalFieldProvider;
@@ -114,7 +116,7 @@ public final class FieldValueInterceptionSupport {
     }
 
     /**
-     * Returns a {@link FieldValueTransformer} if one was already registered for the field. In
+     * Returns a {@link JVMCIFieldValueTransformer} if one was already registered for the field. In
      * contrast to most other methods of this class, invoking this method does not prevent a future
      * registration of a field value transformer for that field.
      */
@@ -133,34 +135,51 @@ public final class FieldValueInterceptionSupport {
      * per field, if there is already a transformation in place, a {@link UserError} is reported.
      */
     public void registerLegacyFieldValueTransformer(Field reflectionField, FieldValueTransformer transformer) {
-        registerLegacyFieldValueTransformer(GuestAccess.get().getProviders().getMetaAccess().lookupJavaField(reflectionField), transformer);
+        ResolvedJavaField oField = GuestAccess.get().getProviders().getMetaAccess().lookupJavaField(reflectionField);
+        JVMCIFieldValueTransformer result;
+        if (transformer instanceof JVMCIFieldValueTransformer jvmciFieldValueTransformer) {
+            result = jvmciFieldValueTransformer;
+        } else {
+            result = WrappedFieldValueTransformer.create(GuestAccess.get().getSnippetReflection().forObject(transformer));
+        }
+        registerFieldValueTransformer(oField, result);
     }
 
     /**
      * Wraps a {@link FieldValueTransformer} in an {@link JVMCIFieldValueTransformer}.
      */
     public static final class WrappedFieldValueTransformer implements JVMCIFieldValueTransformer {
-        private final FieldValueTransformer fieldValueTransformer;
+        private final JavaConstant fieldValueTransformer;
 
-        public static JVMCIFieldValueTransformer create(FieldValueTransformer fieldValueTransformer) {
-            if (fieldValueTransformer instanceof JVMCIFieldValueTransformer jvmciFieldValueTransformer) {
-                return jvmciFieldValueTransformer;
-            }
+        public static JVMCIFieldValueTransformer create(JavaConstant fieldValueTransformer) {
             return new WrappedFieldValueTransformer(fieldValueTransformer);
         }
 
-        private WrappedFieldValueTransformer(FieldValueTransformer fieldValueTransformer) {
-            this.fieldValueTransformer = fieldValueTransformer;
+        private WrappedFieldValueTransformer(JavaConstant fieldValueTransformer) {
+            this.fieldValueTransformer = Objects.requireNonNull(fieldValueTransformer);
         }
 
         @Override
         public JavaConstant transform(JavaConstant receiver, JavaConstant originalValue) {
-            return FieldValueTransformerWithAvailability.transformAndConvert(fieldValueTransformer, receiver, originalValue);
+            GuestAccess access = GuestAccess.get();
+            JavaConstant result = access.invoke(access.elements.FieldValueTransformer_transform, fieldValueTransformer, asGuestObject(receiver), asGuestObject(originalValue));
+            if (!result.isNull() && access.lookupType(JavaConstantWrapper.class).equals(access.getProviders().getMetaAccess().lookupJavaType(result))) {
+                return access.getSnippetReflection().asObject(JavaConstantWrapper.class, result).constant();
+            }
+            return result;
+        }
+
+        private static JavaConstant asGuestObject(JavaConstant value) {
+            if (value == null || value.isNull()) {
+                return JavaConstant.NULL_POINTER;
+            }
+            return value.getJavaKind().isPrimitive() ? GuestAccess.get().boxPrimitive(value) : value;
         }
 
         @Override
         public boolean isAvailable() {
-            return fieldValueTransformer.isAvailable();
+            GuestAccess access = GuestAccess.get();
+            return access.invoke(access.elements.FieldValueTransformer_isAvailable, fieldValueTransformer).asBoolean();
         }
 
         @Override
@@ -170,22 +189,21 @@ public final class FieldValueInterceptionSupport {
             }
 
             WrappedFieldValueTransformer that = (WrappedFieldValueTransformer) o;
-            return Objects.equals(fieldValueTransformer, that.fieldValueTransformer);
+            GuestAccess access = GuestAccess.get();
+            return access.invoke(access.elements.java_lang_Object_equals, fieldValueTransformer, that.fieldValueTransformer).asBoolean();
         }
 
         @Override
         public int hashCode() {
-            return Objects.hashCode(fieldValueTransformer);
+            GuestAccess access = GuestAccess.get();
+            return access.invoke(access.elements.java_lang_Object_hashCode, fieldValueTransformer).asInt();
         }
 
         @Override
         public String toString() {
-            return "Wrapped[" + fieldValueTransformer + ']';
+            GuestAccess access = GuestAccess.get();
+            return "Wrapped[" + access.asHostString(access.invoke(access.elements.java_lang_Object_toString, fieldValueTransformer)) + ']';
         }
-    }
-
-    public void registerLegacyFieldValueTransformer(ResolvedJavaField oField, FieldValueTransformer transformer) {
-        registerFieldValueTransformer(oField, WrappedFieldValueTransformer.create(transformer));
     }
 
     /**
@@ -213,6 +231,19 @@ public final class FieldValueInterceptionSupport {
             throw UserError.abort("Cannot register a field value transformer for field %s: %s", oField.format("%H.%n"),
                             "A field value transformer is already registered for this field, or the field value is transformed via an @Alias annotation.");
         }
+    }
+
+    /**
+     * Registers a programmatic layered field value transformer for an analysis field. This is used
+     * when a feature needs the {@link LayeredFieldValueTransformer} semantics, including
+     * cross-layer update tracking, but cannot express the transformer with a
+     * {@link com.oracle.svm.core.layered.LayeredFieldValue} annotation on the field.
+     */
+    public void registerLayeredFieldValueTransformer(AnalysisField aField, LayeredFieldValueTransformer<?> transformer) {
+        VMError.guarantee(layeredSupport != null, "Layered field value transformers can only be registered in layered image builds.");
+        ResolvedJavaField oField = OriginalFieldProvider.getOriginalField(aField);
+        VMError.guarantee(oField != null, "Cannot register a layered field value transformer for synthetic field %s", aField);
+        registerFieldValueTransformer(oField, OriginalClassProvider.getOriginalType(oField.getType()), layeredSupport.createTransformer(aField, transformer));
     }
 
     Object lookupFieldValueInterceptor(AnalysisField field) {
@@ -440,7 +471,7 @@ public final class FieldValueInterceptionSupport {
      * intercept the value and return 0 / null.
      */
     private static JavaConstant filterInjectedAccessor(AnalysisField field, JavaConstant value) {
-        if (AnnotationUtil.getAnnotation(field, InjectAccessors.class) != null) {
+        if (GuestAnnotationAccess.getAnnotation(field, InjectAccessors.class) != null) {
             assert !field.isAccessed();
             return JavaConstant.defaultForKind(value.getJavaKind());
         }
@@ -455,10 +486,9 @@ public final class FieldValueInterceptionSupport {
      * such a field here if user code, e.g., accesses it via reflection.
      */
     private static JavaConstant interceptAssertionStatus(AnalysisField field, JavaConstant value) {
-        if (field.isStatic() && field.isSynthetic() && field.getName().startsWith("$assertionsDisabled")) {
-            Class<?> clazz = field.getDeclaringClass().getJavaClass();
-            boolean assertionsEnabled = RuntimeAssertionsSupport.singleton().desiredAssertionStatus(clazz);
-            return JavaConstant.forBoolean(!assertionsEnabled);
+        Boolean enabled = ClassInitializationSupport.foldedAssertionStatus(field);
+        if (enabled != null) {
+            return JavaConstant.forBoolean(!enabled);
         }
         return value;
     }
@@ -475,7 +505,7 @@ public final class FieldValueInterceptionSupport {
     }
 
     private FieldValueTransformation createLayeredFieldValueTransformation(ResolvedJavaField oField, AnalysisField aField) {
-        LayeredFieldValue layeredFieldValue = AnnotationUtil.getAnnotation(aField, LayeredFieldValue.class);
+        LayeredFieldValue layeredFieldValue = GuestAnnotationAccess.getAnnotation(aField, LayeredFieldValue.class);
         if (layeredFieldValue != null) {
             var transformer = layeredSupport.createTransformer(aField, layeredFieldValue);
             return new FieldValueTransformation(OriginalClassProvider.getOriginalType(oField.getType()), transformer);
@@ -484,7 +514,7 @@ public final class FieldValueInterceptionSupport {
     }
 
     private static FieldValueComputer createFieldValueComputer(AnalysisField field) {
-        UnknownObjectField unknownObjectField = AnnotationUtil.getAnnotation(field, UnknownObjectField.class);
+        UnknownObjectField unknownObjectField = GuestAnnotationAccess.getAnnotation(field, UnknownObjectField.class);
         if (unknownObjectField != null) {
             checkMisplacedAnnotation(field.getStorageKind().isObject(), field);
             return new FieldValueComputer(
@@ -492,7 +522,7 @@ public final class FieldValueInterceptionSupport {
                             extractAnnotationTypes(field, unknownObjectField.types(), unknownObjectField.fullyQualifiedTypes()),
                             unknownObjectField.canBeNull());
         }
-        UnknownPrimitiveField unknownPrimitiveField = AnnotationUtil.getAnnotation(field, UnknownPrimitiveField.class);
+        UnknownPrimitiveField unknownPrimitiveField = GuestAnnotationAccess.getAnnotation(field, UnknownPrimitiveField.class);
         if (unknownPrimitiveField != null) {
             checkMisplacedAnnotation(field.getStorageKind().isPrimitive(), field);
             return new FieldValueComputer(

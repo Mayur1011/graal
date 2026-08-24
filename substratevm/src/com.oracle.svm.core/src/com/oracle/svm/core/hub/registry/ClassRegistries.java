@@ -29,8 +29,6 @@ import static jdk.graal.compiler.options.OptionStability.EXPERIMENTAL;
 
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -51,7 +49,7 @@ import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.hub.RuntimeClassLoading.ClassDefinitionInfo;
 import com.oracle.svm.core.hub.crema.CremaSupport;
 import com.oracle.svm.core.jdk.Target_java_lang_ClassLoader;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.metadata.MetadataTracer;
 import com.oracle.svm.core.reflect.MissingReflectionRegistrationUtils;
 import com.oracle.svm.espresso.classfile.JavaVersion;
@@ -72,7 +70,6 @@ import com.oracle.svm.shared.singletons.traits.SingletonLayeredInstallationKind.
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.JVMCIReflectionUtil;
 
 import jdk.graal.compiler.api.replacements.Fold;
 import jdk.graal.compiler.options.Option;
@@ -134,7 +131,6 @@ public final class ClassRegistries implements ParsingContext {
     private final ConcurrentHashMap<ClassLoader, AbstractClassRegistry> buildTimeRegistries;
 
     private final AbstractClassRegistry bootRegistry;
-    private final EconomicMap<String, String> bootPackageToModule;
 
     /**
      * Holds all class names known to the image build. The value linked to each name is a
@@ -142,7 +138,7 @@ public final class ClassRegistries implements ParsingContext {
      * Throwable object if querying the class with this name should throw a specific error at
      * run-time, excluding ClassNotFoundException, or null otherwise.
      */
-    private final EconomicMap<String, ConditionalRuntimeValue<Throwable>> knownClassNames;
+    private final EconomicMap<String, Object> knownClassNames;
 
     @Platforms(Platform.HOSTED_ONLY.class)
     public ClassRegistries() {
@@ -152,14 +148,7 @@ public final class ClassRegistries implements ParsingContext {
             bootRegistry = new AOTClassRegistry(null);
         }
         buildTimeRegistries = new ConcurrentHashMap<>();
-        bootPackageToModule = computeBootPackageToModuleMap();
         knownClassNames = EconomicMap.create();
-    }
-
-    private static EconomicMap<String, String> computeBootPackageToModuleMap() {
-        EconomicMap<String, String> bootPackageToModule = EconomicMap.create();
-        JVMCIReflectionUtil.bootLoaderPackages().forEach(p -> bootPackageToModule.put(p.getName(), p.module().getName()));
-        return bootPackageToModule;
     }
 
     public static ClassRegistries currentLayer() {
@@ -173,26 +162,6 @@ public final class ClassRegistries implements ParsingContext {
     public static ClassRegistries runtimeLastLayer() {
         var singletons = layeredSingletons();
         return singletons[singletons.length - 1];
-    }
-
-    static String getBootModuleForPackage(String pkg) {
-        for (var singleton : layeredSingletons()) {
-            var module = singleton.bootPackageToModule.get(pkg);
-            if (module != null) {
-                return module;
-            }
-        }
-        return null;
-    }
-
-    public static String[] getSystemPackageNames() {
-        Set<String> systemPackageNames = new HashSet<>();
-        for (var singleton : layeredSingletons()) {
-            for (var key : singleton.bootPackageToModule.getKeys()) {
-                systemPackageNames.add(key);
-            }
-        }
-        return systemPackageNames.toArray(String[]::new);
     }
 
     public static Class<?> findBootstrapClass(String name) {
@@ -218,13 +187,9 @@ public final class ClassRegistries implements ParsingContext {
 
     public static Class<?> findLoadedClass(String name, ClassLoader loader) {
         ByteSequence typeBytes = ByteSequence.createTypeFromName(name);
-        Symbol<Type> type = SymbolsSupport.getTypes().lookupValidType(typeBytes);
         ClassNotFoundException classNotFoundException = null;
         for (var singleton : layeredSingletons()) {
-            Class<?> result = null;
-            if (type != null) {
-                result = singleton.getRegistry(loader).findLoadedClass(type);
-            }
+            Class<?> result = singleton.getRegistry(loader).findLoadedClass(typeBytes);
             if (result == null) {
                 result = PredefinedClassesSupport.getLoadedForNameOrNull(name, loader);
             }
@@ -240,6 +205,21 @@ public final class ClassRegistries implements ParsingContext {
             maybeThrowMissingRegistrationError(null, name);
         }
         return null;
+    }
+
+    /// Reports whether `name` is already present as an AOT-loaded class for `loader`.
+    public static boolean hasAOTLoadedClass(String name, ClassLoader loader) {
+        ByteSequence typeBytes = ByteSequence.createTypeFromName(name);
+        Symbol<Type> type = SymbolsSupport.getTypes().lookupValidType(typeBytes);
+        if (type == null) {
+            return false;
+        }
+        for (var singleton : layeredSingletons()) {
+            if (singleton.getRegistry(loader).findAOTLoadedClass(type) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static ParsingContext getParsingContext() {
@@ -316,11 +296,12 @@ public final class ClassRegistries implements ParsingContext {
      * this query), and null otherwise.
      */
     private Object checkResult(DynamicHub result, String name) {
-        if (MetadataTracer.enabled()) {
+        Object knownClassName = shouldFollowReflectionConfiguration() ? knownClassNames.get(name) : null;
+        if (MetadataTracer.enabled() && shouldTraceClassLookup(result, knownClassName)) {
             MetadataTracer.singleton().traceReflectionType(name);
         }
         if (result == null && shouldFollowReflectionConfiguration()) {
-            Throwable savedException = getSavedException(name);
+            Throwable savedException = getSavedException(name, knownClassName);
             if (savedException != null) {
                 if (savedException instanceof Error error) {
                     if (!RuntimeClassLoading.isSupported()) {
@@ -337,6 +318,14 @@ public final class ClassRegistries implements ParsingContext {
         return result;
     }
 
+    private static boolean shouldTraceClassLookup(DynamicHub result, Object knownClassName) {
+        if (result != null) {
+            return MetadataTracer.shouldTraceMetadata(result.getDynamicAccessMetadata());
+        }
+        RuntimeDynamicAccessMetadata dynamicAccessMetadata = knownClassName == null ? null : ConditionalRuntimeValue.getDynamicAccessMetadata(knownClassName);
+        return MetadataTracer.shouldTraceMetadata(dynamicAccessMetadata);
+    }
+
     private static void maybeThrowMissingRegistrationError(DynamicHub result, String name) {
         if (throwMissingRegistrationErrors() && shouldFollowReflectionConfiguration() && ClassNameSupport.isValidReflectionName(name) && shouldThrowMissingRegistrationError(result)) {
             MissingReflectionRegistrationUtils.reportClassAccess(name);
@@ -351,12 +340,11 @@ public final class ClassRegistries implements ParsingContext {
         return dynamicAccess == null || !dynamicAccess.satisfied();
     }
 
-    private Throwable getSavedException(String name) {
-        var cond = knownClassNames.get(name);
-        if (cond == null || cond.getDynamicAccessMetadata() == null || !cond.getDynamicAccessMetadata().satisfied()) {
+    private static Throwable getSavedException(String name, Object cond) {
+        if (cond == null || !ConditionalRuntimeValue.isSatisfied(cond)) {
             return null;
         }
-        Throwable exception = cond.getValue();
+        Throwable exception = ConditionalRuntimeValue.getValue(cond);
         if (exception == null) {
             exception = new ClassNotFoundException(name);
         }
@@ -414,10 +402,11 @@ public final class ClassRegistries implements ParsingContext {
     }
 
     public static Class<?> defineClass(ClassLoader loader, String name, byte[] b, int off, int len, ClassDefinitionInfo info) {
-        // name is a "binary name": `foo.Bar$1`
+        // name can use either dot or slash package separators.
         assert RuntimeClassLoading.isSupported();
-        if (throwMissingRegistrationErrors() && shouldFollowReflectionConfiguration() && !isRegisteredClassName(name)) {
-            MissingReflectionRegistrationUtils.reportClassAccess(name);
+        String reflectionName = toReflectionName(name);
+        if (throwMissingRegistrationErrors() && shouldFollowReflectionConfiguration() && !isRegisteredClassName(reflectionName)) {
+            MissingReflectionRegistrationUtils.reportClassAccess(reflectionName);
             // The defineClass path usually can't throw ClassNotFoundException
             throw sneakyThrow(new ClassNotFoundException(name));
         }
@@ -432,6 +421,10 @@ public final class ClassRegistries implements ParsingContext {
         } else {
             return registry.defineClass(null, b, off, len, info);
         }
+    }
+
+    private static String toReflectionName(String name) {
+        return name == null ? null : ClassNameSupport.jniNameToReflectionName(name);
     }
 
     private static boolean isRegisteredClassName(String name) {
@@ -517,16 +510,13 @@ public final class ClassRegistries implements ParsingContext {
     public static void addKnownClassName(AccessCondition condition, String typeName, Throwable exception, boolean preserved) {
         var knownClassNamesMap = currentLayer().knownClassNames;
         synchronized (knownClassNamesMap) {
-            var cond = knownClassNamesMap.get(typeName);
+            Object cond = knownClassNamesMap.get(typeName);
             if (cond == null) {
-                cond = new ConditionalRuntimeValue<>(RuntimeDynamicAccessMetadata.createHosted(condition, preserved), exception);
+                cond = ConditionalRuntimeValue.create(RuntimeDynamicAccessMetadata.createHosted(condition, preserved), exception);
             } else {
-                cond.getDynamicAccessMetadata().addCondition(condition);
-                if (!preserved) {
-                    cond.getDynamicAccessMetadata().setNotPreserved();
-                }
-                if (cond.getValueUnconditionally() == null && exception != null) {
-                    cond = new ConditionalRuntimeValue<>(cond.getDynamicAccessMetadata(), exception);
+                cond = ConditionalRuntimeValue.withCondition(cond, condition, preserved);
+                if (ConditionalRuntimeValue.getValueUnconditionally(cond) == null && exception != null) {
+                    cond = ConditionalRuntimeValue.withValue(cond, exception);
                 }
             }
             knownClassNamesMap.put(typeName, cond);
@@ -561,6 +551,11 @@ public final class ClassRegistries implements ParsingContext {
 
     @Override
     public TimerCollection getTimers() {
+        /*
+         * This is called early by the parser. We ensure that the parser is only used at run-time
+         * since some aspects are not made for build time (e.g., see the `logger` below).
+         */
+        SubstrateUtil.guaranteeRuntimeOnly();
         return timers;
     }
 
@@ -591,6 +586,8 @@ public final class ClassRegistries implements ParsingContext {
 
     @Override
     public Logger getLogger() {
+        // The logger is not made to be used at build-time.
+        SubstrateUtil.guaranteeRuntimeOnly();
         return logger;
     }
 

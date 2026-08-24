@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -63,7 +63,7 @@ public class StaticObject implements TruffleObject, Cloneable {
     public static final StaticObject NULL = new StaticObject(null);
     public static final String CLASS_TO_STATIC = "static";
 
-    private static final EspressoLock FOREIGN_MARKER = EspressoLock.create(BlockingSupport.UNINTERRUPTIBLE);
+    private static final EspressoLock FOREIGN_MARKER = EspressoLock.create(BlockingSupport.THROW_ON_INTERRUPT);
 
     private final Klass klass; // != PrimitiveKlass
 
@@ -188,7 +188,7 @@ public class StaticObject implements TruffleObject, Cloneable {
     }
 
     public final boolean isStaticStorage() {
-        return this == getKlass().getStatics();
+        return getKlass() instanceof ObjectKlass objectKlass && this == objectKlass.getStatics();
     }
 
     public final long getObjectSize(EspressoLanguage language) {

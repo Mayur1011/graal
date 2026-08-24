@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,8 +29,9 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 import org.graalvm.nativeimage.ImageSingletons;
 
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.option.RuntimeOptionKey;
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.guest.staging.log.Log;
+import com.oracle.svm.guest.staging.option.RuntimeOptionKey;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.interpreter.metadata.CremaResolvedJavaMethodImpl;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
@@ -69,8 +70,11 @@ public class RistrettoProfileSupport {
      * <ul>
      * <li><strong>Atomic State Transitions:</strong> All state changes use
      * {@link AtomicIntegerFieldUpdater#compareAndSet} to ensure thread-safe updates</li>
-     * <li><strong>Single Compilation Guarantee:</strong> Each method is compiled exactly once. Once
-     * in SUBMITTED or COMPILED state, no further profiling occurs</li>
+     * <li><strong>Single Compilation Guarantee:</strong> Each method is compiled exactly once. The
+     * first thread that crosses the invocation threshold wins the INTERPRETED-&gt;SUBMITTED
+     * transition; duplicate submitters must observe the advanced state and return instead of
+     * retrying the submission CAS forever. Once in SUBMITTED or COMPILED state, no further
+     * profiling occurs</li>
      * <li><strong>Profile Initialization:</strong> Only one thread can initialize the profile
      * (transition from INIT_VAL to INITIALIZING), others wait for completion</li>
      * <li><strong>Approximate Counting:</strong> Invocation counter increments are unsynchronized,
@@ -91,6 +95,9 @@ public class RistrettoProfileSupport {
      * @throws AssertionError if iMethod is not a InterpreterResolvedJavaMethod instance
      */
     public static MethodProfile profileMethodEntry(InterpreterResolvedJavaMethod iMethod) {
+        if (!SubstrateOptions.useRistretto()) {
+            return null;
+        }
         if (!RistrettoProfileSupport.isEnabled()) {
             return null;
         }
@@ -103,10 +110,14 @@ public class RistrettoProfileSupport {
 
         int oldState = COMPILATION_STATE_UPDATER.get(rMethod);
         if (!RistrettoCompileStateMachine.shouldEnterProfiling(oldState)) {
-            // no need to keep profiling this code, we are done
+            /*
+             * Invocation-entry compilation is done, but an interpreted activation can still execute
+             * loop backedges, for example after deoptimization. Keep returning the existing profile
+             * so OSR can compile and enter from those backedges while root code remains installed.
+             */
             trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Should not enter profiling for method %s because of state %s%n", iMethod,
                             RistrettoCompileStateMachine.toString(oldState));
-            return null;
+            return rMethod.getProfile();
         }
 
         // this point is only reached for state=INIT_VAL|INITIALIZING|NEVER_COMPILED
@@ -166,9 +177,33 @@ public class RistrettoProfileSupport {
         if (methodProfile.profileMethodEntry() > RistrettoOptions.JITCompilerInvocationThreshold.getValue()) {
             trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Entering state %s for %s, profile overflown, trying to submit compile%n",
                             RistrettoCompileStateMachine.toString(oldState), iMethod);
-            while (!COMPILATION_STATE_UPDATER.compareAndSet(rMethod, RistrettoConstants.COMPILE_STATE_INTERPRETED, RistrettoConstants.COMPILE_STATE_SUBMITTED)) {
-                // wait until we are allowed to submit
-                PauseNode.pause();
+            if (RistrettoOptions.JITDisableRootCompiles.getValue()) {
+                trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Skipping invocation compilation for %s because root compiles are disabled%n", iMethod);
+                return;
+            }
+            if (!RistrettoOptions.matchesJITCompileOnly(iMethod)) {
+                trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Skipping invocation compilation for %s because it does not match JITCompileOnly%n", iMethod);
+                return;
+            }
+            /*
+             * A failed claim only proves that this caller did not get ownership of the current
+             * INTERPRETED -> SUBMITTED transition. The follow-up load may observe SUBMITTED, a
+             * later COMPILED state, or a terminal state. An eventual invalidation can move the
+             * method back to INTERPRETED in a later compile epoch, but this caller must not spin
+             * waiting for that separate future cycle here.
+             */
+            if (!rMethod.claimInvocationEntryCompilation()) {
+                int observedState = COMPILATION_STATE_UPDATER.get(rMethod);
+                assert observedState == RistrettoConstants.COMPILE_STATE_SUBMITTED || observedState == RistrettoConstants.COMPILE_STATE_COMPILED ||
+                                observedState == RistrettoConstants.COMPILE_STATE_INTERPRETED ||
+                                observedState == RistrettoConstants.COMPILE_STATE_PERMANENT_BAILOUT ||
+                                observedState == RistrettoConstants.COMPILE_STATE_MAX_ATTEMPTS_REACHED : String.format(
+                                                "Unexpected compile state after duplicate submission race for %s: %s", iMethod,
+                                                RistrettoCompileStateMachine.toString(observedState));
+                trace(RistrettoOptions.JITTraceCompilationQueuing,
+                                "[Ristretto Compile Queue]Another thread already advanced %s to %s, skipping duplicate submission%n",
+                                iMethod, RistrettoCompileStateMachine.toString(observedState));
+                return;
             }
             trace(RistrettoOptions.JITTraceCompilationQueuing, "[Ristretto Compile Queue]Entering state %s for %s%n",
                             RistrettoCompileStateMachine.toString(COMPILATION_STATE_UPDATER.get(rMethod)), iMethod);

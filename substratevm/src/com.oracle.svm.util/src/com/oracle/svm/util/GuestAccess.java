@@ -45,8 +45,8 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
+import jdk.graal.compiler.vmaccess.InvocationException;
 import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
@@ -360,8 +360,7 @@ public final class GuestAccess implements VMAccess {
     public boolean callBooleanSupplier(ResolvedJavaType supplierType) {
         ResolvedJavaMethod cons = JVMCIReflectionUtil.getDeclaredConstructor(false, supplierType);
         JavaConstant supplier = invoke(cons, null);
-        ResolvedJavaMethod getAsBoolean = JVMCIReflectionUtil.getUniqueDeclaredMethod(metaAccess, BooleanSupplier.class, "getAsBoolean");
-        return invoke(getAsBoolean, supplier).asBoolean();
+        return invoke(elements.java_util_function_BooleanSupplier_getAsBoolean, supplier).asBoolean();
     }
 
     /**
@@ -374,8 +373,26 @@ public final class GuestAccess implements VMAccess {
     public JavaConstant callFunction(ResolvedJavaType functionType, JavaConstant arg) {
         ResolvedJavaMethod cons = JVMCIReflectionUtil.getDeclaredConstructor(false, functionType);
         JavaConstant function = invoke(cons, null);
-        ResolvedJavaMethod apply = JVMCIReflectionUtil.getUniqueDeclaredMethod(metaAccess, Function.class, "apply", Object.class);
-        return invoke(apply, function, arg);
+        return invoke(elements.java_util_function_Function_apply, function, arg);
+    }
+
+    /**
+     * Instantiates an instance of {@code predicateType} in the guest and invokes
+     * {@link java.util.function.Predicate#test(Object)} on it.
+     */
+    public boolean callPredicate(ResolvedJavaType predicateType, JavaConstant arg) {
+        ResolvedJavaMethod cons = JVMCIReflectionUtil.getDeclaredConstructor(false, predicateType);
+        JavaConstant predicate = invoke(cons, null);
+        return invoke(elements.java_util_function_Predicate_test, predicate, arg).asBoolean();
+    }
+
+    /**
+     * Gets an annotation instance from a guest type.
+     */
+    public JavaConstant getAnnotation(ResolvedJavaType annotatedType, ResolvedJavaType annotationType) {
+        JavaConstant annotatedClass = constantReflection.asJavaClass(annotatedType);
+        JavaConstant annotationClass = constantReflection.asJavaClass(annotationType);
+        return invoke(elements.java_lang_Class_getAnnotation, annotatedClass, annotationClass);
     }
 
     /**
@@ -419,6 +436,94 @@ public final class GuestAccess implements VMAccess {
             throw new IllegalArgumentException("Cannot convert guest constant to a %s: %s".formatted(type.getName(), val));
         }
         return res;
+    }
+
+    /**
+     * Safely converts the guest {@code value} to a host object of {@code type}. Unlike
+     * {@link SnippetReflectionProvider#asObject}, this method does not expose an arbitrary guest
+     * object to the host. It only materializes primitive values, boxed primitive values, strings,
+     * enums, and {@code null}.
+     *
+     * @throws IllegalArgumentException if {@code type} is not supported
+     */
+    public <T> T asSafeHostObject(Class<T> type, JavaConstant value) {
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(value, "value");
+        if (value.getJavaKind().isObject() && value.isNull()) {
+            GraalError.guarantee(!type.isPrimitive(), "Cannot convert null guest value to primitive host type %s", type.getName());
+            return null;
+        }
+
+        Class<T> boxedType = box(type);
+        if (value.getJavaKind().isPrimitive()) {
+            return boxedType.cast(value.asBoxedPrimitive());
+        } else if (boxedType == String.class) {
+            return boxedType.cast(asHostString(value));
+        } else if (lookupType(boxedType).isEnum()) {
+            return asHostEnum(boxedType, value);
+        } else if (isBoxedPrimitive(boxedType)) {
+            return boxedType.cast(asHostBoxedPrimitive(boxedType, value));
+        } else {
+            throw new IllegalArgumentException("Cannot safely convert guest constant to " + type.getName());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> Class<T> box(Class<T> type) {
+        if (type == boolean.class) {
+            return (Class<T>) Boolean.class;
+        } else if (type == byte.class) {
+            return (Class<T>) Byte.class;
+        } else if (type == short.class) {
+            return (Class<T>) Short.class;
+        } else if (type == char.class) {
+            return (Class<T>) Character.class;
+        } else if (type == int.class) {
+            return (Class<T>) Integer.class;
+        } else if (type == long.class) {
+            return (Class<T>) Long.class;
+        } else if (type == float.class) {
+            return (Class<T>) Float.class;
+        } else if (type == double.class) {
+            return (Class<T>) Double.class;
+        } else {
+            return type;
+        }
+    }
+
+    private static boolean isBoxedPrimitive(Class<?> type) {
+        return type == Boolean.class || type == Byte.class || type == Short.class || type == Character.class || type == Integer.class || type == Long.class || type == Float.class ||
+                        type == Double.class;
+    }
+
+    private Object asHostBoxedPrimitive(Class<?> type, JavaConstant value) {
+        ResolvedJavaMethod method;
+        if (type == Boolean.class) {
+            method = elements.java_lang_Boolean_booleanValue;
+        } else if (type == Byte.class) {
+            method = elements.java_lang_Byte_byteValue;
+        } else if (type == Short.class) {
+            method = elements.java_lang_Short_shortValue;
+        } else if (type == Character.class) {
+            method = elements.java_lang_Character_charValue;
+        } else if (type == Integer.class) {
+            method = elements.java_lang_Integer_intValue;
+        } else if (type == Long.class) {
+            method = elements.java_lang_Long_longValue;
+        } else if (type == Float.class) {
+            method = elements.java_lang_Float_floatValue;
+        } else if (type == Double.class) {
+            method = elements.java_lang_Double_doubleValue;
+        } else {
+            throw new IllegalArgumentException("Not a boxed primitive type: " + type.getName());
+        }
+        return invoke(method, value).asBoxedPrimitive();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private <T> T asHostEnum(Class<T> type, JavaConstant value) {
+        JavaConstant name = invoke(elements.java_lang_Enum_name, value);
+        return (T) Enum.valueOf((Class<? extends Enum>) type, asHostString(name));
     }
 
     /**
@@ -485,9 +590,27 @@ public final class GuestAccess implements VMAccess {
         return delegate.owns(value);
     }
 
+    /**
+     * Invokes the provided method. Unlike {@link VMAccess#invoke}, this method rethrows builder
+     * exceptions returned through host proxies directly instead of wrapping them in an
+     * {@link InvocationException}.
+     */
     @Override
     public JavaConstant invoke(ResolvedJavaMethod method, JavaConstant receiver, JavaConstant... args) {
-        return delegate.invoke(method, receiver, args);
+        try {
+            return delegate.invoke(method, receiver, args);
+        } catch (InvocationException ie) {
+            if (ie.getCause() != null && ie.getExceptionObject() == null) {
+                // host exception
+                throw sneakyThrow(ie.getCause());
+            }
+            throw ie;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> RuntimeException sneakyThrow(Throwable ex) throws T {
+        throw (T) ex;
     }
 
     @Override
@@ -531,6 +654,16 @@ public final class GuestAccess implements VMAccess {
     }
 
     @Override
+    public ResolvedJavaPackage asResolvedJavaPackage(Constant constant) {
+        return delegate.asResolvedJavaPackage(constant);
+    }
+
+    @Override
+    public ResolvedJavaRecordComponent asResolvedJavaRecordComponent(Constant constant) {
+        return delegate.asResolvedJavaRecordComponent(constant);
+    }
+
+    @Override
     public JavaConstant asExecutableConstant(ResolvedJavaMethod method) {
         return delegate.asExecutableConstant(method);
     }
@@ -566,11 +699,6 @@ public final class GuestAccess implements VMAccess {
     }
 
     @Override
-    public Stream<ResolvedJavaPackage> bootLoaderPackages() {
-        return delegate.bootLoaderPackages();
-    }
-
-    @Override
     public ResolvedJavaModuleLayer bootModuleLayer() {
         return delegate.bootModuleLayer();
     }
@@ -591,12 +719,12 @@ public final class GuestAccess implements VMAccess {
     }
 
     @Override
-    public JavaConstant createCallback(Object hostTarget, ResolvedJavaType guestType) {
-        return delegate.createCallback(hostTarget, guestType);
+    public JavaConstant createHostProxy(Object hostTarget, ResolvedJavaType guestType) {
+        return delegate.createHostProxy(hostTarget, guestType);
     }
 
     @Override
-    public Throwable unwrapCallbackException(JavaConstant guestWrapper) {
-        return delegate.unwrapCallbackException(guestWrapper);
+    public Throwable unwrapHostProxyException(JavaConstant guestWrapper) {
+        return delegate.unwrapHostProxyException(guestWrapper);
     }
 }

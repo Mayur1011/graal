@@ -24,12 +24,15 @@
  */
 package jdk.graal.compiler.nodes.loop;
 
+import java.util.Collection;
+
 import jdk.graal.compiler.core.common.type.IntegerStamp;
 import jdk.graal.compiler.core.common.type.Stamp;
 import jdk.graal.compiler.core.common.util.UnsignedLong;
 import jdk.graal.compiler.debug.Assertions;
 import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.nodes.ConstantNode;
+import jdk.graal.compiler.nodes.LogicNode;
 import jdk.graal.compiler.nodes.NodeView;
 import jdk.graal.compiler.nodes.StructuredGraph;
 import jdk.graal.compiler.nodes.ValueNode;
@@ -39,6 +42,8 @@ import jdk.graal.compiler.nodes.calc.BinaryArithmeticNode;
 import jdk.graal.compiler.nodes.calc.IntegerConvertNode;
 import jdk.graal.compiler.nodes.calc.NegateNode;
 import jdk.graal.compiler.nodes.calc.SubNode;
+import jdk.graal.compiler.replacements.nodes.arithmetic.IntegerAddExactOverflowNode;
+import jdk.graal.compiler.replacements.nodes.arithmetic.IntegerMulExactOverflowNode;
 
 public class BasicInductionVariable extends InductionVariable {
 
@@ -170,12 +175,39 @@ public class BasicInductionVariable extends InductionVariable {
         }
         ValueNode effectiveTripCount = maxTripCount;
         if (!effectiveTripCount.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
-            effectiveTripCount = IntegerConvertNode.convert(effectiveTripCount, stamp, graph(), NodeView.DEFAULT);
+            effectiveTripCount = IntegerConvertNode.convertUnsigned(effectiveTripCount, stamp, graph(), NodeView.DEFAULT);
         }
         ValueNode tripCountMinus1 = MathUtil.sub(graph, effectiveTripCount, ConstantNode.forIntegerStamp(stamp, 1, graph));
         ValueNode stripTimesTripCount = MathUtil.mul(graph, stride, tripCountMinus1);
         ValueNode extremum = MathUtil.add(graph, stripTimesTripCount, initNode);
         return extremum;
+    }
+
+    @Override
+    protected ValueNode collectLocalExtremumOverflowConditions(boolean assumeLoopEntered, Stamp stamp, ValueNode effectiveMaxTripCount, ValueNode baseExtremum,
+                    Collection<LogicNode> conditions) {
+        GraalError.guarantee(stamp instanceof IntegerStamp, "Expected integer stamp for %s but got %s", this, stamp);
+        ValueNode stride = strideNode();
+        ValueNode initNode = this.initNode();
+        if (!phi.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
+            stride = IntegerConvertNode.convert(stride, stamp, graph(), NodeView.DEFAULT);
+            initNode = IntegerConvertNode.convert(initNode, stamp, graph(), NodeView.DEFAULT);
+        }
+        ValueNode convertedMaxTripCount = effectiveMaxTripCount;
+        if (!convertedMaxTripCount.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
+            convertedMaxTripCount = IntegerConvertNode.convertUnsigned(convertedMaxTripCount, stamp, graph(), NodeView.DEFAULT);
+        }
+        ValueNode tripCountMinusOne = MathUtil.sub(graph(), convertedMaxTripCount, ConstantNode.forIntegerStamp(stamp, 1, graph()));
+        LogicNode mulOverflow = IntegerMulExactOverflowNode.create(stride, tripCountMinusOne);
+        if (!mulOverflow.isContradiction()) {
+            conditions.add(graph().addOrUniqueWithInputs(mulOverflow));
+        }
+        ValueNode strideTimesTripCount = MathUtil.mul(graph(), stride, tripCountMinusOne);
+        LogicNode addOverflow = IntegerAddExactOverflowNode.create(strideTimesTripCount, initNode);
+        if (!addOverflow.isContradiction()) {
+            conditions.add(graph().addOrUniqueWithInputs(addOverflow));
+        }
+        return MathUtil.add(graph(), strideTimesTripCount, initNode);
     }
 
     @Override
@@ -186,7 +218,7 @@ public class BasicInductionVariable extends InductionVariable {
         }
         ValueNode maxTripCount = loop.counted().maxTripCountNode();
         if (!maxTripCount.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
-            maxTripCount = IntegerConvertNode.convert(maxTripCount, stamp, graph(), NodeView.DEFAULT);
+            maxTripCount = IntegerConvertNode.convertUnsigned(maxTripCount, stamp, graph(), NodeView.DEFAULT);
         }
         return MathUtil.add(graph(), MathUtil.mul(graph(), strideNode(), maxTripCount), initNode());
     }

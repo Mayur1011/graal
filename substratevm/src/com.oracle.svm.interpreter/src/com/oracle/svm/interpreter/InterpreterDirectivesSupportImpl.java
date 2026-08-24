@@ -47,7 +47,7 @@ import com.oracle.svm.guest.staging.jdk.InternalVMMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaMethod;
 import com.oracle.svm.interpreter.metadata.InterpreterResolvedJavaType;
 import com.oracle.svm.interpreter.metadata.InterpreterUniverse;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.Disallowed;
+import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.RuntimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
@@ -57,7 +57,7 @@ import jdk.graal.compiler.debug.GraalError;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 @InternalVMMethod
-@SingletonTraits(access = RuntimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = Disallowed.class)
+@SingletonTraits(access = RuntimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 final class InterpreterDirectivesSupportImpl implements InterpreterDirectivesSupport {
     final Map<InterpreterResolvedJavaMethod, Long> rememberCompiledEntry = new HashMap<>();
 
@@ -68,7 +68,7 @@ final class InterpreterDirectivesSupportImpl implements InterpreterDirectivesSup
         if (interpreterMethod == null) {
             return false;
         }
-        if (interpreterMethod.getGotOffset() == GOT_NO_ENTRY) {
+        if (interpreterMethod.getGOTOffset() == GOT_NO_ENTRY) {
             return false;
         }
         if (interpreterMethod.getEnterStubOffset() == EST_NO_ENTRY) {
@@ -84,7 +84,7 @@ final class InterpreterDirectivesSupportImpl implements InterpreterDirectivesSup
         Pointer estBase = InterpreterStubTable.getBaseForEnterStubTable();
         UnsignedWord estEntry = estBase.add(estOffset).readWord(0);
 
-        WordBase previousEntry = GOTAccess.readFromGotEntry(interpreterMethod.getGotOffset());
+        WordBase previousEntry = GOTAccess.readFromGOTEntry(interpreterMethod.getGOTOffset());
         rememberCompiledEntry.put(interpreterMethod, previousEntry.rawValue());
         writeGOTHelper(interpreterMethod, estEntry);
 
@@ -93,7 +93,7 @@ final class InterpreterDirectivesSupportImpl implements InterpreterDirectivesSup
 
     private static void writeGOTHelper(InterpreterResolvedJavaMethod interpreterMethod, UnsignedWord estEntry) {
         GOTHeapSupport.get().makeGOTWritable();
-        GOTAccess.writeToGotEntry(interpreterMethod.getGotOffset(), estEntry);
+        GOTAccess.writeToGOTEntry(interpreterMethod.getGOTOffset(), estEntry);
         GOTHeapSupport.get().makeGOTReadOnly();
     }
 

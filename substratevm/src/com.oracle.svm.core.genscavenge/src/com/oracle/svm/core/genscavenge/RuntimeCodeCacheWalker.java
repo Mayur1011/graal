@@ -30,22 +30,22 @@ import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.RuntimeCodeCache.CodeInfoVisitor;
 import com.oracle.svm.core.code.RuntimeCodeInfoAccess;
 import com.oracle.svm.core.code.UntetheredCodeInfoAccess;
 import com.oracle.svm.core.genscavenge.RuntimeCodeCacheReachabilityAnalyzer.UnreachableObjectsException;
-import com.oracle.svm.core.util.DuplicatedInNativeCode;
+import com.oracle.svm.shared.util.DuplicatedInNativeCode;
 import com.oracle.svm.shared.Uninterruptible;
 
 /**
- * References from the runtime compiled code to the Java heap must be considered either strong or
+ * References from runtime-installed code to the Java heap must be considered either strong or
  * weak references, depending on whether the code is currently on the execution stack. Otherwise,
  * constant folding could create memory leaks as it can make heap objects reachable from code.
  * <p>
- * This class analyzes which runtime-compiled code references otherwise unreachable Java heap
+ * This class analyzes which runtime-installed code references otherwise unreachable Java heap
  * objects. Based on that information, it determines which parts of the code cache can be freed and
  * it makes sure that the GC visits all object references of code that may stay alive.
  */

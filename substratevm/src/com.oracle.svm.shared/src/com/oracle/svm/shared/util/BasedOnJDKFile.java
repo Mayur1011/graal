@@ -35,7 +35,9 @@ import org.graalvm.nativeimage.Platforms;
 
 /**
  * Documents that the element is based on a JDK source path. This is mainly useful for non-Java
- * sources like C++ files. For Java classes, {@link BasedOnJDKClass} might be more appropriate.
+ * sources like C++ files. For Java classes, {@link BasedOnJDKClass} is more appropriate. One
+ * exception to this is a class whose source is generated during the JDK build. In that case,
+ * {@code BasedOnJDKFile} can point to the generator.
  */
 @Repeatable(BasedOnJDKFile.List.class)
 @Retention(RetentionPolicy.RUNTIME)
@@ -46,26 +48,27 @@ public @interface BasedOnJDKFile {
     /**
      * Link to the source path.
      *
-     * Currently, only GitHub links to the <a href="https://github.com/openjdk/jdk">openjdk</a>
-     * repository are supported. Two formats are supported, file references (<em>blob</em>) and
-     * <em>tree</em> references for tracking entire source folders:
+     * GitHub links to the <a href="https://github.com/graalvm/labs-openjdk">GraalVM Labs
+     * OpenJDK</a> repository are supported.
+     * Two formats are supported, file references (<em>blob</em>) and <em>tree</em> references for
+     * tracking entire source folders:
      *
      * <pre>
-     *     https://github.com/openjdk/jdk/blob/{tag or revision}/path/to/the/source/file(#L(line_start)-L(line_end))?
-     *     https://github.com/openjdk/jdk/tree/{tag or revision}/path/to/the/source/folder/
+     *     https://github.com/graalvm/labs-openjdk/blob/{tag or revision}/path/to/the/source/file(#L(line_start)-L(line_end))?
+     *     https://github.com/graalvm/labs-openjdk/tree/{tag or revision}/path/to/the/source/folder/
      * </pre>
      *
      * To specify a line range for a file, a suffix of the form {@code #L[0-9]+-L[0-9]+} might be
      * added. Example:
      *
      * <pre>
-     *     &#64;BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+8/src/hotspot/cpu/x86/vm_version_x86.hpp#L40-L304")
+     *     &#64;BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25.0.3-ga/src/hotspot/cpu/x86/vm_version_x86.hpp#L40-L304")
      * </pre>
      *
      * Single lines can use the {@code #L[0-9]} suffix. Example:
      *
      * <pre>
-     *     &#64;BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+8/src/hotspot/cpu/x86/vm_version_x86.hpp#L40")
+     *     &#64;BasedOnJDKFile("https://github.com/graalvm/labs-openjdk/blob/jdk-25.0.3-ga/src/hotspot/cpu/x86/vm_version_x86.hpp#L40")
      * </pre>
      *
      * Tree references track the all source files in the specified directory recursively. Note that

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,9 +41,7 @@
 package org.graalvm.wasm;
 
 import static org.graalvm.wasm.Assert.assertTrue;
-import static org.graalvm.wasm.Assert.assertUnsignedIntGreaterOrEqual;
 import static org.graalvm.wasm.Assert.assertUnsignedIntLess;
-import static org.graalvm.wasm.Assert.assertUnsignedIntLessOrEqual;
 import static org.graalvm.wasm.Assert.assertUnsignedLongGreaterOrEqual;
 import static org.graalvm.wasm.Assert.assertUnsignedLongLessOrEqual;
 import static org.graalvm.wasm.Assert.fail;
@@ -87,8 +85,6 @@ import org.graalvm.wasm.Linker.ResolutionDag.InitializeTableSym;
 import org.graalvm.wasm.Linker.ResolutionDag.Resolver;
 import org.graalvm.wasm.Linker.ResolutionDag.Sym;
 import org.graalvm.wasm.api.ExecuteHostFunctionNode;
-import org.graalvm.wasm.types.ReferenceType;
-import org.graalvm.wasm.vector.Vector128;
 import org.graalvm.wasm.array.WasmArray;
 import org.graalvm.wasm.array.WasmFloat32Array;
 import org.graalvm.wasm.array.WasmFloat64Array;
@@ -106,10 +102,13 @@ import org.graalvm.wasm.exception.WasmException;
 import org.graalvm.wasm.globals.WasmGlobal;
 import org.graalvm.wasm.memory.WasmMemory;
 import org.graalvm.wasm.memory.WasmMemoryLibrary;
+import org.graalvm.wasm.nodes.WasmReturnCallNode;
 import org.graalvm.wasm.struct.WasmStruct;
 import org.graalvm.wasm.struct.WasmStructAccess;
 import org.graalvm.wasm.types.DefinedType;
+import org.graalvm.wasm.types.ReferenceType;
 import org.graalvm.wasm.types.ValueType;
+import org.graalvm.wasm.vector.Vector128;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
@@ -276,19 +275,22 @@ public class Linker {
                 final WasmContext currentContext = WasmContext.get(null);
                 final WasmContext functionInstanceContext = functionInstance.context();
                 if (functionInstanceContext == currentContext) {
-                    instance.target(start.index()).call(WasmArguments.create(functionInstance.moduleInstance()));
+                    final Object result = instance.target(start.index()).call(WasmArguments.create(functionInstance.moduleInstance()));
+                    WasmReturnCallNode.maybeCallStatic(result);
                 } else {
                     // Enter function's context when it is not from the current one
                     TruffleContext truffleContext = functionInstance.getTruffleContext();
                     Object prev = truffleContext.enter(null);
                     try {
-                        instance.target(start.index()).call(WasmArguments.create(functionInstance.moduleInstance()));
+                        final Object result = instance.target(start.index()).call(WasmArguments.create(functionInstance.moduleInstance()));
+                        WasmReturnCallNode.maybeCallStatic(result);
                     } finally {
                         truffleContext.leave(null, prev);
                     }
                 }
             } else {
-                instance.target(start.index()).call(WasmArguments.create(instance));
+                final Object result = instance.target(start.index()).call(WasmArguments.create(instance));
+                WasmReturnCallNode.maybeCallStatic(result);
             }
         }
     }
@@ -731,6 +733,7 @@ public class Linker {
                             int elemType = symtab.arrayTypeElemType(arrayTypeIdx);
 
                             int length = (int) stack.removeLast();
+                            instance.module().limits().checkArrayInstanceSize(length, elemType);
                             WasmArray array = switch (elemType) {
                                 case WasmType.I8_TYPE -> {
                                     byte initialValue = (byte) (int) stack.removeLast();
@@ -777,6 +780,7 @@ public class Linker {
                             int elemType = symtab.arrayTypeElemType(arrayTypeIdx);
 
                             int length = (int) stack.removeLast();
+                            instance.module().limits().checkArrayInstanceSize(length, elemType);
                             WasmArray array = switch (elemType) {
                                 case WasmType.I8_TYPE -> new WasmInt8Array(arrayType, length);
                                 case WasmType.I16_TYPE -> new WasmInt16Array(arrayType, length);
@@ -846,9 +850,9 @@ public class Linker {
                                     byte[] fixedArray = new byte[length << 4];
                                     for (int i = length - 1; i >= 0; i--) {
                                         Vector128 vec = (Vector128) stack.removeLast();
-                                        System.arraycopy(vec.getBytes(), 0, fixedArray, i << 4, 4);
+                                        System.arraycopy(vec.getBytes(), 0, fixedArray, i << 4, 16);
                                     }
-                                    yield new WasmVec128Array(arrayType, fixedArray);
+                                    yield new WasmVec128Array(arrayType, length, fixedArray);
                                 }
                                 default -> {
                                     Object[] fixedArray = new Object[length];
@@ -862,7 +866,7 @@ public class Linker {
                             break;
                         }
                         case Bytecode.REF_I31: {
-                            stack.add((int) stack.removeLast() & ~(1 << 31));
+                            stack.add(WasmType.asSignedI31((int) stack.removeLast()));
                             break;
                         }
                         default:
@@ -1053,8 +1057,8 @@ public class Linker {
         resolutionDag.resolveLater(new InitializeTableSym(instance.name(), tableIndex), dependencies, resolveAction);
     }
 
-    void resolveTableImport(WasmStore store, WasmInstance instance, ImportDescriptor importDescriptor, int tableIndex, int declaredMinSize, int declaredMaxSize, ReferenceType elemType,
-                    ImportValueSupplier imports) {
+    void resolveTableImport(WasmStore store, WasmInstance instance, ImportDescriptor importDescriptor, int tableIndex, long declaredMinSize, long declaredMaxSize,
+                    boolean indexType64, ReferenceType elemType, ImportValueSupplier imports) {
         final Runnable resolveAction = () -> {
             WasmTable importedTable = lookupImportObject(instance, importDescriptor, imports, WasmTable.class);
             if (importedTable != null) {
@@ -1084,8 +1088,11 @@ public class Linker {
             // https://webassembly.github.io/spec/core/exec/modules.html#limits
             // If no max size is declared, then declaredMaxSize value will be
             // MAX_TABLE_DECLARATION_SIZE, so this condition will pass.
-            assertUnsignedIntLessOrEqual(declaredMinSize, importedTable.minSize(), Failure.INCOMPATIBLE_IMPORT_TYPE);
-            assertUnsignedIntGreaterOrEqual(declaredMaxSize, importedTable.declaredMaxSize(), Failure.INCOMPATIBLE_IMPORT_TYPE);
+            assertUnsignedLongLessOrEqual(declaredMinSize, importedTable.minSize(), Failure.INCOMPATIBLE_IMPORT_TYPE);
+            assertUnsignedLongGreaterOrEqual(declaredMaxSize, importedTable.declaredMaxSize(), Failure.INCOMPATIBLE_IMPORT_TYPE);
+            if (indexType64 != importedTable.hasIndexType64()) {
+                Assert.fail(Failure.INCOMPATIBLE_IMPORT_TYPE, "index types of table import do not match");
+            }
             // when matching element types of imported tables, we need to check for type equivalence
             // instead of subtyping, as tables have read/write access
             assertTrue(elemType.equals(importedTable.elemType()), Failure.INCOMPATIBLE_IMPORT_TYPE);
@@ -1192,7 +1199,8 @@ public class Linker {
         return elemItems;
     }
 
-    void resolveElemSegment(WasmStore store, WasmInstance instance, int tableIndex, int elemSegmentId, int offsetAddress, byte[] offsetBytecode, int bytecodeOffset, int elementCount) {
+    void resolveElemSegment(WasmStore store, WasmInstance instance, int tableIndex, int elemSegmentId, long offsetAddress, byte[] offsetBytecode, int bytecodeOffset,
+                    int elementCount) {
         final Runnable resolveAction = () -> immediatelyResolveElemSegment(store, instance, tableIndex, offsetAddress, offsetBytecode, bytecodeOffset, elementCount);
         final ArrayList<Sym> dependencies = new ArrayList<>();
         dependencies.add(new InitializeTableSym(instance.name(), tableIndex));
@@ -1206,7 +1214,7 @@ public class Linker {
         resolutionDag.resolveLater(new ElemSym(instance.name(), elemSegmentId), dependencies.toArray(new Sym[0]), resolveAction);
     }
 
-    public void immediatelyResolveElemSegment(WasmStore store, WasmInstance instance, int tableIndex, int offsetAddress, byte[] offsetBytecode, int bytecodeOffset,
+    public void immediatelyResolveElemSegment(WasmStore store, WasmInstance instance, int tableIndex, long offsetAddress, byte[] offsetBytecode, int bytecodeOffset,
                     int elementCount) {
         if (store.getContextOptions().memoryOverheadMode()) {
             // Do not initialize the element segment when in memory overhead mode.
@@ -1215,17 +1223,17 @@ public class Linker {
         assertTrue(instance.symbolTable().checkTableIndex(tableIndex), String.format("No table declared or imported in the module '%s'", instance.name()), Failure.UNSPECIFIED_MALFORMED);
         final WasmTable table = instance.table(tableIndex);
         Assert.assertNotNull(table, String.format("No table declared or imported in the module '%s'", instance.name()), Failure.UNKNOWN_TABLE);
-        final int baseAddress;
+        final long baseAddress;
         if (offsetBytecode != null) {
-            baseAddress = (int) evalConstantExpression(instance, offsetBytecode);
+            baseAddress = ((Number) evalConstantExpression(instance, offsetBytecode)).longValue();
         } else {
             baseAddress = offsetAddress;
         }
 
-        Assert.assertUnsignedIntLessOrEqual(baseAddress, table.size(), Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
-        Assert.assertUnsignedIntLessOrEqual(baseAddress + elementCount, table.size(), Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
+        Assert.assertUnsignedLongLessOrEqual(baseAddress, table.size(), Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
+        Assert.assertUnsignedLongLessOrEqual(elementCount, Integer.toUnsignedLong(table.size()) - baseAddress, Failure.OUT_OF_BOUNDS_TABLE_ACCESS);
         final Object[] elemSegment = extractElemItems(instance, bytecodeOffset, elementCount);
-        table.initialize(elemSegment, 0, baseAddress, elementCount);
+        table.initialize(elemSegment, 0, (int) baseAddress, elementCount);
     }
 
     void resolvePassiveElemSegment(WasmStore store, WasmInstance instance, int elemSegmentId, int bytecodeOffset, int elementCount) {

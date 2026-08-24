@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,6 +43,9 @@ package com.oracle.truffle.api.test.option;
 import static com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest.assertFails;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -89,6 +92,19 @@ public class SourceOptionsTest {
             assertEquals(42, c.eval(Source.newBuilder(SourceOptionsTestLanguage.ID, STABLE_OPTION_NAME, "test").buildLiteral()).asInt());
             assertEquals(43, c.eval(Source.newBuilder(SourceOptionsTestLanguage.ID, STABLE_OPTION_NAME, "test").option(STABLE_OPTION_NAME, "43").buildLiteral()).asInt());
         }
+    }
+
+    @Test
+    public void testSourceOptionsParticipateInSourceKeyEquality() {
+        Source first = Source.newBuilder("lang", "source-option-collision-content", "source-option-collision").option("option", "Aa").buildLiteral();
+        Source second = Source.newBuilder("lang", "source-option-collision-content", "source-option-collision").option("option", "BB").buildLiteral();
+        Source firstAgain = Source.newBuilder("lang", "source-option-collision-content", "source-option-collision").option("option", "Aa").buildLiteral();
+
+        // "Aa" and "BB" intentionally have the same hash code.
+        assertEquals(first.hashCode(), second.hashCode());
+        assertNotSame(first, second);
+        assertNotEquals(first, second);
+        assertSame(first, firstAgain);
     }
 
     @Test
@@ -253,15 +269,21 @@ public class SourceOptionsTest {
         String expectedWarning = "[engine] WARNING: Option 'SourceOptionsTest_SourceOptionsTestLanguage.DeprecatedOption' is deprecated: TestMessage. " +
                         "Please update the option or suppress this warning using the option 'engine.WarnOptionDeprecation=false'.";
         try (Context c = Context.newBuilder(SourceOptionsTestLanguage.ID).logHandler(out).build()) {
-            assertEquals(43,
-                            c.eval(Source.newBuilder(SourceOptionsTestLanguage.ID, DEPRECATED_OPTION_NAME, "test").option(DEPRECATED_OPTION_NAME, "43").buildLiteral()).asInt());
+            /*
+             * Keep both Sources strongly reachable. Equivalent cached Sources should be interned to
+             * the same object; otherwise this test would depend on weak source cache retention.
+             */
+            Source source1 = Source.newBuilder(SourceOptionsTestLanguage.ID, DEPRECATED_OPTION_NAME, "test").option(DEPRECATED_OPTION_NAME, "43").buildLiteral();
+            Source source2 = Source.newBuilder(SourceOptionsTestLanguage.ID, DEPRECATED_OPTION_NAME, "test").option(DEPRECATED_OPTION_NAME, "43").buildLiteral();
+            assertSame(source1, source2);
+
+            assertEquals(43, c.eval(source1).asInt());
             Set<String> log = Set.of(new String(out.toByteArray()).split(System.lineSeparator()));
             assertTrue(log.toString(), log.contains(expectedWarning));
 
             // test warn only once
             out.reset();
-            assertEquals(43,
-                            c.eval(Source.newBuilder(SourceOptionsTestLanguage.ID, DEPRECATED_OPTION_NAME, "test").option(DEPRECATED_OPTION_NAME, "43").buildLiteral()).asInt());
+            assertEquals(43, c.eval(source2).asInt());
             log = Set.of(new String(out.toByteArray()).split(System.lineSeparator()));
             assertFalse(log.toString(), log.contains(expectedWarning));
 

@@ -4,10 +4,23 @@
   local bc = (import '../../../ci/ci_common/bench-common.libsonnet'),
   local cc = (import 'compiler-common.libsonnet'),
   local bench = (import 'benchmark-suites.libsonnet'),
+  local pr_bench_settings = (import '../../../ci/ci_common/pr-bench-settings.libsonnet'),
   local hw = bc.bench_hw,
 
   # GR-49532 TODO add 'throughput' metric and 'top-tier-throughput' secondary_metrics
   local PR_bench_libgraal = {unicorn_pull_request_benchmarking:: {name: 'libgraal', metrics: ['time', 'throughput'], secondary_metrics: ['binary-size', 'max-rss', 'top-tier-throughput'], baseline_benchmarking: true}},
+  local PR_bench_crema_awfy = {unicorn_pull_request_benchmarking:: pr_bench_settings.crema_awfy_pr_bench},
+  local PR_bench_libgraal_gate = c.tier3 + {
+    # A single representative DaCapo workload keeps this below an hour while
+    # still exercising the LibGraal PR-bench execution path.
+    job_prefix:: "gate-compiler-smoke",
+    should_upload_results:: false,
+    targets: ['tier3'],
+    run: [
+      self.benchmark_cmd + ['dacapo:pmd', '--'] + self.extra_vm_args,
+    ],
+    timelimit: '0:45:00',
+  },
 
   local main_builds = std.flattenArrays([
     [
@@ -20,6 +33,13 @@
     c.daily + c.opt_post_merge + hw.x52 + jdk + cc.libgraal + bench.awfy + PR_bench_libgraal,
     c.weekly                   + hw.x52 + jdk + cc.libgraal + bench.micros_graal_whitebox,
     c.weekly                   + hw.x52 + jdk + cc.libgraal + bench.micros_graal_dist,
+    ]
+  for jdk in cc.product_jdks
+  ]),
+
+  local gate_builds = std.flattenArrays([
+    [
+    c.linux_amd64 + jdk + cc.libgraal + bench.dacapo + PR_bench_libgraal_gate,
     ]
   for jdk in cc.product_jdks
   ]),
@@ -95,8 +115,17 @@
   for suite in metrics_suites
   ]),
 
-  local all_builds = main_builds + weekly_amd64_forks_builds + weekly_aarch64_forks_builds + profiling_builds + avx_builds + zgc_builds + zgc_avx_builds +
-                     shenandoah_builds + aarch64_builds + metrics_builds,
+  local crema_builds = std.flattenArrays([
+    [
+    c.daily + c.opt_post_merge + hw.x52 + jdk + bench.awfy_template(capture_crema_libjvm_size=true) + cc.crema + PR_bench_crema_awfy,
+    c.daily + c.opt_post_merge + hw.x52 + jdk + bench.awfy + cc.crema_xint + PR_bench_crema_awfy,
+    c.daily + c.opt_post_merge + hw.x52 + jdk + bench.awfy + cc.crema_no_profiling + PR_bench_crema_awfy,
+    ]
+  for jdk in cc.product_jdks
+  ]),
+
+  local all_builds = gate_builds + main_builds + weekly_amd64_forks_builds + weekly_aarch64_forks_builds + profiling_builds + avx_builds + zgc_builds + zgc_avx_builds +
+                     shenandoah_builds + aarch64_builds + metrics_builds + crema_builds,
   local filtered_builds = [b for b in all_builds if b.is_jdk_supported(b.jdk_version) && b.is_arch_supported(b.arch)],
   // adds a "defined_in" field to all builds mentioning the location of this current file
   builds:: utils.add_defined_in(filtered_builds, std.thisFile),

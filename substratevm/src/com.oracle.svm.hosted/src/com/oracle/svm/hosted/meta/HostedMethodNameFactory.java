@@ -73,6 +73,11 @@ public class HostedMethodNameFactory implements InternalFeature {
         return ImageSingletons.lookup(HostedMethodNameFactory.class);
     }
 
+    @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(HostedMethodNameFactory.class, this);
+    }
+
     MethodNameInfo createNames(NameGenerator generator, AnalysisMethod aMethod) {
         MethodNameInfo result = buildingExtensionLayer ? HostedDynamicLayerInfo.loadMethodNameInfo(aMethod) : null;
         if (result != null) {
@@ -136,10 +141,10 @@ public class HostedMethodNameFactory implements InternalFeature {
                      * reserved.
                      */
                     EconomicSet<String> reservedNames = EconomicSet.create();
-                    var methods = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotReader().getHostedMethods();
+                    var methods = ((SVMImageLayerSingletonLoader.ImageSingletonLoaderImpl) loader).getSnapshotLoader().getHostedMethods();
                     for (var methodData : methods) {
                         if (methodData.getMethodId() != LayeredDispatchTableFeature.PriorDispatchMethod.UNPERSISTED_METHOD_ID) {
-                            reservedNames.add(methodData.getHostedMethodUniqueName().toString());
+                            reservedNames.add(methodData.getHostedMethodUniqueName());
                         }
                     }
                     singleton.reservedUniqueShortNames = reservedNames;

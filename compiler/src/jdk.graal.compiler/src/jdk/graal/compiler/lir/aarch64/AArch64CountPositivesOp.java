@@ -69,7 +69,7 @@ import jdk.vm.ci.meta.Value;
  * Returns the number of positive bytes.
  */
 // @formatter:off
-@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/b8aa130bab715f187476181acc5021b27958833f/src/hotspot/cpu/aarch64/macroAssembler_aarch64.cpp#L5817-L5886",
+@SyncPort(from = "https://github.com/openjdk/jdk25u/blob/58853f39377ea6168c4570327347294899d51f95/src/hotspot/cpu/aarch64/macroAssembler_aarch64.cpp#L5828-L5897",
           sha1 = "ce54a7cf2fcfe7ccb8f6604c038887fc1c4ebce1")
 @SyncPort(from = "https://github.com/openjdk/jdk25u/blob/c59e44a7aa2aeff0823830b698d524523b996650/src/hotspot/cpu/aarch64/stubGenerator_aarch64.cpp#L8083-L8250",
           sha1 = "45239b79c957ea992a4d05afa358d5b953fe84fe")
@@ -86,17 +86,17 @@ public final class AArch64CountPositivesOp extends AArch64ComplexVectorOp {
     @LIRInstruction.Temp({LIRInstruction.OperandFlag.REG}) private Value lengthTempValue;
     @LIRInstruction.Temp({LIRInstruction.OperandFlag.REG}) private Value[] temp;
 
-    private final int vmPageSize;
+    private final int pageSizeForReadBoundaryCheck;
     private final int softwarePrefetchHintDistance;
 
     public AArch64CountPositivesOp(AArch64LIRGenerator tool, AllocatableValue resultValue, AllocatableValue arrayValue, AllocatableValue lengthValue,
-                    int vmPageSize, int softwarePrefetchHintDistance) {
+                    int pageSizeForReadBoundaryCheck, int softwarePrefetchHintDistance) {
         super(TYPE);
         this.resultValue = resultValue;
         this.arrayValue = arrayValue;
         this.lengthValue = lengthValue;
 
-        this.vmPageSize = vmPageSize;
+        this.pageSizeForReadBoundaryCheck = pageSizeForReadBoundaryCheck;
         this.softwarePrefetchHintDistance = softwarePrefetchHintDistance;
 
         this.arrayTempValue = tool.newVariable(arrayValue.getValueKind());
@@ -152,13 +152,13 @@ public final class AArch64CountPositivesOp extends AArch64ComplexVectorOp {
             // size > 32 then go to stub
             masm.branchConditionally(ConditionFlag.GE, labelStubLong);
 
-            if (vmPageSize > 0) {
-                GraalError.guarantee(CodeUtil.isPowerOf2(vmPageSize), "vmPageSize is not power of 2: %d", vmPageSize);
-                int shift = 64 - CodeUtil.log2(vmPageSize);
+            if (pageSizeForReadBoundaryCheck > 0) {
+                GraalError.guarantee(CodeUtil.isPowerOf2(pageSizeForReadBoundaryCheck), "pageSizeForReadBoundaryCheck is not power of 2: %d", pageSizeForReadBoundaryCheck);
+                int shift = 64 - CodeUtil.log2(pageSizeForReadBoundaryCheck);
                 masm.lsl(64, rscratch1, ary1, shift);
                 masm.mov(rscratch2, (4L * wordSize) << shift);
                 masm.adds(64, rscratch2, rscratch1, rscratch2);
-                // at the end of page then go to stub
+                // At the end of a page, go to the stub to avoid crossing a runtime page boundary.
                 masm.branchConditionally(ConditionFlag.HS, labelStub);
             }
             masm.subs(64, len, len, wordSize);

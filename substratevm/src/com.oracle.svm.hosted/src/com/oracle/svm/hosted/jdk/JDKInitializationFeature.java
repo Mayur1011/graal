@@ -37,16 +37,13 @@ import com.oracle.svm.core.FutureDefaultsOptions;
 import com.oracle.svm.core.OS;
 import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.hub.RuntimeClassLoading;
 import com.oracle.svm.core.jdk.JNIRegistrationUtil;
 import com.oracle.svm.core.jdk.NativeLibrarySupport;
 import com.oracle.svm.core.jdk.ProtectionDomainSupport;
 import com.oracle.svm.hosted.FeatureImpl;
 import com.oracle.svm.hosted.c.NativeLibraries;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
-import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
-import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.dynamicaccess.JVMCIRuntimeJNIAccess;
@@ -64,7 +61,6 @@ import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
-@SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = PartiallyLayerAware.class)
 @AutomaticallyRegisteredFeature
 public class JDKInitializationFeature extends JNIRegistrationUtil implements InternalFeature {
     private static final String JDK_CLASS_REASON = "Core JDK classes are initialized at build time";
@@ -103,6 +99,9 @@ public class JDKInitializationFeature extends JNIRegistrationUtil implements Int
         rci.initializeAtBuildTime("java.time.chrono.HijrahChronology", "Needs to be fully initialized at build time");
         rci.initializeAtBuildTime("java.util", JDK_CLASS_REASON);
         rci.initializeAtRunTime("java.util.concurrent.SubmissionPublisher", "Executor service must be recomputed");
+
+        rci.initializeAtBuildTime("java.beans.Introspector", JDK_CLASS_REASON);
+        rci.initializeAtBuildTime("java.beans.Introspector$1", JDK_CLASS_REASON);
 
         rci.initializeAtBuildTime("javax.annotation.processing", JDK_CLASS_REASON);
         rci.initializeAtBuildTime("javax.lang.model", JDK_CLASS_REASON);
@@ -143,7 +142,10 @@ public class JDKInitializationFeature extends JNIRegistrationUtil implements Int
         rci.initializeAtBuildTime("sun.nio", JDK_CLASS_REASON);
         if (OS.WINDOWS.isCurrent()) {
             rci.initializeAtRunTime("sun.nio.ch.PipeImpl", "Contains SecureRandom reference, therefore can't be included in the image heap");
+        } else {
+            rci.initializeAtRunTime("sun.nio.ch.UnixAsynchronousSocketChannelImpl", "Runtime-loaded asynchronous sockets need runtime native-dispatcher state");
         }
+        rci.initializeAtRunTime("sun.nio.ch.AsynchronousChannelGroupImpl", "Default asynchronous channel group state is runtime process specific");
 
         rci.initializeAtRunTime("sun.net.PortConfig", "Calls PortConfig.getLower0() and PortConfig.getUpper0()");
 
@@ -167,6 +169,16 @@ public class JDKInitializationFeature extends JNIRegistrationUtil implements Int
         rci.initializeAtBuildTime("sun.text", JDK_CLASS_REASON);
         rci.initializeAtBuildTime("sun.util", JDK_CLASS_REASON);
         if (FutureDefaultsOptions.resourceBundlesInitializedAtRunTime()) {
+            if (RuntimeClassLoading.isSupported()) {
+                /*
+                 * Without runtime class loading, PropertyResourceBundle is covered by the existing
+                 * java.util build-time initialization policy and by statically registered bundle
+                 * metadata. Runtime class loading can execute the JDK PropertyResourceBundle path
+                 * for classes loaded after image build, so only those images need its cache state in
+                 * the runtime process.
+                 */
+                rci.initializeAtRunTime("java.util.PropertyResourceBundle", FutureDefaultsOptions.RUN_TIME_INITIALIZE_RESOURCE_BUNDLES_REASON);
+            }
             rci.initializeAtRunTime("sun.util.locale.provider.LocaleProviderAdapter", FutureDefaultsOptions.RUN_TIME_INITIALIZE_RESOURCE_BUNDLES_REASON);
             rci.initializeAtRunTime("sun.util.locale.provider.LocaleServiceProviderPool", FutureDefaultsOptions.RUN_TIME_INITIALIZE_RESOURCE_BUNDLES_REASON);
             rci.initializeAtRunTime("sun.util.locale.provider.LocaleServiceProviderPool$AllAvailableLocales", FutureDefaultsOptions.RUN_TIME_INITIALIZE_RESOURCE_BUNDLES_REASON);
@@ -312,6 +324,8 @@ public class JDKInitializationFeature extends JNIRegistrationUtil implements Int
         rci.initializeAtRunTime("jdk.internal.logger.LoggerFinderLoader", "Contains a static field with a FilePermission value");
 
         rci.initializeAtRunTime("jdk.internal.markdown.MarkdownTransformer", "Contains a static field with a DocTreeScanner which is initialized at run time");
+
+        rci.initializeAtRunTime("jdk.internal.org.jline.terminal.impl.ffm", "Contains multiple classes with static fields referencing native memory segments");
 
         /* Ensure "enhanced exception messages" are initialized (JDK 25+26, JDK-8348986). */
         var exceptionsClass = GuestAccess.get().lookupType("jdk.internal.util.Exceptions");

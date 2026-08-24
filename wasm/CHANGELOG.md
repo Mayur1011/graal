@@ -2,10 +2,21 @@
 
 This changelog summarizes major changes to the WebAssembly engine implemented in GraalVM (GraalWasm).
 
-## Version 25.1.0
+## Version 25.4.4
+
+* Implemented the [Tail Call](https://github.com/WebAssembly/tail-call) proposal. This feature is enabled by default and can be disabled with the experimental option `--wasm.TailCalls=false`. The feature comes with an optimization that transforms direct recursive calls (functions calling themselves) into loops. This optimization is enabled by default and can be disabled with the experimental option `--wasm.TailCallLoops=false`.
+
+## Version 25.3.4
+
+* Implemented support for the [branch hinting](https://github.com/WebAssembly/branch-hinting) custom section, allowing GraalWasm to use `if` and `br_if` likelihood hints for optimized code generation.
+* Implemented the `table64` part of the [Memory64](https://github.com/WebAssembly/memory64/blob/main/proposals/memory64/Overview.md) proposal. This feature can be enabled with the option `--wasm.Memory64`.
+* Implemented the [Wide Arithmetic](https://github.com/WebAssembly/wide-arithmetic) proposal, adding `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, and `i64.mul_wide_u`. This feature is disabled by default and can be enabled with the experimental option `--wasm.WideArithmetic=true`.
+
+## Version 25.1.3
 
 * Adopted a bytecode-handler-based design for the WebAssembly interpreter, improving interpreted performance on Native Image.
 * Implemented the [exception handling](https://github.com/WebAssembly/exception-handling) proposal. This feature is enabled by default and can be disabled with the experimental option `wasm.Exceptions=false`.
+* Implemented the [legacy exception handling](https://github.com/WebAssembly/exception-handling/tree/main/proposals/exception-handling/legacy) proposal. This feature is disabled by default and can be enabled independently with the experimental option `wasm.LegacyExceptions=true`.
 * Implemented the [typed function references](https://github.com/WebAssembly/function-references) proposal. This feature is enabled by default and can be disabled with the experimental option `wasm.TypedFunctionReferences=false`.
 * Enabled the standardized features [Extended Constant Expressions](https://github.com/WebAssembly/extended-const/blob/master/proposals/extended-const/Overview.md), [Multiple Memories](https://github.com/WebAssembly/multi-memory/blob/master/proposals/multi-memory/Overview.md), and [Relaxed SIMD](https://github.com/WebAssembly/relaxed-simd/tree/main/proposals/relaxed-simd) by default.
 * Implemented the [GC proposal](https://github.com/WebAssembly/gc) proposal. This feature is enabled by default and can be disabled with the experimental option `wasm.GC=false`.

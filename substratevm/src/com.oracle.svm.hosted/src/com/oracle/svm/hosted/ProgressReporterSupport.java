@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.hosted;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Supplier;
@@ -35,7 +36,7 @@ import org.graalvm.nativeimage.hosted.Feature.BeforeImageWriteAccess;
 
 import com.oracle.svm.core.BuildArtifacts;
 import com.oracle.svm.core.FutureDefaultsOptions;
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.jdk.resources.NativeImageResourceFileSystem;
 import com.oracle.svm.core.jni.access.JNIAccessibleClass;
@@ -43,6 +44,7 @@ import com.oracle.svm.core.jni.access.JNIReflectionDictionary;
 import com.oracle.svm.hosted.FeatureImpl.AfterCompilationAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.BeforeImageWriteAccessImpl;
 import com.oracle.svm.hosted.ProgressReporter.DirectPrinter;
+import com.oracle.svm.hosted.code.CompileQueue.CompileTask;
 import com.oracle.svm.hosted.jdk.JNIRegistrationSupport;
 import com.oracle.svm.hosted.util.CPUTypeAArch64;
 import com.oracle.svm.hosted.util.CPUTypeAMD64;
@@ -74,8 +76,13 @@ public class ProgressReporterSupport {
 
     public void afterCompilation(AfterCompilationAccess access) {
         if (SubstrateOptions.BuildOutputBreakdowns.getValue()) {
-            ImageSingletons.add(CodeBreakdownProvider.class, new CodeBreakdownProvider(((AfterCompilationAccessImpl) access).getCompilationTasks()));
+            AfterCompilationAccessImpl accessImpl = (AfterCompilationAccessImpl) access;
+            ImageSingletons.add(CodeBreakdownProvider.class, new CodeBreakdownProvider(getCodeBreakdownCompilationTasks(accessImpl)));
         }
+    }
+
+    protected Collection<CompileTask> getCodeBreakdownCompilationTasks(AfterCompilationAccessImpl access) {
+        return access.getCompilationTasks();
     }
 
     public void afterAnalysis(AfterAnalysisAccess access) {
@@ -134,7 +141,7 @@ public class ProgressReporterSupport {
         if (!ImageSingletons.contains(JNIRegistrationSupport.class) || !ImageSingletons.contains(JNIReflectionDictionary.class)) {
             return false;
         }
-        if (!JNIRegistrationSupport.singleton().isRegisteredLibrary("awt")) {
+        if (!JNIRegistrationSupport.singleton().isCurrentLayerRegisteredLibrary("awt")) {
             return false; // AWT not used
         }
         // check if any class located in java.awt or sun.awt is registered for JNI access

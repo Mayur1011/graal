@@ -85,9 +85,10 @@ import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.PartiallyLayerAware;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
-import com.oracle.svm.util.AnnotationUtil;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.ReflectionUtil.ReflectionUtilError;
+import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
 import jdk.graal.compiler.debug.DebugContext;
@@ -126,6 +127,7 @@ public final class NativeLibraries {
     private final List<String> libraries;
     private final DependencyGraph dependencyGraph;
     private final List<String> jniStaticLibraries;
+    private final Set<String> jniStaticLibrariesAndDependencies;
     private final LinkedHashSet<String> libraryPaths;
 
     private final List<CInterfaceError> errors;
@@ -270,6 +272,7 @@ public final class NativeLibraries {
         libraries = Collections.synchronizedList(new ArrayList<>());
         dependencyGraph = new DependencyGraph();
         jniStaticLibraries = Collections.synchronizedList(new ArrayList<>());
+        jniStaticLibrariesAndDependencies = ConcurrentHashMap.newKeySet();
 
         libraryPaths = initCLibraryPath();
 
@@ -337,7 +340,7 @@ public final class NativeLibraries {
         try {
             Path jdkLibDir = getPlatformDependentJDKStaticLibraryPath();
 
-            List<String> defaultBuiltInLibraries = Arrays.asList(PlatformNativeLibrarySupport.defaultBuiltInLibraries);
+            List<String> defaultBuiltInLibraries = Arrays.asList(PlatformNativeLibrarySupport.defaultBuiltinLibraries);
             Predicate<String> hasStaticLibrary = s -> Files.isRegularFile(jdkLibDir.resolve(getStaticLibraryName(s)));
             if (defaultBuiltInLibraries.stream().allMatch(hasStaticLibrary)) {
                 staticLibsDir = jdkLibDir;
@@ -418,9 +421,9 @@ public final class NativeLibraries {
 
         if (!context.isInConfiguration()) {
             /* Nothing to do, all elements in context are ignored. */
-        } else if (AnnotationUtil.getAnnotation(method, CConstant.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(method, CConstant.class) != null) {
             context.appendConstantAccessor(method);
-        } else if (AnnotationUtil.getAnnotation(method, CFunction.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(method, CFunction.class) != null) {
             /* Nothing to do, handled elsewhere but the NativeCodeContext above is important. */
         } else {
             addError("Method is not annotated with supported C interface annotation", method);
@@ -432,15 +435,15 @@ public final class NativeLibraries {
 
         if (!context.isInConfiguration()) {
             /* Nothing to do, all elements in context are ignored. */
-        } else if (AnnotationUtil.getAnnotation(type, CStruct.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(type, CStruct.class) != null) {
             context.appendStructType(type);
-        } else if (AnnotationUtil.getAnnotation(type, RawStructure.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(type, RawStructure.class) != null) {
             context.appendRawStructType(type);
-        } else if (AnnotationUtil.getAnnotation(type, CPointerTo.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(type, CPointerTo.class) != null) {
             context.appendCPointerToType(type);
-        } else if (AnnotationUtil.getAnnotation(type, RawPointerTo.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(type, RawPointerTo.class) != null) {
             context.appendRawPointerToType(type);
-        } else if (AnnotationUtil.getAnnotation(type, CEnum.class) != null) {
+        } else if (GuestAnnotationAccess.getAnnotation(type, CEnum.class) != null) {
             context.appendEnumType(type);
         } else {
             addError("Type is not annotated with supported C interface annotation", type);
@@ -451,12 +454,12 @@ public final class NativeLibraries {
         GuestTypes guestTypes = loader.guestTypes;
         for (ResolvedJavaType clazz : guestTypes.findAnnotatedTypes(CLibrary.class, false)) {
             if (makeContext(getDirectives(clazz)).isInConfiguration()) {
-                annotated.add(AnnotationUtil.getAnnotation(clazz, CLibrary.class));
+                annotated.add(GuestAnnotationAccess.getAnnotation(clazz, CLibrary.class));
             }
         }
         for (ResolvedJavaMethod method : guestTypes.findAnnotatedMethods(CLibrary.class)) {
             if (makeContext(getDirectives(method.getDeclaringClass())).isInConfiguration()) {
-                annotated.add(AnnotationUtil.getAnnotation(method, CLibrary.class));
+                annotated.add(GuestAnnotationAccess.getAnnotation(method, CLibrary.class));
             }
         }
     }
@@ -470,6 +473,8 @@ public final class NativeLibraries {
             /* "nio" implicitly depends on "net" */
             allDeps.add("net");
         }
+        jniStaticLibrariesAndDependencies.add(library);
+        jniStaticLibrariesAndDependencies.addAll(allDeps);
         dependencyGraph.add(library, allDeps);
     }
 
@@ -504,8 +509,31 @@ public final class NativeLibraries {
         return allStaticLibs.get(Paths.get(getStaticLibraryName(staticLibraryName)));
     }
 
+    public List<String> getStaticLibrarySymbols(String staticLibraryName) {
+        Path libraryPath = getStaticLibraryPath(getAllStaticLibs(), staticLibraryName);
+        if (libraryPath == null) {
+            return List.of();
+        }
+        Path symbolsPath = Paths.get(libraryPath + ".symbols");
+        if (!Files.isRegularFile(symbolsPath)) {
+            return List.of();
+        }
+        try {
+            return Files.readAllLines(symbolsPath).stream()
+                            .map(String::trim)
+                            .filter(line -> !line.isEmpty())
+                            .toList();
+        } catch (IOException e) {
+            throw VMError.shouldNotReachHere(e);
+        }
+    }
+
     public Collection<Path> getAllStaticLibNames() {
         return getAllStaticLibs().keySet();
+    }
+
+    public boolean hasStaticLibrary(String library) {
+        return getStaticLibraryPath(getAllStaticLibs(), library) != null;
     }
 
     private Map<Path, Path> getAllStaticLibs() {
@@ -580,7 +608,7 @@ public final class NativeLibraries {
     }
 
     private Class<? extends CContext.Directives> getDirectives(ResolvedJavaType type) {
-        CContext useUnit = AnnotationUtil.getAnnotation(type, CContext.class);
+        CContext useUnit = GuestAnnotationAccess.getAnnotation(type, CContext.class);
         if (useUnit != null) {
             return getDirectives(useUnit);
         } else if (type.getEnclosingType() != null) {
@@ -591,7 +619,7 @@ public final class NativeLibraries {
     }
 
     public CLibrary getCLibrary(ResolvedJavaMethod method) {
-        CLibrary cLibrary = AnnotationUtil.getAnnotation(method, CLibrary.class);
+        CLibrary cLibrary = GuestAnnotationAccess.getAnnotation(method, CLibrary.class);
         if (cLibrary == null) {
             return getCLibrary(method.getDeclaringClass());
         }
@@ -599,7 +627,7 @@ public final class NativeLibraries {
     }
 
     public CLibrary getCLibrary(ResolvedJavaType type) {
-        CLibrary cLibrary = AnnotationUtil.getAnnotation(type, CLibrary.class);
+        CLibrary cLibrary = GuestAnnotationAccess.getAnnotation(type, CLibrary.class);
         if (cLibrary != null) {
             return cLibrary;
         } else if (type.getEnclosingType() != null) {
@@ -692,5 +720,9 @@ public final class NativeLibraries {
 
     public List<String> getJniStaticLibraries() {
         return jniStaticLibraries;
+    }
+
+    public Collection<String> getJniStaticLibrariesAndDependencies() {
+        return jniStaticLibrariesAndDependencies;
     }
 }

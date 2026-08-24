@@ -29,7 +29,6 @@ import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
 
 public abstract class VMLockingPrimitive {
-
     /**
      * The function that initializes the locking primitive.
      *

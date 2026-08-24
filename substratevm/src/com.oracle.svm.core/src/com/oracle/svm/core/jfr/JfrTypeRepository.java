@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.jfr;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
 import java.util.HashMap;
@@ -42,18 +42,18 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.UnmanagedMemoryUtil;
-import com.oracle.svm.core.c.struct.PinnedObjectField;
+import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
+import com.oracle.svm.guest.staging.core.c.struct.PinnedObjectField;
 import com.oracle.svm.core.collections.AbstractUninterruptibleHashtable;
 import com.oracle.svm.core.collections.UninterruptibleEntry;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.headers.LibC;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.jfr.traceid.JfrTraceId;
-import com.oracle.svm.core.jfr.traceid.JfrTraceIdEpoch;
+import com.oracle.svm.core.jfr.traceid.JfrEpoch;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.memory.NullableNativeMemory;
 import com.oracle.svm.core.nmt.NmtCategory;
@@ -72,7 +72,6 @@ import com.oracle.svm.core.nmt.NmtCategory;
  */
 public class JfrTypeRepository implements JfrRepository {
     private static final String BOOTSTRAP_NAME = "bootstrap";
-    private static final String EMPTY_NAME = "";
 
     private final EconomicSet<Class<?>> flushedClasses;
     private final JfrPackageTable flushedPackages;
@@ -104,8 +103,7 @@ public class JfrTypeRepository implements JfrRepository {
     }
 
     public void teardown() {
-        clearEpochData();
-        getEpochData(false).clear();
+        reset();
         previousEpochSnapshot.teardown();
         flushedPackages.teardown();
     }
@@ -123,9 +121,14 @@ public class JfrTypeRepository implements JfrRepository {
         epochTypeData1.clear();
     }
 
-    @Uninterruptible(reason = "Result is only valid until epoch changes.")
+    @Uninterruptible(reason = "Result is only valid until epoch changes.", callerMustBe = true)
     private JfrClassInfoTable getEpochData(boolean previousEpoch) {
-        boolean epoch = previousEpoch ? JfrTraceIdEpoch.getInstance().previousEpoch() : JfrTraceIdEpoch.getInstance().currentEpoch();
+        return getEpochData0(previousEpoch);
+    }
+
+    @Uninterruptible(reason = "Result is only valid until epoch changes.")
+    private JfrClassInfoTable getEpochData0(boolean previousEpoch) {
+        boolean epoch = previousEpoch ? JfrEpoch.getInstance().previousEpoch() : JfrEpoch.getInstance().currentEpoch();
         return epoch ? epochTypeData0 : epochTypeData1;
     }
 
@@ -172,19 +175,27 @@ public class JfrTypeRepository implements JfrRepository {
             return count;
         }
 
-        return writePreviousEpoch(writer);
+        return writeAndClearPreviousEpoch(writer);
     }
 
     @RestrictHeapAccess(access = NO_ALLOCATION, reason = "Used on OOME for emergency dumps")
-    int writePreviousEpoch(JfrChunkWriter writer) {
+    int writeAndClearPreviousEpoch(JfrChunkWriter writer) {
         int count = writePreviousEpochSnapshot(writer);
-        clearEpochData();
+        flushedClasses.clear();
+        flushedModules.clear();
+        flushedClassLoaders.clear();
+        flushedPackages.clear();
+        previousEpochSnapshot.reset();
+        currentPackageId = 0;
+        currentModuleId = 0;
+        currentClassLoaderId = 0;
+        getEpochData0(true).clear();
         return count;
     }
 
     private TypeInfo collectCurrentTypeInfo() {
         TypeInfo typeInfo = new TypeInfo();
-        ClassInfoRaw[] table = (ClassInfoRaw[]) getEpochData(false).getTable();
+        ClassInfoRaw[] table = (ClassInfoRaw[]) getEpochData0(false).getTable();
         for (int i = 0; i < table.length; i++) {
             ClassInfoRaw entry = table[i];
             while (entry.isNonNull()) {
@@ -200,7 +211,7 @@ public class JfrTypeRepository implements JfrRepository {
     }
 
     private void buildPreviousEpochSnapshot() {
-        ClassInfoRaw[] table = (ClassInfoRaw[]) getEpochData(true).getTable();
+        ClassInfoRaw[] table = (ClassInfoRaw[]) getEpochData0(true).getTable();
         for (int i = 0; i < table.length; i++) {
             ClassInfoRaw entry = table[i];
             while (entry.isNonNull()) {
@@ -287,9 +298,6 @@ public class JfrTypeRepository implements JfrRepository {
             return 0L;
         }
         int encodedLength = UninterruptibleUtils.String.utf8Length(symbol, replaceDotWithSlash ? dotWithSlash : null);
-        if (encodedLength == 0) {
-            return SubstrateJVM.getSymbolRepository().getSymbolId(EMPTY_NAME, previousEpoch);
-        }
 
         Pointer buffer = NullableNativeMemory.malloc(encodedLength, NmtCategory.JFR);
         if (buffer.isNull()) {
@@ -303,9 +311,6 @@ public class JfrTypeRepository implements JfrRepository {
     private static long getSymbolId(Pointer source, UnsignedWord length, boolean hasName, boolean previousEpoch) {
         if (!hasName) {
             return 0L;
-        }
-        if (length.equal(0)) {
-            return SubstrateJVM.getSymbolRepository().getSymbolId(EMPTY_NAME, previousEpoch);
         }
 
         Pointer destination = NullableNativeMemory.malloc(length, NmtCategory.JFR);
@@ -332,7 +337,7 @@ public class JfrTypeRepository implements JfrRepository {
         writer.writeCompressedLong(pkgInfo.id);
         writer.writeCompressedLong(getSymbolId(writer, pkgKey.name, true));
         writer.writeCompressedLong(getModuleId(typeInfo, pkgKey.module));
-        writer.writeBoolean(false);
+        writer.writeBoolean(false); // exported
     }
 
     private int writeModules(JfrChunkWriter writer, TypeInfo typeInfo) {
@@ -350,8 +355,8 @@ public class JfrTypeRepository implements JfrRepository {
     private void writeModule(TypeInfo typeInfo, JfrChunkWriter writer, Module module, long id) {
         writer.writeCompressedLong(id);
         writer.writeCompressedLong(getSymbolId(writer, module.getName(), false));
-        writer.writeCompressedLong(0);
-        writer.writeCompressedLong(0);
+        writer.writeCompressedLong(0); // Version
+        writer.writeCompressedLong(0); // Location
         writer.writeCompressedLong(getClassLoaderId(typeInfo, module.getClassLoader()));
     }
 
@@ -418,7 +423,7 @@ public class JfrTypeRepository implements JfrRepository {
                 writer.writeCompressedLong(entry.getId());
                 writer.writeCompressedLong(entry.getNameSymbolId());
                 writer.writeCompressedLong(entry.getModuleId());
-                writer.writeBoolean(false);
+                writer.writeBoolean(false); // exported
                 entry = entry.getNext();
             }
         }
@@ -438,8 +443,8 @@ public class JfrTypeRepository implements JfrRepository {
             while (entry.isNonNull()) {
                 writer.writeCompressedLong(entry.getId());
                 writer.writeCompressedLong(entry.getNameSymbolId());
-                writer.writeCompressedLong(0);
-                writer.writeCompressedLong(0);
+                writer.writeCompressedLong(0); // Version
+                writer.writeCompressedLong(0); // Location
                 writer.writeCompressedLong(entry.getClassLoaderId());
                 entry = entry.getNext();
             }
@@ -734,18 +739,6 @@ public class JfrTypeRepository implements JfrRepository {
         return packageEntry.getId();
     }
 
-    private void clearEpochData() {
-        flushedClasses.clear();
-        flushedModules.clear();
-        flushedClassLoaders.clear();
-        flushedPackages.clear();
-        previousEpochSnapshot.reset();
-        currentPackageId = 0;
-        currentModuleId = 0;
-        currentClassLoaderId = 0;
-        getEpochData(true).clear();
-    }
-
     /**
      * This method sets the package name and length. The target may be stack or heap allocated.
      */
@@ -822,12 +815,12 @@ public class JfrTypeRepository implements JfrRepository {
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     private static int getIdHash(long value) {
-        return UninterruptibleUtils.Long.hashCode(value);
+        return com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(value);
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     private static int getObjectHash(Object object) {
-        return object == null ? 0 : UninterruptibleUtils.Long.hashCode(Word.objectToUntrackedPointer(object).rawValue());
+        return object == null ? 0 : com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(Word.objectToUntrackedPointer(object).rawValue());
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -836,7 +829,7 @@ public class JfrTypeRepository implements JfrRepository {
         for (int i = 0; length.aboveThan(i); i++) {
             sum += buffer.readByte(i);
         }
-        return 31 * UninterruptibleUtils.Long.hashCode(sum) + getIdHash(moduleId);
+        return 31 * com.oracle.svm.guest.staging.core.jdk.UninterruptibleUtils.Long.hashCode(sum) + getIdHash(moduleId);
     }
 
     private static final class PackageKey {

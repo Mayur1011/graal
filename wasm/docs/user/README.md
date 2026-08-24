@@ -177,11 +177,14 @@ Users can override the defaults to experiment with upcoming features or opt out 
 * `--wasm.ExtendedConstExpressions`: Enable support for the [extended constant expressions feature](https://github.com/WebAssembly/extended-const/blob/main/proposals/extended-const/Overview.md), adding limited support for arithmetic instructions inside constant expressions.
   Defaults to `true`.
 
-* `--wasm.Memory64`: Enable support for the [Memory64 feature](https://github.com/WebAssembly/memory64/blob/main/proposals/memory64/Overview.md), letting memories be larger than 4 GiB.
+* `--wasm.Memory64`: Enable support for the [Memory64 feature](https://github.com/WebAssembly/memory64/blob/main/proposals/memory64/Overview.md), letting memories and tables use 64-bit indices.
   Defaults to `false`.
 
 * `--wasm.MultiMemory`: Enable support for the [multiple memories feature](https://github.com/WebAssembly/multi-memory/blob/master/proposals/multi-memory/Overview.md), allowing modules to have multiple memories.
   Defaults to `true`.
+
+* `--wasm.WideArithmetic`: Enable support for the [wide arithmetic feature](https://github.com/WebAssembly/wide-arithmetic), adding instructions for 128-bit addition and subtraction and widening 64-bit multiplication.
+  Defaults to `false`.
 
 * `--wasm.MultiValue`: Enable support for the [multi-value feature](https://github.com/WebAssembly/spec/blob/master/proposals/multi-value/Overview.md), letting functions return multiple values.
   Defaults to `true`.
@@ -203,6 +206,9 @@ Users can override the defaults to experiment with upcoming features or opt out 
 
 * `--wasm.Exceptions`: Enable support for the [exception handling feature](https://github.com/WebAssembly/exception-handling/blob/main/proposals/exception-handling/Exceptions.md), letting WebAssembly modules use new instructions for catching and throwing exceptions.
   Defaults to `true`.
+
+* `--wasm.LegacyExceptions`: Enable support for the [legacy exception handling feature](https://github.com/WebAssembly/exception-handling/tree/main/proposals/exception-handling/legacy), letting WebAssembly modules use the legacy exception instructions independently from `--wasm.Exceptions`.
+  Defaults to `false`.
 
 * `--wasm.TypedFunctionReferences`: Enable support for the [typed function references feature](https://github.com/WebAssembly/function-references/blob/master/proposals/function-references/Overview.md), letting WebAssembly produce and consume (call) function references.
   Defaults to `true`.

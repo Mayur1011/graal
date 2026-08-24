@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2024, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,12 +26,11 @@ package com.oracle.svm.core.stack;
 
 import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 
-import com.oracle.svm.core.interpreter.InterpreterSupport;
 import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
+import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoAccess;
 import com.oracle.svm.core.code.CodeInfoDecoder;
@@ -41,7 +40,8 @@ import com.oracle.svm.core.code.UntetheredCodeInfo;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
 import com.oracle.svm.core.deopt.Deoptimizer;
 import com.oracle.svm.core.heap.ReferenceMapIndex;
-import org.graalvm.word.impl.Word;
+import com.oracle.svm.core.interpreter.InterpreterSupport;
+import com.oracle.svm.shared.Uninterruptible;
 
 public class JavaFrames {
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -60,6 +60,19 @@ public class JavaFrames {
             return false;
         }
         return InterpreterSupport.isInInterpreterLeaveStub(frame.getIP());
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean isInterpreterJNIDowncallStub(JavaFrame frame) {
+        if (!InterpreterSupport.isEnabled()) {
+            return false;
+        }
+        return InterpreterSupport.isInInterpreterJNIDowncallStub(frame.getIP());
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean isAnyInterpreterLeaveStub(JavaFrame frame) {
+        return isInterpreterLeaveStub(frame) || isInterpreterJNIDowncallStub(frame);
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
@@ -85,6 +98,7 @@ public class JavaFrames {
         frame.setEncodedFrameSize(CodeInfoDecoder.INVALID_SIZE_ENCODING);
         frame.setExceptionOffset(CodeInfoQueryResult.NO_EXCEPTION_OFFSET);
         frame.setReferenceMapIndex(ReferenceMapIndex.NO_REFERENCE_MAP);
+        frame.setFramePointerSaveAreaOffset(CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET);
     }
 
     @Uninterruptible(reason = "Prevent deoptimization and GC.", callerMustBe = true)
@@ -99,6 +113,7 @@ public class JavaFrames {
             frame.setEncodedFrameSize(deoptimizedFrame.getSourceEncodedFrameSize());
             frame.setExceptionOffset(CodeInfoQueryResult.NO_EXCEPTION_OFFSET);
             frame.setReferenceMapIndex(ReferenceMapIndex.NO_REFERENCE_MAP);
+            frame.setFramePointerSaveAreaOffset(CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET);
         } else {
             CodePointer returnAddress = ip;
             if (Deoptimizer.checkLazyDeoptimized(ip)) {
@@ -120,6 +135,7 @@ public class JavaFrames {
                 frame.setEncodedFrameSize(CodeInfoDecoder.INVALID_SIZE_ENCODING);
                 frame.setExceptionOffset(CodeInfoQueryResult.NO_EXCEPTION_OFFSET);
                 frame.setReferenceMapIndex(ReferenceMapIndex.NO_REFERENCE_MAP);
+                frame.setFramePointerSaveAreaOffset(CodeInfoQueryResult.NO_FRAME_POINTER_SAVE_AREA_OFFSET);
             } else {
                 /* Encountered a normal Java frame. */
                 Object tether = CodeInfoAccess.acquireTether(untetheredCodeInfo);

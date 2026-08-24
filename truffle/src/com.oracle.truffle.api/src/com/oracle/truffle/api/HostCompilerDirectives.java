@@ -335,7 +335,11 @@ public final class HostCompilerDirectives {
             }
 
             /**
-             * Indicates that this argument will be updated with the return value of the handler.
+             * Indicates that this argument will be updated with the return value of the handler. The
+             * interpreter must store the handler result directly back to the logical local represented
+             * by this argument. Threaded handler stubs rely on that direct store shape to keep the
+             * local consistent when an exception unwinds before the normal return-value update path
+             * runs.
              */
             boolean returnValue() default false;
 
@@ -371,13 +375,33 @@ public final class HostCompilerDirectives {
          * corresponds to the receiver.
          */
         Argument[] arguments();
+
+        /**
+         * Indicates that the annotated method implements a secondary partition of a bytecode
+         * interpreter switch.
+         * <p>
+         * A secondary switch is expected to be inlined into a primary
+         * {@link BytecodeInterpreterSwitch} method during host compilation. Its handler
+         * configuration is retained so that handler calls originating from the inlined secondary
+         * switch can be mapped to the primary switch's handler stubs.
+         * <p>
+         * When compiled as a separate method, however, handler calls in a secondary switch are not
+         * outlined. In particular, a deoptimization target may invoke the separately compiled
+         * secondary switch without first passing through host inlining. Keeping its handler calls
+         * ordinary prevents such execution from entering threaded handler stubs without the
+         * primary switch's exception and state-management paths.
+         *
+         * @return {@code true} if the annotated method is a secondary switch partition whose
+         *         handler calls must not be outlined when the method is compiled separately
+         */
+        boolean secondarySwitch() default false;
     }
 
     /**
      * Annotates a method that fetches the next opcode. The annotated method must be side-effect
-     * free and share the same signature with {@link BytecodeInterpreterHandler}-annotated methods
-     * in the same enclosing class. It will be inlined into Truffle interpreter bytecode handler
-     * stubs to enable tail call threading.
+     * free, must not throw for valid interpreter state, and share the same signature with
+     * {@link BytecodeInterpreterHandler}-annotated methods in the same enclosing class. It will be
+     * inlined into Truffle interpreter bytecode handler stubs to enable tail call threading.
      *
      * @since 25.1
      */

@@ -43,9 +43,9 @@ import com.oracle.svm.core.jdk.PlatformNativeLibrarySupport;
 import com.oracle.svm.core.jni.functions.JNIFunctionTables;
 import com.oracle.svm.core.jni.headers.JNIJavaVM;
 import com.oracle.svm.core.jni.headers.JNIVersion;
-import com.oracle.svm.core.util.ImageHeapMap;
 import com.oracle.svm.guest.staging.c.CGlobalData;
 import com.oracle.svm.guest.staging.c.CGlobalDataFactory;
+import com.oracle.svm.guest.staging.util.ImageHeapMap;
 
 interface JNIOnLoadFunctionPointer extends CFunctionPointer {
     @InvokeCFunctionPointer
@@ -55,19 +55,24 @@ interface JNIOnLoadFunctionPointer extends CFunctionPointer {
 public class JNILibraryInitializer implements NativeLibrarySupport.LibraryInitializer {
 
     private final EconomicMap<String, CGlobalData<PointerBase>> onLoadCGlobalDataMap = ImageHeapMap.create(Equivalence.IDENTITY, "onLoadCGlobalDataMap");
+    private static final String JNI_ONLOAD = "JNI_OnLoad";
 
-    private static String getOnLoadName(String libName, boolean isBuiltIn) {
-        String name = "JNI_OnLoad";
+    public static String getOnLoadName(String libName, boolean isBuiltIn) {
+        String name = JNI_ONLOAD;
         if (isBuiltIn) {
             return name + "_" + libName;
         }
         return name;
     }
 
+    public static boolean isBuiltinOnLoadName(String symbol) {
+        return symbol.startsWith(JNI_ONLOAD + "_");
+    }
+
     public boolean fillCGlobalDataMap(Collection<String> staticLibNames) {
         List<String> libsWithOnLoad = Arrays.asList("net", "java", "nio", "zip", "sunec", "jaas", "sctp", "extnet",
-                        "j2gss", "j2pkcs11", "j2pcsc", "prefs", "verify", "awt", "awt_xawt", "awt_headless", "lcms",
-                        "fontmanager", "javajpeg", "mlib_image", "attach");
+                        "j2gss", "j2pkcs11", "j2pcsc", "prefs", "verify", "awt", "awt_xawt", "awt_headless", "awt_lwawt",
+                        "lcms", "fontmanager", "javajpeg", "mlib_image", "osxapp", "attach");
         // TODO: This check should be removed when all static libs will have JNI_OnLoad function
         ArrayList<String> localStaticLibNames = new ArrayList<>(staticLibNames);
         localStaticLibNames.retainAll(libsWithOnLoad);
@@ -97,7 +102,7 @@ public class JNILibraryInitializer implements NativeLibrarySupport.LibraryInitia
     }
 
     @Override
-    public void initialize(PlatformNativeLibrarySupport.NativeLibrary lib) {
+    public int initialize(PlatformNativeLibrarySupport.NativeLibrary lib) {
         String libName = lib.getCanonicalIdentifier();
         PointerBase onLoadFunction;
         if (lib.isBuiltin()) {
@@ -119,7 +124,9 @@ public class JNILibraryInitializer implements NativeLibrarySupport.LibraryInitia
             if (!JNIVersion.isSupported(expected, lib.isBuiltin())) {
                 throw new UnsatisfiedLinkError("Unsupported JNI version 0x" + Integer.toHexString(expected) + ", required by " + libName);
             }
+            return expected;
         }
+        return JNIVersion.JNI_VERSION_1_1();
     }
 
     private PointerBase getOnLoadSymbolAddress(String libName) {

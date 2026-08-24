@@ -41,7 +41,6 @@ import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.nativeimage.dynamicaccess.AccessCondition;
 import org.graalvm.nativeimage.hosted.Feature;
 import org.graalvm.nativeimage.hosted.RuntimeReflection;
-import org.graalvm.nativeimage.impl.AnnotationExtractor;
 import org.graalvm.nativeimage.impl.ReflectionIntrospector;
 import org.graalvm.nativeimage.impl.RuntimeJNIAccessSupport;
 import org.graalvm.nativeimage.impl.RuntimeProxyRegistrySupport;
@@ -56,12 +55,11 @@ import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
 import com.oracle.svm.configure.ConfigurationFile;
 import com.oracle.svm.configure.ReflectionConfigurationParser;
-import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.shared.BuildPhaseProvider;
 import com.oracle.svm.core.ParsingReason;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.configure.ConfigurationFiles;
-import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.fieldvaluetransformer.FieldValueTransformerWithAvailability;
 import com.oracle.svm.core.hub.DynamicHub;
@@ -81,7 +79,6 @@ import com.oracle.svm.hosted.FeatureImpl.DuringAnalysisAccessImpl;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.analysis.Inflation;
-import com.oracle.svm.hosted.annotation.SubstrateAnnotationExtractor;
 import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.classloading.ClassRegistryFeature;
 import com.oracle.svm.hosted.code.FactoryMethodSupport;
@@ -92,6 +89,7 @@ import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.reflect.proxy.DynamicProxyFeature;
 import com.oracle.svm.hosted.snippets.ReflectionPlugins;
 import com.oracle.svm.hosted.substitute.AnnotationSubstitutionProcessor;
+import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.BuildtimeAccessOnly;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
@@ -100,7 +98,7 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.shared.util.ModuleSupport;
 import com.oracle.svm.shared.util.ReflectionUtil;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.AnnotationUtil;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.OriginalFieldProvider;
@@ -140,6 +138,7 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     private ImageClassLoader loader;
     private AnalysisUniverse aUniverse;
     private UniverseMetaAccess metaAccess;
+    private Boolean relativeCodePointers;
 
     private record AccessorKey(Executable member, Class<?> targetClass) {
     }
@@ -159,8 +158,8 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     FeatureImpl.BeforeAnalysisAccessImpl analysisAccess;
 
     public static final class Options {
-        @Option(help = "Emits a warning when the old programmatic registration API is used.", type = OptionType.User) public static final HostedOptionKey<Boolean> TrackDeprecatedRegistrationUsage = new HostedOptionKey<>(
-                        false);
+        @Option(help = "Emits a warning when the old programmatic registration API is used.", type = OptionType.User) //
+        public static final HostedOptionKey<Boolean> TrackDeprecatedRegistrationUsage = new HostedOptionKey<>(false);
     }
 
     @Override
@@ -295,7 +294,7 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
 
     private MethodRef asMethodRef(ResolvedJavaMethod method) {
         AnalysisMethod aMethod = (method instanceof AnalysisMethod) ? (AnalysisMethod) method : analysisAccess.getUniverse().lookup(method);
-        if (SubstrateOptions.useRelativeCodePointers()) {
+        if (relativeCodePointers) {
             return new MethodOffset(aMethod);
         } else {
             return new MethodPointer(aMethod);
@@ -318,12 +317,17 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     }
 
     @Override
+    public void onRegistration(OnRegistrationAccess access) {
+        ImageSingletons.add(ReflectionFeature.class, this);
+    }
+
+    @Override
     public void afterRegistration(AfterRegistrationAccess access) {
         ModuleSupport.accessPackagesToClass(ModuleSupport.Access.OPEN, null, false, "java.base", "jdk.internal.reflect");
 
         ImageSingletons.add(ReflectionSubstitutionSupport.class, this);
 
-        reflectionData = new ReflectionDataBuilder((SubstrateAnnotationExtractor) ImageSingletons.lookup(AnnotationExtractor.class));
+        reflectionData = new ReflectionDataBuilder();
         ImageSingletons.add(RuntimeReflectionSupport.class, reflectionData);
         ImageSingletons.add(ReflectionHostedSupport.class, reflectionData);
 
@@ -352,6 +356,9 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
 
         loader = access.getImageClassLoader();
         annotationSubstitutions = ((Inflation) access.getBigBang()).getAnnotationSubstitutionProcessor();
+
+        assert relativeCodePointers == null;
+        relativeCodePointers = SubstrateOptions.useRelativeCodePointers();
 
         /* Primitive classes cannot be accessed through Class.forName() */
         for (Class<?> primitiveClass : PRIMITIVE_CLASSES) {
@@ -460,7 +467,7 @@ public class ReflectionFeature implements InternalFeature, ReflectionSubstitutio
     @Override
     public String getDeletionReason(Field reflectionField) {
         ResolvedJavaField field = metaAccess.lookupJavaField(reflectionField);
-        Delete annotation = AnnotationUtil.getAnnotation(field, Delete.class);
+        Delete annotation = GuestAnnotationAccess.getAnnotation(field, Delete.class);
         return annotation != null ? annotation.value() : null;
     }
 

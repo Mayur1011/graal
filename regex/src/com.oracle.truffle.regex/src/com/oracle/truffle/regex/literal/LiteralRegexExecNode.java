@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -69,6 +69,10 @@ public abstract class LiteralRegexExecNode extends RegexExecNode implements Json
         this.implNode = insert(implNode);
     }
 
+    public String getImplName() {
+        return implNode.getImplName();
+    }
+
     @TruffleBoundary
     @Override
     public JsonValue toJson() {
@@ -96,6 +100,10 @@ public abstract class LiteralRegexExecNode extends RegexExecNode implements Json
 
         protected LiteralRegexExecImplNode(PreCalcResultVisitor preCalcResultVisitor) {
             this.resultFactory = preCalcResultVisitor.isBooleanMatch() ? null : preCalcResultVisitor.getResultFactory();
+        }
+
+        protected LiteralRegexExecImplNode() {
+            this.resultFactory = null;
         }
 
         abstract String getImplName();
@@ -247,6 +255,50 @@ public abstract class LiteralRegexExecNode extends RegexExecNode implements Json
                 return RegexResult.getNoMatchInstance();
             }
             return createFromStart(start);
+        }
+    }
+
+    public abstract static class IndexOfStringSet extends LiteralRegexExecImplNode {
+
+        @Child TruffleString.ByteIndexOfStringSetNode indexOfStringSetNode = TruffleString.ByteIndexOfStringSetNode.create();
+
+        private final TruffleString.StringSet stringSet;
+        private final PreCalculatedResultFactory[] preCalculatedResults;
+
+        public IndexOfStringSet(TruffleString.StringSet stringSet, PreCalculatedResultFactory[] preCalculatedResults) {
+            super();
+            this.stringSet = stringSet;
+            this.preCalculatedResults = preCalculatedResults;
+        }
+
+        @Override
+        protected String getImplName() {
+            return "indexOfStringSet";
+        }
+
+        @TruffleBoundary
+        @Override
+        protected String getLiteral() {
+            return stringSet.toString();
+        }
+
+        @SuppressWarnings("unused")
+        @Specialization
+        protected RegexResult run(TruffleString input, int fromIndex, int toIndex, int regionFrom, int regionTo, Encoding encoding) {
+            if (fromIndex >= toIndex) {
+                return RegexResult.getNoMatchInstance();
+            }
+            int stride = encoding.getStride();
+            long result = indexOfStringSetNode.execute(input, fromIndex << stride, toIndex << stride, stringSet);
+            if (!TruffleString.ByteIndexOfStringSetNode.resultIsMatch(result)) {
+                return RegexResult.getNoMatchInstance();
+            }
+            int start = TruffleString.ByteIndexOfStringSetNode.unpackResultByteIndex(result) >> stride;
+            if (preCalculatedResults == null) {
+                return RegexResult.getBooleanMatchInstance();
+            }
+            int patternIndex = TruffleString.ByteIndexOfStringSetNode.unpackResultPatternIndex(result);
+            return preCalculatedResults[patternIndex].createFromStart(start);
         }
     }
 

@@ -1534,7 +1534,7 @@ public class SnippetTemplate {
                     Loop loop = providers.getLoopsDataProvider().getLoopsData(snippetCopy).loop(loopBegin);
                     Mark mark = snippetCopy.getMark();
                     try {
-                        LoopTransformations.fullUnroll(loop, providers, canonicalizer);
+                        LoopTransformations.fullUnroll(loop, providers, canonicalizer, false);
                     } catch (RetryableBailoutException e) {
                         // This is a hard error in this context
                         throw new GraalError(e, snippetCopy.toString());
@@ -2501,7 +2501,7 @@ public class SnippetTemplate {
     }
 
     private boolean requiresFrameStateProcessingBeforeFSA(ValueNode replacee) {
-        return replacee instanceof StateSplit || frameStateAssignment != null;
+        return replacee instanceof WithExceptionNode || replacee instanceof StateSplit || frameStateAssignment != null;
     }
 
     private void rewireFrameStatesBeforeFSA(ValueNode replacee, UnmodifiableEconomicMap<Node, Node> duplicates, FixedNode replaceeGraphCFGPredecessor) {

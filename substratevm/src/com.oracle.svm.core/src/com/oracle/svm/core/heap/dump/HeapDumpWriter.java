@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.heap.dump;
 
-import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+import static com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
 import static com.oracle.svm.core.heap.dump.HeapDumpWriter.HeapDumpError.AllocationFailed;
 import static com.oracle.svm.core.heap.dump.HeapDumpWriter.HeapDumpError.AssertionError;
 import static com.oracle.svm.core.heap.dump.HeapDumpWriter.HeapDumpError.FileFlushFailed;
@@ -47,7 +47,7 @@ import org.graalvm.word.WordBase;
 import org.graalvm.word.impl.ObjectAccess;
 import org.graalvm.word.impl.Word;
 
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.StaticFieldsSupport;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.SubstrateTarget;
@@ -74,7 +74,7 @@ import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.ObjectVisitor;
 import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.ReferenceMapIndex;
-import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
 import com.oracle.svm.core.heap.dump.HeapDumpMetadata.ClassInfo;
 import com.oracle.svm.core.heap.dump.HeapDumpMetadata.ClassInfoAccess;
 import com.oracle.svm.core.heap.dump.HeapDumpMetadata.FieldInfo;
@@ -86,13 +86,14 @@ import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.jdk.UninterruptibleUtils.CharReplacer;
 import com.oracle.svm.core.jdk.UninterruptibleUtils.ReplaceDotWithSlash;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.metaspace.Metaspace;
 import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.os.BufferedFileOperationSupport;
 import com.oracle.svm.core.os.BufferedFileOperationSupport.BufferedFile;
 import com.oracle.svm.core.os.RawFileOperationSupport.RawFileDescriptor;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.hub.DynamicHubIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaStackWalker;
 import com.oracle.svm.core.stack.StackFrameVisitor;
 import com.oracle.svm.core.thread.PlatformThreads;
@@ -100,7 +101,7 @@ import com.oracle.svm.core.thread.RecurringCallbackSupport;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
 import com.oracle.svm.core.threadlocal.VMThreadLocalSupport;
-import com.oracle.svm.core.util.TimeUtils;
+import com.oracle.svm.shared.util.TimeUtils;
 import com.oracle.svm.shared.singletons.MultiLayeredImageSingleton;
 import com.oracle.svm.shared.util.VMError;
 
@@ -834,7 +835,7 @@ public class HeapDumpWriter {
     }
 
     private void writeObject(Object obj) {
-        DynamicHub hub = KnownIntrinsics.readHub(obj);
+        DynamicHub hub = DynamicHubIntrinsics.readHub(obj);
         int layoutEncoding = hub.getLayoutEncoding();
         if (LayoutEncoding.isArray(layoutEncoding)) {
             if (LayoutEncoding.isPrimitiveArray(layoutEncoding)) {
@@ -1296,6 +1297,15 @@ public class HeapDumpWriter {
             }
         }
 
+        @Override
+        public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+            /*
+             * HPROF has no representation for interior Java frame roots. The default
+             * visitDerivedReferenceBase emits the base object as the Java-frame root, so the
+             * interior derived address is intentionally omitted.
+             */
+        }
+
         private void visitFrame(FrameInfoQueryResult frame) {
             if (!markGCRoots) {
                 /*
@@ -1403,7 +1413,7 @@ public class HeapDumpWriter {
         }
 
         private UnsignedWord getObjectSize(Object obj) {
-            int layoutEncoding = KnownIntrinsics.readHub(obj).getLayoutEncoding();
+            int layoutEncoding = DynamicHubIntrinsics.readHub(obj).getLayoutEncoding();
             if (LayoutEncoding.isArray(layoutEncoding)) {
                 int elementSize;
                 if (LayoutEncoding.isPrimitiveArray(layoutEncoding)) {
@@ -1448,6 +1458,15 @@ public class HeapDumpWriter {
                 markAsJniGlobalGCRoot(obj);
             }
         }
+
+        @Override
+        public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+            /*
+             * The default visitDerivedReferenceBase emits the base object as the JNI global root.
+             * The derived slot is only an interior address and cannot be represented as an HPROF
+             * object root.
+             */
+        }
     }
 
     private class ThreadLocalsVisitor implements ObjectReferenceVisitor {
@@ -1478,6 +1497,15 @@ public class HeapDumpWriter {
             if (obj != null) {
                 markThreadLocalAsGCRoot(obj);
             }
+        }
+
+        @Override
+        public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+            /*
+             * The default visitDerivedReferenceBase emits the base object as the thread-local root.
+             * The derived slot is only an interior address and cannot be represented as an HPROF
+             * object root.
+             */
         }
 
         private void markThreadLocalAsGCRoot(Object obj) {

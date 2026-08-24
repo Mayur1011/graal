@@ -46,7 +46,7 @@ import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
 import com.oracle.svm.core.meta.SubstrateObjectConstant;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 
 import jdk.graal.compiler.core.common.util.TypeConversion;
 import jdk.internal.misc.Unsafe;
@@ -228,7 +228,7 @@ public class DeoptState {
             VectorAPIDeoptimizationSupport.PayloadLayout payloadLayout = deoptSupport.getLayout(DynamicHub.toClass(hub));
             if (payloadLayout != null) {
                 Object payloadArray = deoptSupport.materializePayload(this, payloadLayout, encodings[curIdx], sourceFrame);
-                JavaConstant arrayConstant = SubstrateObjectConstant.forObject(payloadArray, ReferenceAccess.singleton().haveCompressedReferences());
+                JavaConstant arrayConstant = SubstrateObjectConstant.forObject(payloadArray, true);
                 Deoptimizer.writeValueInMaterializedObj(obj, curOffset, arrayConstant, sourceFrame);
                 return obj;
             }

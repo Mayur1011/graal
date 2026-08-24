@@ -31,7 +31,6 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import org.graalvm.collections.EconomicSet;
@@ -46,9 +45,6 @@ import com.oracle.svm.shared.option.SubstrateOptionsParser;
 import com.oracle.svm.shared.util.StringUtil;
 
 public class OptionClassFilterBuilder {
-    private final String javaIdentifier = "\\p{javaJavaIdentifierStart}\\p{javaJavaIdentifierPart}*";
-    private final Pattern validOptionValue = Pattern.compile(javaIdentifier + "(\\." + javaIdentifier + ")*");
-
     private final ImageClassLoader imageClassLoader;
     private final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> baseOption;
     private final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> pathsOption;
@@ -95,7 +91,7 @@ public class OptionClassFilterBuilder {
                             SubstrateOptionsParser.commandArgument(baseOption, value), origin);
         } else {
             for (String entry : OptionUtils.resolveOptionValuesRedirection(baseOption, value, origin)) {
-                if (validOptionValue.matcher(entry).matches()) {
+                if (OptionUtils.isValidPackageOrClassName(entry)) {
                     GuestTypes guestTypes = imageClassLoader.guestTypes;
                     if (!origin.commandLineLike() && !guestTypes.getDiscoveredClassNames(container).contains(entry) && !guestTypes.getDiscoveredPackageNames(container).contains(entry)) {
                         throw UserError.abort("Option '%s' provided by %s contains '%s'. No such package or class name found in '%s'.",

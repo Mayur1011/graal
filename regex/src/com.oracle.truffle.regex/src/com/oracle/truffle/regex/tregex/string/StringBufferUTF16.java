@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -51,6 +51,11 @@ public final class StringBufferUTF16 extends CharArrayBuffer implements Abstract
         super(capacity);
         assert encoding == Encoding.UTF_16 || encoding == Encoding.UTF_16_RAW || encoding == Encoding.UTF_16BE;
         this.encoding = encoding;
+    }
+
+    public StringBufferUTF16(StringBufferUTF16 copy) {
+        super(copy);
+        this.encoding = copy.encoding;
     }
 
     @Override
@@ -111,6 +116,21 @@ public final class StringBufferUTF16 extends CharArrayBuffer implements Abstract
             bytes[(i << 1) + 1] = (byte) c;
         }
         return bytes;
+    }
+
+    @Override
+    public AbstractStringBuffer copy() {
+        return new StringBufferUTF16(this);
+    }
+
+    @Override
+    public long prefixHash(int maxLength) {
+        int prefixLength = Math.min(length(), maxLength);
+        long hash = prefixLength;
+        for (int i = 0; i < prefixLength; i++) {
+            hash = Long.rotateLeft(hash, 5) ^ buf[i];
+        }
+        return hash;
     }
 
     @Override

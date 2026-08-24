@@ -27,6 +27,7 @@ package com.oracle.svm.core.code;
 import static com.oracle.svm.core.code.CodeInfoDecoder.FrameInfoState.NO_SUCCESSOR_INDEX_MARKER;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
@@ -40,7 +41,6 @@ import org.graalvm.nativeimage.ImageSingletons;
 
 import com.oracle.svm.core.CalleeSavedRegisters;
 import com.oracle.svm.core.ReservedRegisters;
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.c.NonmovableArray;
 import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.code.CodeInfoEncoder.Counters;
@@ -57,7 +57,9 @@ import com.oracle.svm.core.meta.SharedType;
 import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.util.ByteArrayReader;
 import com.oracle.svm.core.util.HostedStringDeduplication;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.util.GuestAnnotationAccess;
 
 import jdk.graal.compiler.code.CompilationResult;
 import jdk.graal.compiler.core.common.LIRKind;
@@ -68,6 +70,7 @@ import jdk.graal.compiler.core.common.util.TypeConversion;
 import jdk.graal.compiler.core.common.util.UnsafeArrayTypeWriter;
 import jdk.graal.compiler.debug.Assertions;
 import jdk.graal.compiler.nodes.FrameState;
+import jdk.internal.vm.annotation.Hidden;
 import jdk.vm.ci.code.BytecodeFrame;
 import jdk.vm.ci.code.DebugInfo;
 import jdk.vm.ci.code.Register;
@@ -143,11 +146,30 @@ public class FrameInfoEncoder {
              * StackTraceElement contains interned strings, so we un-intern these strings and
              * perform our own de-duplication.
              */
-            int sourceMethodModifiers = method.getModifiers();
+            boolean isHidden = isHiddenMethod(method);
+            boolean isLambdaFormCompiled = ((SharedMethod) method).isLambdaFormCompiled();
+            int sourceMethodFlags = computeSourceMethodFlags(method, isHidden, isLambdaFormCompiled);
             String methodSignature = method.getSignature().toMethodDescriptor();
             String sourceMethodName = stringTable.deduplicate(encoder.encodeMethod(source.getMethodName(), sourceClass), true);
-            String sourceMethodSignature = CodeInfoEncoder.shouldEncodeAllMethodMetadata() ? stringTable.deduplicate(methodSignature, true) : methodSignature;
-            resultFrameInfo.setSourceFields(sourceClass, sourceMethodName, sourceMethodSignature, sourceMethodModifiers);
+            String sourceMethodSignature = CodeInfoEncoder.shouldEncodeMethodSignatureAndModifiers() ? stringTable.deduplicate(methodSignature, true) : methodSignature;
+            resultFrameInfo.setSourceFields(sourceClass, sourceMethodName, sourceMethodSignature, sourceMethodFlags);
+        }
+
+        /**
+         * Returns whether the encoded source frame should be hidden from stack walks. Subclasses
+         * can extend the standard Java hidden-method test for generated methods that cannot carry
+         * a {@link Hidden} annotation themselves.
+         */
+        protected boolean isHiddenMethod(ResolvedJavaMethod method) {
+            return method.getDeclaringClass().isHidden() || GuestAnnotationAccess.isAnnotationPresent(method, Hidden.class);
+        }
+
+        /**
+         * Computes the modifiers and internal flags stored for {@code method}. Subclasses may
+         * override this to attach method-kind metadata needed when decoding frame information.
+         */
+        protected int computeSourceMethodFlags(ResolvedJavaMethod method, boolean isHidden, boolean isLambdaFormCompiled) {
+            return FrameSourceInfo.MethodFlags.computeSourceMethodFlags(method.getModifiers(), isHidden, isLambdaFormCompiled);
         }
 
         protected abstract Class<?> getDeclaringJavaClass(ResolvedJavaMethod method);
@@ -201,7 +223,7 @@ public class FrameInfoEncoder {
                     Class<?> sourceClass,
                     String sourceMethodName,
                     String sourceMethodSignature,
-                    int sourceMethodModifier,
+                    int sourceMethodFlags,
                     int sourceLineNumber,
                     long encodedBci,
                     boolean isSliceEnd) {
@@ -248,7 +270,7 @@ public class FrameInfoEncoder {
         final Map<CompressedFrameData, Integer> frameMaxHeight = new HashMap<>();
 
         boolean sealed = false;
-        EconomicMap<Integer, Long> encodedSliceIndexMap = EconomicMap.create(Equivalence.DEFAULT);
+        long[] encodedSliceIndexes;
 
         void addFrameSlice(FrameData data, List<CompressedFrameData> slice) {
             assert !sealed : "already sealed";
@@ -342,9 +364,12 @@ public class FrameInfoEncoder {
              * represented by pointers, while frames unique to this frame slice will be directly
              * encoded here.
              */
+            encodedSliceIndexes = new long[frameSlices.size()];
+            Arrays.fill(encodedSliceIndexes, -1);
             Integer[] sliceOrder = sliceFrequency.encodeAll(new Integer[sliceFrequency.getLength()]);
             for (Integer sliceIdx : sliceOrder) {
-                assert !encodedSliceIndexMap.containsKey(sliceIdx) : sliceIdx;
+                recordActivity.run();
+                assert encodedSliceIndexes[sliceIdx] == -1 : sliceIdx;
 
                 List<CompressedFrameData> slice = frameSlices.get(sliceIdx);
                 assert slice.size() > 0 : sliceIdx;
@@ -353,17 +378,21 @@ public class FrameInfoEncoder {
                  * state is walkable within the shared frame state, then the slice's initial shared
                  * frame can be directly pointed to.
                  */
-                boolean directlyPointToSharedFrame = slice.stream().allMatch(frame -> {
+                boolean directlyPointToSharedFrame = true;
+                for (CompressedFrameData frame : slice) {
                     EconomicSet<CompressedFrameData> frameSuccessors = frameSuccessorMap.get(frame);
-                    return sharedEncodedFrameIndexMap.containsKey(frame) && (frameSuccessors == null || frameSuccessors.size() == 1);
-                });
+                    if (!sharedEncodedFrameIndexMap.containsKey(frame) || (frameSuccessors != null && frameSuccessors.size() != 1)) {
+                        directlyPointToSharedFrame = false;
+                        break;
+                    }
+                }
                 if (directlyPointToSharedFrame) {
                     CompressedFrameData frame = slice.getFirst();
                     assert sharedEncodedFrameIndexMap.containsKey(frame) : frame;
-                    encodedSliceIndexMap.put(sliceIdx, sharedEncodedFrameIndexMap.get(frame));
+                    encodedSliceIndexes[sliceIdx] = sharedEncodedFrameIndexMap.get(frame);
                 } else {
                     /* Need to encode unique frames and pointers to shared frames. */
-                    encodedSliceIndexMap.put(sliceIdx, encodingBuffer.getBytesWritten());
+                    encodedSliceIndexes[sliceIdx] = encodingBuffer.getBytesWritten();
                     CompressedFrameData prevFrame = null;
                     boolean prevShared = false;
                     for (CompressedFrameData frame : slice) {
@@ -407,7 +436,7 @@ public class FrameInfoEncoder {
             int methodId = frame.methodId;
             if (frame.sourceMethod != null) {
                 assert methodId == 0;
-                methodId = encoders.findMethodIndex(frame.sourceMethod, frame.sourceClass, frame.sourceMethodName, frame.sourceMethodSignature, frame.sourceMethodModifier, false);
+                methodId = encoders.findMethodIndex(frame.sourceMethod, frame.sourceClass, frame.sourceMethodName, frame.sourceMethodSignature, frame.sourceMethodFlags, false);
             }
 
             encodingBuffer.putSV(encodeCompressedFirstEntry(methodId, true));
@@ -421,9 +450,8 @@ public class FrameInfoEncoder {
 
         long getEncodingOffset(int sliceIndex) {
             assert sealed : this;
-            Long encodedSliceIndex = encodedSliceIndexMap.get(sliceIndex);
-            assert encodedSliceIndex != null;
-            return encodedSliceIndex;
+            assert encodedSliceIndexes[sliceIndex] != -1 : sliceIndex;
+            return encodedSliceIndexes[sliceIndex];
         }
 
         /** When verifying the frame encoding, the method id must be filled in. */
@@ -436,13 +464,13 @@ public class FrameInfoEncoder {
                 int previousMethodId = cur.sourceMethodId;
                 if (cur.getSourceMethod() != null) {
                     cur.sourceMethodId = encoders.findMethodIndex(cur.getSourceMethod(), cur.getSourceClass(), cur.getSourceMethodName(), cur.getSourceMethodSignature(),
-                                    cur.getSourceMethodModifiers(), false);
+                                    cur.getSourceMethodFlags(), false);
                     assert previousMethodId == 0 || previousMethodId == cur.sourceMethodId;
                 }
 
                 boolean isSliceEnd = (cur.caller == null);
                 CompressedFrameData expected = new CompressedFrameData(previousMethodId, cur.getSourceMethod(), cur.getSourceClass(), cur.getSourceMethodName(),
-                                cur.getSourceMethodSignature(), cur.getSourceMethodModifiers(), cur.sourceLineNumber, cur.encodedBci, isSliceEnd);
+                                cur.getSourceMethodSignature(), cur.getSourceMethodFlags(), cur.sourceLineNumber, cur.encodedBci, isSliceEnd);
                 assert expected.equals(slice.get(curIdx)) : expected;
                 curIdx++;
             }
@@ -496,14 +524,14 @@ public class FrameInfoEncoder {
             if (resultFrame.getSourceMethod() != null) {
                 assert resultFrame.sourceMethodId == 0;
                 encoders.addMethod(resultFrame.getSourceMethod(), resultFrame.getSourceClass(), resultFrame.getSourceMethodName(), resultFrame.getSourceMethodSignature(),
-                                resultFrame.getSourceMethodModifiers());
+                                resultFrame.getSourceMethodFlags());
             }
 
             // save encoding metadata
             assert resultFrame.hasLocalValueInfo() == includeLocalValues : resultFrame;
             if (!includeLocalValues) {
                 CompressedFrameData frame = new CompressedFrameData(resultFrame.sourceMethodId, resultFrame.getSourceMethod(), resultFrame.getSourceClass(), resultFrame.getSourceMethodName(),
-                                resultFrame.getSourceMethodSignature(), resultFrame.getSourceMethodModifiers(), resultFrame.sourceLineNumber, resultFrame.encodedBci, (resultFrame.caller == null));
+                                resultFrame.getSourceMethodSignature(), resultFrame.getSourceMethodFlags(), resultFrame.sourceLineNumber, resultFrame.encodedBci, (resultFrame.caller == null));
                 frameSlice.add(frame);
             }
 
@@ -517,7 +545,7 @@ public class FrameInfoEncoder {
         return data;
     }
 
-    protected FrameData addDefaultDebugInfo(ResolvedJavaMethod method, int totalFrameSize) {
+    FrameData addDefaultDebugInfo(ResolvedJavaMethod method, int totalFrameSize) {
         FrameData data = new FrameData(null, totalFrameSize, null, true);
         data.frame.encodedBci = FrameInfoEncoder.encodeBci(0, FrameState.StackState.BeforePop);
         customization.fillSourceFields(method, data.frame);
@@ -527,12 +555,12 @@ public class FrameInfoEncoder {
         if (data.frame.getSourceMethod() != null) {
             assert data.frame.sourceMethodId == 0;
             encoders.addMethod(data.frame.getSourceMethod(), data.frame.getSourceClass(), data.frame.getSourceMethodName(), data.frame.getSourceMethodSignature(),
-                            data.frame.getSourceMethodModifiers());
+                            data.frame.getSourceMethodFlags());
         }
 
         // save encoding metadata
         CompressedFrameData frame = new CompressedFrameData(data.frame.sourceMethodId, data.frame.getSourceMethod(), data.frame.getSourceClass(), data.frame.getSourceMethodName(),
-                        data.frame.getSourceMethodSignature(), data.frame.getSourceMethodModifiers(), data.frame.sourceLineNumber, data.frame.encodedBci, true);
+                        data.frame.getSourceMethodSignature(), data.frame.getSourceMethodFlags(), data.frame.sourceLineNumber, data.frame.encodedBci, true);
         frameMetadata.addFrameSlice(data, List.of(frame));
 
         allDebugInfos.add(data);
@@ -578,9 +606,24 @@ public class FrameInfoEncoder {
 
         if (needLocalValues) {
             frameInfo.deoptMethodOffset = method.getImageCodeDeoptOffset();
-            if (frameInfo.deoptMethodOffset != 0 && customization.storeDeoptTargetMethod()) {
+            if (customization.storeDeoptTargetMethod() && (frameInfo.deoptMethodOffset != 0 || method.getInterpreterMethod() != null)) {
+                /*
+                 * Runtime-compiled methods that resume in the interpreter do not have an AOT deopt
+                 * target, but stack walking still needs the method object for Ristretto source
+                 * reconstruction.
+                 */
                 frameInfo.deoptMethod = method;
                 encoders.objectConstants.addObject(constantAccess.forObject(method, false));
+            }
+            /*
+             * Runtime frame-info customization requests method retention, and an interpreter
+             * counterpart is precisely what makes a runtime-installed frame eligible to resume in
+             * Ristretto. Make that producer contract explicit here: the lazy-deoptimization stub
+             * selector must never have to guess a return-register root kind from an anonymous
+             * AfterPop frame. General AOT encodings remain allowed to omit this optional field.
+             */
+            if (customization.storeDeoptTargetMethod() && method.getInterpreterMethod() != null) {
+                VMError.guarantee(method.equals(frameInfo.deoptMethod), "Runtime interpreter frame metadata must retain its deoptimization method");
             }
 
             frameInfo.numLocals = frame.numLocals;
@@ -885,13 +928,17 @@ public class FrameInfoEncoder {
         return result;
     }
 
+    byte[] encodeAll(Runnable recordActivity) {
+        return NonmovableArrays.heapCopyOfByteArray(encodeFrameDatas(recordActivity));
+    }
+
     protected void encodeAllAndInstall(CodeInfo target, Runnable recordActivity) {
         NonmovableArray<Byte> frameInfoEncodings = encodeFrameDatas(recordActivity);
         install(target, frameInfoEncodings);
     }
 
     @Uninterruptible(reason = "Nonmovable object arrays are not visible to GC until installed in target.")
-    private static void install(CodeInfo target, NonmovableArray<Byte> frameInfoEncodings) {
+    static void install(CodeInfo target, NonmovableArray<Byte> frameInfoEncodings) {
         CodeInfoAccess.setFrameInfo(target, frameInfoEncodings);
         afterInstallation(target);
     }
@@ -958,7 +1005,7 @@ public class FrameInfoEncoder {
 
             if (cur.getSourceMethod() != null) {
                 assert cur.sourceMethodId == 0;
-                cur.sourceMethodId = encoders.findMethodIndex(cur.getSourceMethod(), cur.getSourceClass(), cur.getSourceMethodName(), cur.getSourceMethodSignature(), cur.getSourceMethodModifiers(),
+                cur.sourceMethodId = encoders.findMethodIndex(cur.getSourceMethod(), cur.getSourceClass(), cur.getSourceMethodName(), cur.getSourceMethodSignature(), cur.getSourceMethodFlags(),
                                 false);
             }
 

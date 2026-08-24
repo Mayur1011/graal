@@ -26,15 +26,21 @@ package jdk.graal.compiler.nodes.loop;
 
 import static jdk.graal.compiler.nodes.loop.MathUtil.mul;
 
+import java.util.Collection;
+
 import jdk.graal.compiler.core.common.type.IntegerStamp;
 import jdk.graal.compiler.core.common.type.Stamp;
+import jdk.graal.compiler.debug.GraalError;
 import jdk.graal.compiler.nodes.ConstantNode;
+import jdk.graal.compiler.nodes.LogicNode;
 import jdk.graal.compiler.nodes.NodeView;
 import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.calc.IntegerConvertNode;
 import jdk.graal.compiler.nodes.calc.NegateNode;
 import jdk.graal.compiler.nodes.util.GraphUtil;
 import jdk.graal.compiler.phases.common.util.LoopUtility;
+import jdk.graal.compiler.replacements.nodes.arithmetic.IntegerMulExactOverflowNode;
+import jdk.vm.ci.code.CodeUtil;
 
 public class DerivedScaledInductionVariable extends DerivedInductionVariable {
 
@@ -178,6 +184,22 @@ public class DerivedScaledInductionVariable extends DerivedInductionVariable {
     }
 
     @Override
+    protected ValueNode collectLocalExtremumOverflowConditions(boolean assumeLoopEntered, Stamp stamp, ValueNode effectiveMaxTripCount, ValueNode baseExtremum,
+                    Collection<LogicNode> conditions) {
+        GraalError.guarantee(stamp instanceof IntegerStamp, "Expected integer stamp for %s but got %s", this, stamp);
+        GraalError.guarantee(baseExtremum != null, "Expected base extremum for %s", this);
+        ValueNode convertedScale = scale;
+        if (!convertedScale.stamp(NodeView.DEFAULT).isCompatible(stamp)) {
+            convertedScale = IntegerConvertNode.convert(convertedScale, stamp, graph(), NodeView.DEFAULT);
+        }
+        LogicNode mulOverflow = IntegerMulExactOverflowNode.create(baseExtremum, convertedScale);
+        if (!mulOverflow.isContradiction()) {
+            conditions.add(graph().addOrUniqueWithInputs(mulOverflow));
+        }
+        return mul(graph(), baseExtremum, convertedScale);
+    }
+
+    @Override
     public ValueNode exitValueNode() {
         return mul(graph(), base.exitValueNode(), scale);
     }
@@ -198,7 +220,10 @@ public class DerivedScaledInductionVariable extends DerivedInductionVariable {
         if (super.isConstantScale(ref)) {
             return super.constantScale(ref);
         }
-        return scale.asJavaConstant().asLong() * base.constantScale(ref);
+        int bits = IntegerStamp.getBits(valueNode().stamp(NodeView.DEFAULT));
+        long longScale = this.scale.asJavaConstant().asLong() * base.constantScale(ref);
+        // The accumulated scale has to be sign extended to the IV's native width to preserve overflow semantics
+        return CodeUtil.signExtend(longScale, bits);
     }
 
     @Override

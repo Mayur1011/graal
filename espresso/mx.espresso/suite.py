@@ -24,8 +24,8 @@
 suite = {
     "mxversion": "7.65.0",
     "name": "espresso",
-    "version" : "25.1.0",
-    "release" : False,
+    "version_from" : "sdk",
+    "release_from" : "sdk",
     "groupId" : "org.graalvm.espresso",
     "url" : "https://www.graalvm.org/reference-manual/java-on-truffle/",
     "developer" : {
@@ -300,6 +300,11 @@ suite = {
             "dependencies": [
                 "sdk:VMACCESS_GUEST",
             ],
+            "requiresConcealed": {
+                "java.base": [
+                    "sun.reflect.annotation",
+                ],
+            },
             "javaCompliance": "21+",
             "checkstyle": "com.oracle.truffle.espresso",
         },

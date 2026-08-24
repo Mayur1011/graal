@@ -33,7 +33,7 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.impl.Word;
 
 import com.oracle.svm.shared.AlwaysInline;
-import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.heap.InstanceReferenceMapDecoder;
 import com.oracle.svm.core.heap.InstanceReferenceMapDecoder.InstanceReferenceMap;
@@ -43,7 +43,6 @@ import com.oracle.svm.core.heap.PodReferenceMapDecoder;
 import com.oracle.svm.core.heap.ReferenceInternals;
 import com.oracle.svm.core.heap.StoredContinuation;
 import com.oracle.svm.core.heap.StoredContinuationAccess;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.thread.ContinuationSupport;
 import com.oracle.svm.shared.util.VMError;
 
@@ -69,7 +68,7 @@ public class InteriorObjRefWalker {
     @AlwaysInline("GC performance")
     @Uninterruptible(reason = "Forced inlining (StoredContinuation objects must not move).", callerMustBe = true)
     public static void walkObjectInline(Object obj, ObjectReferenceVisitor visitor) {
-        DynamicHub objHub = KnownIntrinsics.readHub(obj);
+        DynamicHub objHub = DynamicHubIntrinsics.readHub(obj);
 
         int hubType = objHub.getHubType();
         if (HubType.isInstance(hubType)) {
@@ -104,7 +103,7 @@ public class InteriorObjRefWalker {
     @AlwaysInline("De-virtualize calls to ObjectReferenceVisitor")
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     public static void walkObjectArrayRangeInline(Object obj, int firstIndex, int count, ObjectReferenceVisitor visitor) {
-        DynamicHub objHub = KnownIntrinsics.readHub(obj);
+        DynamicHub objHub = DynamicHubIntrinsics.readHub(obj);
         assert objHub.getHubType() == HubType.OBJECT_ARRAY;
         assert firstIndex >= 0 && count >= 0 && firstIndex + count >= 0;
         assert firstIndex + count <= ArrayLengthNode.arrayLength(obj);

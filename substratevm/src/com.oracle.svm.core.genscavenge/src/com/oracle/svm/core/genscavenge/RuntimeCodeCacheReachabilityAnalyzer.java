@@ -37,7 +37,7 @@ import com.oracle.svm.core.heap.ObjectReferenceVisitor;
 import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.heap.RuntimeCodeCacheCleaner;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.util.DuplicatedInNativeCode;
+import com.oracle.svm.shared.util.DuplicatedInNativeCode;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.SubstrateUtil;
 
@@ -71,6 +71,16 @@ final class RuntimeCodeCacheReachabilityAnalyzer implements ObjectReferenceVisit
         if (ptrToObj.isNonNull() && !isReachable(ptrToObj)) {
             throw UNREACHABLE_OBJECTS_EXCEPTION;
         }
+    }
+
+    @Override
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public void visitDerivedReference(Pointer baseObjRef, Pointer derivedObjRef, boolean compressed, Object holderObject) {
+        /*
+         * The default visitDerivedReferenceBase processes the base object reference through
+         * visitObjectReferences. The derived slot is an interior address and must not be checked as
+         * a separate object start.
+         */
     }
 
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)

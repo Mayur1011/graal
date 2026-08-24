@@ -106,7 +106,7 @@ final class FileSystems {
         return new NIOFileSystem(fileSystem, null, false);
     }
 
-    static FileSystem allowInternalResourceAccess(FileSystem fileSystem) {
+    static FileSystem allowInternalResourceAccess(FileSystem fileSystem, boolean readOnlyResources) {
         Set<Path> languageHomes = new HashSet<>();
         for (LanguageCache cache : LanguageCache.languages().values()) {
             final String languageHome = cache.getLanguageHome();
@@ -114,7 +114,11 @@ final class FileSystems {
                 languageHomes.add(Paths.get(languageHome));
             }
         }
-        FileSystem internalResourcesFileSystem = new ForwardingFileSystem(newDefaultFileSystem(null)) {
+        FileSystem internalResourcesFileSystem = newDefaultFileSystem(null);
+        if (readOnlyResources) {
+            internalResourcesFileSystem = new ReadOnlyFileSystem(internalResourcesFileSystem, false);
+        }
+        internalResourcesFileSystem = new ForwardingFileSystem(internalResourcesFileSystem) {
             @Override
             public boolean isHost() {
                 return false;
@@ -1721,8 +1725,11 @@ final class FileSystems {
         @Override
         public void createSymbolicLink(Path link, Path target, FileAttribute<?>... attrs) throws IOException {
             FileSystemInfo linkFileSystemInfo = selectFileSystem(link);
-            FileSystemInfo targetFileSystemInfo = selectFileSystem(target);
-            if (linkFileSystemInfo.fileSystem == targetFileSystemInfo.fileSystem) {
+            Path absoluteLink = linkFileSystemInfo.absolutePath;
+            Path linkParent = absoluteLink.getParent();
+            // A relative symbolic-link target is interpreted relative to the link's parent.
+            Path normalizedTarget = target.isAbsolute() ? target.normalize() : (linkParent == null ? absoluteLink : linkParent).resolve(target).normalize();
+            if (linkFileSystemInfo.fileSystem == findOwningFileSystem(normalizedTarget)) {
                 linkFileSystemInfo.fileSystem.createSymbolicLink(linkFileSystemInfo.path, target);
             } else {
                 throw new IOException("Cross file system linking is not supported.");
@@ -1832,20 +1839,23 @@ final class FileSystems {
             changeDirLock.readLock().lock();
             try {
                 Path absolutePath = toNormalizedAbsolutePath(path);
-                FileSystem fs = fallBackFileSystem;
-                for (Selector delegate : delegates) {
-                    if (delegate.test(absolutePath)) {
-                        fs = delegate.getFileSystem();
-                        break;
-                    }
-                }
-                return new FileSystemInfo(fs, currentWorkingDirectory != null ? absolutePath : path);
+                FileSystem fs = findOwningFileSystem(absolutePath);
+                return new FileSystemInfo(fs, currentWorkingDirectory != null ? absolutePath : path, absolutePath);
             } finally {
                 changeDirLock.readLock().unlock();
             }
         }
 
-        private record FileSystemInfo(FileSystem fileSystem, Path path) {
+        private FileSystem findOwningFileSystem(Path absolutePath) {
+            for (Selector delegate : delegates) {
+                if (delegate.test(absolutePath)) {
+                    return delegate.getFileSystem();
+                }
+            }
+            return fallBackFileSystem;
+        }
+
+        private record FileSystemInfo(FileSystem fileSystem, Path path, Path absolutePath) {
         }
 
         private Path toNormalizedAbsolutePath(Path path) {

@@ -24,8 +24,9 @@
  */
 package com.oracle.svm.core.heap;
 
-import com.oracle.svm.core.NeverInline;
-import com.oracle.svm.core.SubstrateGCOptions;
+import com.oracle.svm.shared.NeverInline;
+import com.oracle.svm.guest.staging.core.heap.RestrictHeapAccess;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.VMInspectionOptions;
 import com.oracle.svm.core.headers.LibC;
@@ -35,7 +36,7 @@ import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import com.oracle.svm.core.jdk.JDKUtils;
 import com.oracle.svm.core.jfr.HasJfrSupport;
 import com.oracle.svm.core.jfr.SubstrateJVM;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.stack.StackOverflowCheck;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.shared.Uninterruptible;
@@ -78,10 +79,6 @@ public class OutOfMemoryUtil {
                         (!ImageLayerBuildingSupport.buildingImageLayer() || HeapDumpMetadata.isLayeredMetadataAvailable())) {
             HeapDumping.singleton().dumpHeapOnOutOfMemoryError();
         }
-        if (HasJfrSupport.get()) {
-            SubstrateJVM.get().vmOutOfMemoryErrorRotation();
-        }
-
         if (SubstrateGCOptions.ExitOnOutOfMemoryError.getValue()) {
             if (LibC.isSupported()) {
                 Log.log().string("Terminating due to java.lang.OutOfMemoryError: ").string(JDKUtils.getRawMessage(error)).newline();
@@ -92,7 +89,15 @@ public class OutOfMemoryUtil {
         }
 
         if (SubstrateGCOptions.ReportFatalErrorOnOutOfMemoryError.getValue()) {
+            dumpJfrOnOutOfMemoryError();
             throw VMError.shouldNotReachHere("reporting due to java.lang.OutOfMemoryError");
+        }
+    }
+
+    @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Can't allocate while out of memory.")
+    private static void dumpJfrOnOutOfMemoryError() {
+        if (HasJfrSupport.get()) {
+            SubstrateJVM.get().dumpOnOutOfMemoryError();
         }
     }
 }

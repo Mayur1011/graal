@@ -254,18 +254,23 @@ final class DefaultRuntimeAccessor extends Accessor {
         }
 
         @Override
+        public void onEnginePatchSuccess(Object runtimeData) {
+
+        }
+
+        @Override
         public boolean onEngineClosing(Object runtimeData) {
             return false;
         }
 
         @Override
         public boolean onStoreCache(Object runtimeData, Path targetPath, long cancelledWord) {
-            throw new UnsupportedOperationException("Persisting an engine is not supported with the the Truffle fallback runtime. It is only supported on native-image hosts.");
+            throw new UnsupportedOperationException("Persisting an engine is not supported with the Truffle fallback runtime. It is only supported on native-image hosts.");
         }
 
         @Override
         public ByteBuffer persistCache(Object runtimeData, Engine.CancellationCallback callback) {
-            throw new UnsupportedOperationException("Persisting an engine is not supported with the the Truffle fallback runtime. It is only supported on native-image hosts.");
+            throw new UnsupportedOperationException("Persisting an engine is not supported with the Truffle fallback runtime. It is only supported on native-image hosts.");
         }
 
         @Override
@@ -309,12 +314,7 @@ final class DefaultRuntimeAccessor extends Accessor {
 
         @Override
         public <T> ThreadLocal<T> createTerminatingThreadLocal(Supplier<T> initialValue, Consumer<T> onThreadTermination) {
-            return ThreadLocal.withInitial(initialValue);
-        }
-
-        @Override
-        public void setInitializedTimestamp(CallTarget target, long timestamp) {
-
+            return DefaultTruffleRuntime.createTerminatingThreadLocal(initialValue, onThreadTermination);
         }
 
         @Override
@@ -329,8 +329,9 @@ final class DefaultRuntimeAccessor extends Accessor {
 
         @Override
         public long getStackOverflowLimit() {
-            throw new UnsupportedOperationException();
+            return DefaultTruffleRuntime.getStackOverflowLimit();
         }
+
     }
 
 }
