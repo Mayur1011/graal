@@ -60,7 +60,6 @@ public class FinalPartialEscapePhase extends PartialEscapePhase {
     protected void run(StructuredGraph graph, CoreProviders context) {
         if (VirtualUtil.matches(graph, EscapeAnalyzeOnly.getValue(graph.getOptions()))) {
             graph.getGraphState().setDuringStage(StageFlag.FINAL_PARTIAL_ESCAPE);
-
             super.run(graph, context);
         }
     }

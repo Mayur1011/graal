@@ -51,6 +51,24 @@ public abstract class VirtualObjectNode extends ValueNode implements LIRLowerabl
     protected boolean hasIdentity;
     private int objectId = -1;
 
+    // ----------------------------- my code ------------------------------------- //
+
+    /*
+     1. True when this virtual object originated from an actual source allocation that PEA replaced with a virtual object.
+     2. this flag is copied when graal duplicates a node, so that the duplicate node can track the PEA outcome.
+     what will happen if i remove this?
+     */
+    private boolean peaOutcomeTracked = false;
+
+    public final boolean isPEAOutcomeTracked() {
+        return peaOutcomeTracked;
+    }
+
+    public final void setPEAOutcomeTracked() {
+        this.peaOutcomeTracked = true;
+    }
+    // ----------------------------- my code ------------------------------------- //
+
     protected VirtualObjectNode(NodeClass<? extends VirtualObjectNode> c, ResolvedJavaType type, boolean hasIdentity) {
         super(c, StampFactory.objectNonNull(TypeReference.createExactTrusted(type)));
         this.hasIdentity = hasIdentity;

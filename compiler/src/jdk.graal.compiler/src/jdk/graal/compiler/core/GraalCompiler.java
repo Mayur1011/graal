@@ -55,6 +55,7 @@ import jdk.graal.compiler.phases.tiers.Suites;
 import jdk.graal.compiler.phases.tiers.TargetProvider;
 import jdk.graal.compiler.phases.util.Providers;
 import jdk.graal.compiler.serviceprovider.GraalServices;
+import jdk.graal.compiler.virtual.phases.ea.PEAEffectivenessReporter;
 import jdk.vm.ci.meta.ProfilingInfo;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
@@ -159,6 +160,9 @@ public class GraalCompiler {
                         r.entryPointDecorator, null, r.lirSuites);
                 assert !r.verifySourcePositions || r.graph.verifySourcePositions(true);
                 checkForRequestedCrash(r.graph, r.requestedCrashHandler());
+                // A compilation-complete snapshot avoids reporting intermediate PEA states from
+                // individual final-PEA passes or CommitAllocationNode lowerings.
+                PEAEffectivenessReporter.writeSnapshot(r.graph.getOptions());
             } catch (Throwable e) {
                 throw debug.handle(e);
             }

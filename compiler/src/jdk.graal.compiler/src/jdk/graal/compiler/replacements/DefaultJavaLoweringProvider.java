@@ -203,6 +203,15 @@ import jdk.vm.ci.meta.ResolvedJavaField;
 import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.SpeculationLog;
 
+// ----------------------------- my code ------------------------------------- //
+import jdk.graal.compiler.nodes.debug.DynamicCounterNode;
+import jdk.graal.compiler.virtual.phases.ea.PartialEscapePhase;
+import jdk.graal.compiler.virtual.phases.ea.PartialEscapeClosure;
+import jdk.graal.compiler.virtual.phases.ea.PEAEffectivenessReporter;
+// ----------------------------- my code ------------------------------------- //
+
+
+
 /**
  * VM-independent lowerings for standard Java nodes. VM-specific methods are abstract and must be
  * implemented by VM-specific subclasses.
@@ -1007,6 +1016,67 @@ public abstract class DefaultJavaLoweringProvider implements LoweringProvider, V
 
         writeOmittedValues(commit, graph, allocations, omittedValues);
         finishAllocatedObjects(tool, commit, commit, allocations);
+
+        // ----------------------------- my code ------------------------------------- //
+        /*
+         * We are now lowering a CommitAllocationNode after PEA has finished.
+         * Every tracked virtual object in this commit becomes a final real
+         * allocation in generated code.
+         * This counter is inserted only when a CommitAllocationNode survives until lowering
+         */
+        int peaFinalMaterializedObjects = 0;
+        for (VirtualObjectNode virtual : virtualObjects) {
+            if (virtual.isPEAOutcomeTracked()) {
+                peaFinalMaterializedObjects++;
+                if (PEAEffectivenessReporter.enabled(graph.getOptions())) {
+                    PEAEffectivenessReporter.recordFinalHeap(graph, virtual);
+                }
+            }
+        }
+        if (peaFinalMaterializedObjects != 0) {
+            PartialEscapeClosure.COUNTER_PEA_MATERIALIZED_OBJECTS.add(
+                    graph.getDebug(), peaFinalMaterializedObjects);
+        }
+        if (PartialEscapePhase.runtimeCountersEnabled(graph.getOptions())
+                && peaFinalMaterializedObjects != 0) {
+            DynamicCounterNode.addCounterBefore(
+                    "PEA outcomes",
+                    "final materialized",
+                    peaFinalMaterializedObjects,
+                    false,
+                    commit);
+        }
+        /*
+        What each argument means
+            - "PEA outcomes" → counter group
+            - "final materialized" → counter name
+            - peaFinalMaterializedObjects → increment amount (long, here computed during lowering)
+            - false → no per-method context suffix in counter name
+            - commit → insert location (a FixedNode), so counter is placed just before this CommitAllocationNode.
+
+            the addCounterBefore creates a node and add it to structured graph just before the commit node.
+
+
+            Runtime behavior:
+            DynamicCounterNode is LIRLowerable; during codegen it emits a benchmark-counter instruction (createBenchmarkCounter(...)).
+            That means at runtime, whenever execution reaches that lowered `commit` site, the counter is incremented.
+
+
+
+            Important nuance for your specific code
+
+            `peaFinalMaterializedObjects` is computed at compile time (count of tracked virtual objects in that surviving commit).
+            So runtime effect is:
+
+            - each execution of this site adds that fixed number,
+            - total counter approximates:
+              **(# executions of this commit) × (materialized objects in this commit node)**.
+
+            So yes, this gives runtime information, but it is **runtime frequency weighted by a compile-time per-site increment**, not a freshly recomputed runtime object count each time.
+
+        */
+        // ----------------------------- my code ------------------------------------- //
+
         graph.removeFixed(commit);
 
         for (AbstractNewObjectNode recursiveLowering : recursiveLowerings) {

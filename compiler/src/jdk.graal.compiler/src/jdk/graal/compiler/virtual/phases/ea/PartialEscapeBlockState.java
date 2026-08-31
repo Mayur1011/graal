@@ -47,6 +47,7 @@ import jdk.graal.compiler.nodes.virtual.AllocatedObjectNode;
 import jdk.graal.compiler.nodes.virtual.CommitAllocationNode;
 import jdk.graal.compiler.nodes.virtual.LockState;
 import jdk.graal.compiler.nodes.virtual.VirtualObjectNode;
+
 import jdk.graal.compiler.options.OptionValues;
 import jdk.graal.compiler.virtual.phases.ea.EffectList.Effect;
 
@@ -222,6 +223,9 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
         List<Boolean> ensureVirtual = new ArrayList<>(2);
         materializeWithCommit(fixed, virtual, objects, locks, values, ensureVirtual, otherAllocations,
                 requiresStrictLockOrder, virtualObjects, materializeEffects);
+        // ----------------------------- my code ------------------------------------- //
+        // int materializedObjectCount = objects.size() + otherAllocations.size();
+        // PartialEscapeClosure.COUNTER_PEA_MATERIALIZED_OBJECTS.add(fixed.getDebug(), materializedObjectCount);
         /*
          * because all currently virtualized allocations will be materialized in 1
          * commit alloc node
@@ -229,6 +233,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
          * and commit
          * allocation nodes
          */
+        // ----------------------------- my code ------------------------------------- //
+
         materializeEffects.addAllocationDelta(objects.size() > 0 ? -1 : 0);
         materializeEffects.addVirtualizationDelta(-(objects.size() + otherAllocations.size()));
         materializeEffects.add(new Effect("materializeBefore") {
@@ -298,6 +304,21 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                         }
                     }
                 }
+                // ----------------------------- my code ------------------------------------- //
+                //if (PartialEscapePhase.Options.PEARuntimeCounters.getValue(
+                //        fixed.getOptions())) {
+                //    int count = objects.size() + otherAllocations.size();
+                //    if (count != 0) {
+                //        DynamicCounterNode.addCounterBefore(
+                //                "PEA runtime",
+                //                "materialized virtual objects",
+                //                count,
+                //                false,
+                //                fixed);
+                //    }
+                //}
+                // ----------------------------- my code ------------------------------------- //
+
             }
 
             @Override

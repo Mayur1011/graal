@@ -105,7 +105,40 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         @Option(help = "", type = OptionType.Debug)
         public static final OptionKey<Boolean> OptEarlyReadElimination = new OptionKey<>(true);
         //@formatter:on
+
+        // ----------------------------- my code ------------------------------------- //
+
+        // i have written this to counter materializations during runtime
+        @Option(help = "Insert runtime counters for final PEA allocation outcomes.", type = OptionType.Debug)
+        public static final OptionKey<Boolean> PEARuntimeCounters = new OptionKey<>(false);
+
+        @Option(help = "Emit a compact PEA allocation-effectiveness report.", type = OptionType.Debug)
+        public static final OptionKey<Boolean> PEAEffectivenessReport = new OptionKey<>(false);
+
+        @Option(help = "File to which the compact PEA allocation-effectiveness report is written.", type = OptionType.Debug)
+        public static final OptionKey<String> PEAEffectivenessReportFile = new OptionKey<>(null);
+
+        @Option(help = "Comma-separated declaring-class prefixes included in all PEA effectiveness counters and reports.", type = OptionType.Debug)
+        public static final OptionKey<String> PEAEffectivenessReportFilter = new OptionKey<>(null);
     }
+
+    // ----------------------------- my code ------------------------------------- //
+    public static boolean runtimeCountersEnabled(OptionValues options) {
+        return Options.PEARuntimeCounters.getValue(options);
+    }
+    public static boolean effectivenessReportEnabled(OptionValues options) {
+        return Options.PEAEffectivenessReport.getValue(options);
+    }
+
+    public static String effectivenessReportFile(OptionValues options) {
+        return Options.PEAEffectivenessReportFile.getValue(options);
+    }
+
+    public static String effectivenessReportFilter(OptionValues options) {
+        return Options.PEAEffectivenessReportFilter.getValue(options);
+    }
+
+    // ----------------------------- my code ------------------------------------- //
 
     private final boolean readElimination;
     private final BasePhase<CoreProviders> cleanupPhase;
@@ -231,6 +264,9 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         if (matchGraph(graph)) {
             checkUserMethod(graph);
             if (readElimination || graph.hasVirtualizableAllocation()) {
+
+                // Record source allocation sites before this PEA invocation can remove them. The reporter deduplicates sites across repeated PEA invocations and recompilations.
+                PEAEffectivenessReporter.recordCandidates(graph);
                 try (
                         DebugCloseable ignored = graph
                                 .getOptimizationLog()

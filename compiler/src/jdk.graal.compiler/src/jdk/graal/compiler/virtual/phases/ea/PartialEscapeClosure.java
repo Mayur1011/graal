@@ -97,6 +97,14 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
     public static final CounterKey COUNTER_MATERIALIZATIONS_LOOP_EXIT = DebugContext
             .counter("MaterializationsLoopExit");
     public static final CounterKey COUNTER_ALLOCATION_REMOVED = DebugContext.counter("AllocationsRemoved");
+
+    // ----------------------------- my code ------------------------------------- //
+    /** Number of virtual objects created by PEA during compilation. */
+    public static final CounterKey COUNTER_PEA_VIRTUALIZED_OBJECTS = DebugContext.counter("PEA_VirtualizedObjects");
+    /** Number of virtual objects for which PEA emits a real allocation path. */
+    public static final CounterKey COUNTER_PEA_MATERIALIZED_OBJECTS = DebugContext.counter("PEA_MaterializedObjects");
+    // ----------------------------- my code ------------------------------------- //
+
     public static final CounterKey COUNTER_MEMORYCHECKPOINT = DebugContext.counter("MemoryCheckpoint");
 
     /**
@@ -283,7 +291,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                 // This is the direct call to materializeBefore() that is the reason for the
                 // overflow exception. It is not a recursive call to ensureMaterialized() that
                 // would throw the exception.
-                printMaterializationLog(virtual, materializeBefore, "loop-overflow-retry");
+                // printMaterializationLog(virtual, materializeBefore, "loop-overflow-retry");
                 initialState.materializeBefore(
                         materializeBefore,
                         virtual,
@@ -787,9 +795,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
             String reason) {
 
         // this is to print only needed info
-        if (!shouldLogMaterializations(virtual, materializeBefore)) {
-            return;
-        }
+        // if (!shouldLogMaterializations(virtual, materializeBefore)) {
+        //    return;
+        // }
 
         System.out.println("=========================================");
         System.out.println("Virtual Object : #" + virtual.getObjectId());
@@ -871,7 +879,7 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
             // ------------------------------------------------- MY DEBUGGING CODE
             // --------------------------------------------//
 
-            printMaterializationLog(virtual, materializeBefore, reason);
+            // printMaterializationLog(virtual, materializeBefore, reason);
 
             // if (materializeBefore != null &&
             // materializeBefore.getNodeSourcePosition() != null) {
