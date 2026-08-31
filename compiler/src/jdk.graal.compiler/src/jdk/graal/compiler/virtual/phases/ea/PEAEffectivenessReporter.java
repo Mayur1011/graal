@@ -2,6 +2,10 @@ package jdk.graal.compiler.virtual.phases.ea;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -119,21 +123,13 @@ public final class PEAEffectivenessReporter {
         }
 
         String file = PartialEscapePhase.effectivenessReportFile(options);
-        try (PrintStream out = new PrintStream(PathUtilities.openOutputStream(file))) {
+        String temporaryFile = file + ".tmp";
+        try (PrintStream out = new PrintStream(PathUtilities.openOutputStream(temporaryFile))) {
             out.println("record;class;method;descriptor;bci;contexts;observed_outcomes;classification");
             for (SiteSummary summary : summaries) {
-                out.printf("site;%s;%s;%s;%d;%d;%s;%s%n", summary.site.className, summary.site.method,
-                                summary.site.descriptor, summary.site.bci, summary.contexts,
+                out.printf("site;%s;%s;%s;%d;%d;%s;%s%n", field(summary.site.className), field(summary.site.method),
+                                field(summary.site.descriptor), summary.site.bci, summary.contexts,
                                 summary.outcomes(), summary.classification());
-            }
-            out.println("record;context;compilation;inline_context;class;method;descriptor;bci;candidate;virtualized;final_heap;classification");
-            for (ContextRecord row : rows) {
-                if (row.candidate) {
-                    Site site = row.context.site;
-                    out.printf("context;%s;%s;%s;%s;%s;%d;true;%s;%s;%s%n", row.context.compilation,
-                                    row.context.inlineContext, site.className, site.method, site.descriptor, site.bci,
-                                    row.virtualized, row.finalHeap, row.classification());
-                }
             }
             out.printf("summary;total_candidates;%d%n", summaries.size());
             out.printf("summary;always_not_virtualized;%d%n", notVirtualized);
@@ -141,8 +137,30 @@ public final class PEAEffectivenessReporter {
             out.printf("summary;always_materialized;%d%n", finallyMaterialized);
             out.printf("summary;mixed;%d%n", mixed);
         } catch (IOException e) {
-            throw new RuntimeException("Could not write PEA effectiveness report to " + file, e);
+            throw new RuntimeException("Could not write PEA effectiveness snapshot to " + temporaryFile, e);
         }
+
+        /*
+         * A HotSpot shutdown can stop a background compiler thread at any point. Never truncate
+         * the last complete public report while constructing its replacement. On file systems
+         * without atomic rename support, the completed temporary file is still moved only after
+         * its stream has been closed.
+         */
+        Path temporaryPath = Path.of(temporaryFile);
+        Path outputPath = Path.of(file);
+        try {
+            try {
+                Files.move(temporaryPath, outputPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temporaryPath, outputPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Could not publish PEA effectiveness snapshot to " + file, e);
+        }
+    }
+
+    private static String field(String value) {
+        return value.replace("%", "%25").replace(";", "%3B").replace("\r", "%0D").replace("\n", "%0A");
     }
 
     private static synchronized boolean markCandidateInstrumented(StructuredGraph graph, Node node) {
