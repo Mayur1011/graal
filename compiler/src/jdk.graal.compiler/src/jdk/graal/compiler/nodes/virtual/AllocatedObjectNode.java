@@ -32,6 +32,7 @@ import jdk.vm.ci.meta.ConstantReflectionProvider;
 import jdk.graal.compiler.core.common.type.StampFactory;
 import jdk.graal.compiler.core.common.type.TypeReference;
 import jdk.graal.compiler.graph.NodeClass;
+import jdk.graal.compiler.graph.NodeSourcePosition;
 import jdk.graal.compiler.nodeinfo.NodeInfo;
 import jdk.graal.compiler.nodes.ValueNode;
 import jdk.graal.compiler.nodes.calc.FloatingNode;
@@ -51,6 +52,13 @@ public final class AllocatedObjectNode extends FloatingNode implements Virtualiz
     @Input VirtualObjectNode virtualObject;
     @Input(Extension) CommitAllocationNode commit;
 
+    /** PEA experiment metadata. These values are preserved when this node is cloned. */
+    private PEAMaterializationReason peaMaterializationReason = PEAMaterializationReason.OTHER_UNKNOWN;
+    private PEAMaterializationReason peaRootMaterializationReason = PEAMaterializationReason.OTHER_UNKNOWN;
+    private String peaMaterializationTriggerNode = "<none>";
+    private NodeSourcePosition peaMaterializationTriggerPosition;
+    private String peaMaterializationDetail = "";
+
     public AllocatedObjectNode(VirtualObjectNode virtualObject) {
         super(TYPE, StampFactory.objectNonNull(TypeReference.createExactTrusted(virtualObject.type())));
         this.virtualObject = virtualObject;
@@ -69,6 +77,34 @@ public final class AllocatedObjectNode extends FloatingNode implements Virtualiz
         commit = x;
     }
 
+    public void setPEAMaterializationMetadata(PEAMaterializationReason reason, PEAMaterializationReason rootReason,
+                    String triggerNode, NodeSourcePosition triggerPosition, String detail) {
+        peaMaterializationReason = reason;
+        peaRootMaterializationReason = rootReason;
+        peaMaterializationTriggerNode = triggerNode;
+        peaMaterializationTriggerPosition = triggerPosition;
+        peaMaterializationDetail = detail;
+    }
+
+    public PEAMaterializationReason getPEAMaterializationReason() {
+        return peaMaterializationReason;
+    }
+
+    public PEAMaterializationReason getPEARootMaterializationReason() {
+        return peaRootMaterializationReason;
+    }
+
+    public String getPEAMaterializationTriggerNode() {
+        return peaMaterializationTriggerNode;
+    }
+
+    public NodeSourcePosition getPEAMaterializationTriggerPosition() {
+        return peaMaterializationTriggerPosition;
+    }
+
+    public String getPEAMaterializationDetail() {
+        return peaMaterializationDetail;
+    }
     @Override
     public void virtualize(VirtualizerTool tool) {
         tool.replaceWithVirtual(getVirtualObject());

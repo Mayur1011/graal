@@ -57,6 +57,7 @@ import jdk.graal.compiler.nodes.LoopExitNode;
 import jdk.graal.compiler.nodes.NodeView;
 import jdk.graal.compiler.nodes.PhiNode;
 import jdk.graal.compiler.nodes.ProxyNode;
+import jdk.graal.compiler.nodes.ReturnNode;
 import jdk.graal.compiler.nodes.StructuredGraph;
 import jdk.graal.compiler.nodes.StructuredGraph.ScheduleResult;
 import jdk.graal.compiler.nodes.UnwindNode;
@@ -66,8 +67,11 @@ import jdk.graal.compiler.nodes.ValueProxyNode;
 import jdk.graal.compiler.nodes.VirtualState;
 import jdk.graal.compiler.nodes.WithExceptionNode;
 import jdk.graal.compiler.nodes.cfg.HIRBlock;
+import jdk.graal.compiler.nodes.extended.RawStoreNode;
 import jdk.graal.compiler.nodes.java.AbstractNewObjectNode;
 import jdk.graal.compiler.nodes.java.MonitorEnterNode;
+import jdk.graal.compiler.nodes.java.StoreFieldNode;
+import jdk.graal.compiler.nodes.java.StoreIndexedNode;
 import jdk.graal.compiler.nodes.spi.Canonicalizable;
 import jdk.graal.compiler.nodes.spi.CoreProviders;
 import jdk.graal.compiler.nodes.spi.NodeWithState;
@@ -78,6 +82,7 @@ import jdk.graal.compiler.nodes.virtual.AllocatedObjectNode;
 import jdk.graal.compiler.nodes.virtual.CommitAllocationNode;
 import jdk.graal.compiler.nodes.virtual.EnsureVirtualizedNode;
 import jdk.graal.compiler.nodes.virtual.EscapeObjectState;
+import jdk.graal.compiler.nodes.virtual.PEAMaterializationReason;
 import jdk.graal.compiler.nodes.virtual.VirtualObjectNode;
 import jdk.graal.compiler.nodes.virtual.VirtualObjectState;
 import jdk.vm.ci.meta.JavaConstant;
@@ -98,13 +103,10 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
             .counter("MaterializationsLoopExit");
     public static final CounterKey COUNTER_ALLOCATION_REMOVED = DebugContext.counter("AllocationsRemoved");
 
-    // ----------------------------- my code ------------------------------------- //
     /** Number of virtual objects created by PEA during compilation. */
     public static final CounterKey COUNTER_PEA_VIRTUALIZED_OBJECTS = DebugContext.counter("PEA_VirtualizedObjects");
     /** Number of virtual objects for which PEA emits a real allocation path. */
     public static final CounterKey COUNTER_PEA_MATERIALIZED_OBJECTS = DebugContext.counter("PEA_MaterializedObjects");
-    // ----------------------------- my code ------------------------------------- //
-
     public static final CounterKey COUNTER_MEMORYCHECKPOINT = DebugContext.counter("MemoryCheckpoint");
 
     /**
@@ -291,13 +293,13 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                 // This is the direct call to materializeBefore() that is the reason for the
                 // overflow exception. It is not a recursive call to ensureMaterialized() that
                 // would throw the exception.
-                // printMaterializationLog(virtual, materializeBefore, "loop-overflow-retry");
                 initialState.materializeBefore(
                         materializeBefore,
                         virtual,
                         requiresStrictLockOrder,
                         virtualObjects,
-                        effects);
+                        effects,
+                        PEAMaterializationCause.direct(PEAMaterializationReason.LOOP_ANALYSIS_LIMIT, materializeBefore, "loop-overflow-retry"));
             }
         }
     }
@@ -428,7 +430,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                     id,
                                     materializeBefore,
                                     effects,
-                                    COUNTER_MATERIALIZATIONS, "materialize-all-mode");
+                                    COUNTER_MATERIALIZATIONS,
+                                    PEAMaterializationCause.direct(PEAMaterializationReason.LOOP_ANALYSIS_LIMIT, node, "materialize-all-mode"));
                         }
                     }
                 }
@@ -605,7 +608,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                 id,
                                 insertBefore,
                                 effects,
-                                COUNTER_MATERIALIZATIONS_UNHANDLED);
+                                COUNTER_MATERIALIZATIONS_UNHANDLED,
+                                materializationCauseForInput(node, input));
                         effects.replaceFirstInput(
                                 node,
                                 input,
@@ -744,99 +748,47 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
     }
 
-    private static int bciOf(Node n) {
-        return (n != null && n.getNodeSourcePosition() != null) ? n.getNodeSourcePosition().getBCI() : -1;
-    }
-
-    private static String slashType(VirtualObjectNode virtual) {
-        if (virtual.type() == null) {
-            return "<unknown>";
+    private static PEAMaterializationCause materializationCauseForInput(Node node, Node input) {
+        if (node instanceof CallTargetNode callTarget) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.CALL_ARGUMENT, node, callTarget.targetName());
         }
-        String name = virtual.type().getName(); // e.g. Ljava/lang/StringBuilder;
-        if (name.startsWith("L") && name.endsWith(";")) {
-            return name.substring(1, name.length() - 1);
+        if (node instanceof ReturnNode) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.METHOD_RETURN, node, "");
         }
-        return name;
-    }
-
-    private static String methodString(FixedNode n) {
-        if (n == null || n.getNodeSourcePosition() == null) {
-            return "<unknown>";
+        if (node instanceof UnwindNode) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.EXCEPTION_UNWIND, node, "");
         }
-        var m = n.getNodeSourcePosition().getMethod();
-        return m.getDeclaringClass().toJavaName() + "." + m.getName() + "()";
+        if (node instanceof StoreFieldNode store && input == store.value()) {
+            PEAMaterializationReason reason = store.isStatic() ? PEAMaterializationReason.STATIC_FIELD_STORE : PEAMaterializationReason.INSTANCE_FIELD_STORE;
+            return PEAMaterializationCause.direct(reason, node, store.field().format("%H.%n"));
+        }
+        if (node instanceof StoreIndexedNode store && input == store.value()) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.ARRAY_STORE, node, "");
+        }
+        if (node instanceof RawStoreNode store && input == store.value()) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.INSTANCE_FIELD_STORE, node, "unsafe/raw store");
+        }
+        if (node instanceof MonitorEnterNode) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.LOCK_CONSTRAINT, node, "monitor enter");
+        }
+        return PEAMaterializationCause.direct(PEAMaterializationReason.UNSUPPORTED_USE, node, "virtual input");
     }
 
-    private static String reasonOf(CounterKey counter) {
-        if (counter == COUNTER_MATERIALIZATIONS_UNHANDLED)
-            return "non-virtualizable-input";
-        if (counter == COUNTER_MATERIALIZATIONS_MERGE)
-            return "merge-incompatible-state";
-        if (counter == COUNTER_MATERIALIZATIONS_PHI)
-            return "phi-incompatible-state";
-        if (counter == COUNTER_MATERIALIZATIONS_LOOP_EXIT)
-            return "loop-exit-exception-bci";
-        return counter.getName();
+    PEAMaterializationCause materializationCauseForVirtualizer(Node node) {
+        if (node instanceof MonitorEnterNode) {
+            return PEAMaterializationCause.direct(PEAMaterializationReason.LOCK_CONSTRAINT, node, "virtualizer requested monitor materialization");
+        }
+        return PEAMaterializationCause.direct(PEAMaterializationReason.VIRTUALIZER_REQUESTED, node, "virtualizer requested materialization");
     }
 
-    private static String safeNodeName(Node n) {
-        return n == null ? "<null>" : n.getClass().getSimpleName() + "@" + Integer.toHexString(n.hashCode());
-    }
-
-    private static boolean shouldLogMaterializations(VirtualObjectNode virtual, FixedNode materializeBefore) {
-        // TODO: add a filter to only print materialization logs for user defined
-        // classes and methods.
-        return true;
-    }
-
-    private void printMaterializationLog(
-            VirtualObjectNode virtual,
-            FixedNode materializeBefore,
-            String reason) {
-
-        // this is to print only needed info
-        // if (!shouldLogMaterializations(virtual, materializeBefore)) {
-        //    return;
-        // }
-
-        System.out.println("=========================================");
-        System.out.println("Virtual Object : #" + virtual.getObjectId());
-        System.out.println("Java Type      : " + slashType(virtual));
-        System.out.println("Method         : " + methodString(materializeBefore));
-        System.out.println("BCI            : " + bciOf(materializeBefore));
-        System.out.println();
-        System.out.println("Materialized At:");
-        System.out.println("    " + safeNodeName(materializeBefore));
-        System.out.println();
-        System.out.println("Reason:");
-        System.out.println("    " + reason);
-        System.out.println();
-        System.out.println("Current IR Node:");
-        System.out.println("    " + (materializeBefore == null ? "<null>" : materializeBefore));
-        System.out.println();
-        System.out.println("=========================================");
-    }
-
-    protected boolean ensureMaterialized(
-            PartialEscapeBlockState<?> state,
-            int object,
-            FixedNode materializeBefore,
-            GraphEffectList effects,
-            CounterKey counter) {
-        return ensureMaterialized(
-                state, object, materializeBefore, effects, counter,
-                reasonOf(counter));
-    }
-
-    // TODO: Important function (materializeBefore → materializeWithCommit →
-    // escape(), which is the sole chain for virtual→materialized transitions)
+    /** The sole entry point for ordinary virtual-to-materialized state transitions. */
     protected boolean ensureMaterialized(
             PartialEscapeBlockState<?> state,
             int object,
             FixedNode materializeBefore,
             GraphEffectList effects,
             CounterKey counter,
-            String reason) {
+            PEAMaterializationCause cause) {
         ObjectState objectState = state.getObjectState(object);
         if (objectState.isVirtual()) {
             if (currentMode == EffectsClosureMode.STOP_NEW_VIRTUALIZATIONS_LOOP_NEST) {
@@ -876,58 +828,13 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                     "%s is not virtual",
                     objectState);
 
-            // ------------------------------------------------- MY DEBUGGING CODE
-            // --------------------------------------------//
-
-            // printMaterializationLog(virtual, materializeBefore, reason);
-
-            // if (materializeBefore != null &&
-            // materializeBefore.getNodeSourcePosition() != null) {
-            // var method = materializeBefore
-            // .getNodeSourcePosition()
-            // .getMethod();
-            // String className = method.getDeclaringClass().toJavaName();
-            // String methodName = method.getName();
-
-            // if ("Test.java".equals(method.getDeclaringClass().getSourceFileName())) {
-            // int escapeBCI = materializeBefore.getNodeSourcePosition().getBCI();
-            // int virtualObjectBCI = virtual.getNodeSourcePosition() != null
-            // ? virtual.getNodeSourcePosition().getBCI()
-            // : -1;
-            // System.out.println("-------------------------------------------------");
-            // System.out.println(
-            // "[PartialEscapeClosure.java]: Materializing virtual object with id: "
-            // + virtual.getObjectId()
-            // + " in method: " + methodName
-            // + " (class: " + className + ")");
-            // System.out.println(
-            // "[PartialEscapeClosure.java]: " + materializeBefore.toString() + " at BCI: "
-            // + escapeBCI);
-            // System.out.println("[PartialEscapeClosure.java]: Virtual object source
-            // position: "
-            // + virtual.getNodeSourcePosition()
-            // + " at BCI: " + virtualObjectBCI);
-
-            // System.out.println("-------------------------------------------------");
-
-            // // System.out.printf(
-            // // "[PEA] MATERIALIZED class=%-10s method=%-15s bci=%-5d object=%s
-            // // triggerNode=%s%n",
-            // // className,
-            // // methodName,
-            // // escapeBCI,
-            // // virtual.toString(),
-            // // materializeBefore.toString());
-            // }
-            // }
-            // ------------------------------------------------- MY DEBUGGING CODE
-            // --------------------------------------------//
             state.materializeBefore(
                     materializeBefore,
                     virtual,
                     requiresStrictLockOrder,
                     virtualObjects,
-                    effects);
+                    effects,
+                    cause);
 
             assert !updateStatesForMaterialized(
                     state,
@@ -1037,7 +944,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                             other.getObjectId(),
                             materializeBefore,
                             effects,
-                            counter, "unstructured-lock-depth-" + lockDepth);
+                            counter,
+                            PEAMaterializationCause.direct(PEAMaterializationReason.LOCK_CONSTRAINT, materializeBefore,
+                                            "unstructured-lock-depth-" + lockDepth));
                 }
             }
         }
@@ -1177,7 +1086,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                 virtual.getObjectId(),
                                 exitNode,
                                 effects,
-                                COUNTER_MATERIALIZATIONS_LOOP_EXIT);
+                                COUNTER_MATERIALIZATIONS_LOOP_EXIT,
+                                PEAMaterializationCause.direct(PEAMaterializationReason.LOOP_EXIT_STATE, exitNode, "exception-handling-bci"));
                     }
                     proxies.put(virtual.getObjectId(), proxy);
                 }
@@ -1502,7 +1412,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                                 object,
                                                 predecessor.getEndNode(),
                                                 blockEffects.get(predecessor),
-                                                COUNTER_MATERIALIZATIONS_MERGE);
+                                                COUNTER_MATERIALIZATIONS_MERGE,
+                                                PEAMaterializationCause.direct(PEAMaterializationReason.MERGE_INCOMPATIBLE, merge,
+                                                                "virtual/materialized state merge"));
                                         obj = states[i].getObjectState(object);
                                     }
                                     setPhiInput(
@@ -1540,7 +1452,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                             virtual.getObjectId(),
                                             predecessor.getEndNode(),
                                             blockEffects.get(predecessor),
-                                            COUNTER_MATERIALIZATIONS_MERGE);
+                                            COUNTER_MATERIALIZATIONS_MERGE,
+                                            PEAMaterializationCause.direct(PEAMaterializationReason.MERGE_INCOMPATIBLE, merge, "phi input materialization"));
                                 }
                             }
                         }
@@ -1562,7 +1475,9 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                                 virtual.getObjectId(),
                                                 predecessor.getEndNode(),
                                                 blockEffects.get(predecessor),
-                                                COUNTER_MATERIALIZATIONS_MERGE);
+                                                COUNTER_MATERIALIZATIONS_MERGE,
+                                                PEAMaterializationCause.direct(PEAMaterializationReason.MERGE_INCOMPATIBLE, merge,
+                                                                "forced merge materialization"));
                                     }
                                 }
                             }
@@ -1965,7 +1880,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                 object,
                                 predecessor.getEndNode(),
                                 blockEffects.get(predecessor),
-                                COUNTER_MATERIALIZATIONS_MERGE);
+                                COUNTER_MATERIALIZATIONS_MERGE,
+                                PEAMaterializationCause.direct(PEAMaterializationReason.MERGE_INCOMPATIBLE, merge, "incompatible virtual object states"));
                         setPhiInput(
                                 materializedValuePhi,
                                 i,
@@ -2011,7 +1927,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                 entryVirtual.getObjectId(),
                                 predecessor.getEndNode(),
                                 blockEffects.get(predecessor),
-                                COUNTER_MATERIALIZATIONS_MERGE);
+                                COUNTER_MATERIALIZATIONS_MERGE,
+                                PEAMaterializationCause.direct(PEAMaterializationReason.MERGE_INCOMPATIBLE, merge, "incompatible virtual object entry"));
                         objectState = states[i].getObjectState(object);
                         if (objectState.isVirtual()) {
                             states[i].setEntry(
@@ -2192,7 +2109,8 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
                                 virtual.getObjectId(),
                                 predecessor.getEndNode(),
                                 blockEffects.get(predecessor),
-                                COUNTER_MATERIALIZATIONS_PHI);
+                                COUNTER_MATERIALIZATIONS_PHI,
+                                PEAMaterializationCause.direct(PEAMaterializationReason.PHI_INCOMPATIBLE, phi, "incompatible object phi"));
                     }
                 }
             }
@@ -2308,33 +2226,3 @@ public abstract class PartialEscapeClosure<BlockT extends PartialEscapeBlockStat
         }
     }
 }
-
-/**
- * 1 284 "loop-overflow-retry" ✅ Direct call with printMaterializationLog
- * 2 416-421 "materialize-all-mode" ✅ 6-param explicit
- * 3 593-598 "non-virtualizable-input" ✅ 5-param → reasonOf
- * 4 1004-1009 "unstructured-lock-depth-N" ✅ 6-param explicit
- * 5 1144-1149 "loop-exit-exception-bci" ✅ 5-param → reasonOf
- * 6 1469-1474 "merge-incompatible-state" ✅ 5-param → reasonOf
- * 7 1507-1512 "merge-incompatible-state" ✅ 5-param → reasonOf
- * 8 1529-1534 "merge-incompatible-state" ✅ 5-param → reasonOf
- * 9 1932-1937 "merge-incompatible-state" ✅ 5-param → reasonOf
- * 10 1978-1983 "merge-incompatible-state" ✅ 5-param → reasonOf
- * 11 2159-2164 "phi-incompatible-state" ✅ 5-param → reasonOf
- *
- *
- *
- *
- * Semantic category Reason string Mechanism
- * Method call escape escape-via-method-call non-virtualizable-input
- * Return escape escape-via-return non-virtualizable-input
- * Thread/global escape escape-via-static-field-store non-virtualizable-input
- * Field store escape escape-via-instance-field-store non-virtualizable-input
- * Array store escape escape-via-array-store non-virtualizable-input
- * Exception escape escape-via-exception non-virtualizable-input
- * Merge escape merge-incompatible-state merge
- * Phi escape phi-incompatible-state processPhi
- * Lock escape unstructured-lock-depth-N materializeVirtualLocksBefore
- * Exception BCI loop-exit-exception-bci processLoopExit
- * Loop overflow materialize-all-mode / loop-overflow-retry mode switch
- */

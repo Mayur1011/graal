@@ -51,6 +51,7 @@ import jdk.graal.compiler.nodes.spi.CoreProvidersDelegate;
 import jdk.graal.compiler.nodes.spi.NodeWithState;
 import jdk.graal.compiler.nodes.spi.VirtualizableAllocation;
 import jdk.graal.compiler.nodes.spi.VirtualizerTool;
+import jdk.graal.compiler.nodes.virtual.CommitAllocationNode;
 import jdk.graal.compiler.nodes.virtual.VirtualArrayNode;
 import jdk.graal.compiler.nodes.virtual.VirtualInstanceNode;
 import jdk.graal.compiler.nodes.virtual.VirtualObjectNode;
@@ -59,9 +60,6 @@ import jdk.graal.compiler.replacements.DefaultJavaLoweringProvider;
 import jdk.vm.ci.meta.Assumptions;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
-// ----------------------------- my code ------------------------------------- //
-import jdk.graal.compiler.nodes.virtual.CommitAllocationNode;
-// ----------------------------- my code ------------------------------------- //
 
 /**
  * Forwards calls from {@link VirtualizerTool} to the actual
@@ -334,7 +332,6 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             effects.addFixedNodeBefore(anchorSupplier.apply(virtual), fixed);
         }
 
-        // ----------------------------- my code ------------------------------------- //
         /*
          * This counter is inserted at the original NewInstance/NewArray/Box node.
          * It remains in final code after PEA deletes that allocation, so it counts
@@ -345,9 +342,6 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             virtual.setPEAOutcomeTracked();
             // This is a compiler-event counter, not a unique source-site total.
             PartialEscapeClosure.COUNTER_PEA_VIRTUALIZED_OBJECTS.increment(debug);
-
-
-            // runtime counter
             if (PartialEscapePhase.runtimeCountersEnabled(options)
                     && current instanceof FixedNode fixed) {
                 effects.addFixedNodeBefore(
@@ -358,7 +352,7 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
                                 false),
                         fixed);
             }
-            // the reason i am adding this effect is to record the PEA virtualization outcome. Recording through an applied effect means the reporter sets -- virtualized = true, only when the virtualization transformation is actually committed to the graph.
+            // Record only when the virtualization effect is committed to the graph.
             Node allocation = current;
             effects.add(new EffectList.SimpleEffect("record PEA virtualization") {
                 @Override
@@ -371,8 +365,6 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
                 }
             });
         }
-        // ----------------------------- my code ------------------------------------- //
-
         closure.addVirtualAlias(virtual, current);
         effects.deleteNode(current); // delete the original alloc node
         deleted = true;
@@ -420,7 +412,6 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
         }
     }
 
-    // ----------------------------- my code ------------------------------------- //
     private boolean isTrackedPEASourceAllocation() {
         /*
          * NewInstanceNode, NewArrayNode, and BoxNode are fixed
@@ -436,15 +427,11 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
                 !(current instanceof CommitAllocationNode) &&
                 !(current instanceof BoxNode);
     }
-    // ----------------------------- my code ------------------------------------- //
 
-    // TODO: Important function related to creation of virtual object and adding it
-    // to the state.
     @Override
     public void createVirtualObject(VirtualObjectNode virtualObject, ValueNode[] entryState, List<MonitorIdNode> locks,
             NodeSourcePosition sourcePosition, boolean ensureVirtualized) {
 
-        // -------------------------------------------
         VirtualUtil.trace(options, debug, "{{%s}} ", current);
         if (!virtualObject.isAlive()) {
             effects.addFloatingNode(virtualObject, "newVirtualObject");
@@ -459,62 +446,6 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
             closure.virtualObjects.add(virtualObject);
             virtualObject.setObjectId(id);
         }
-        // for my debugging purpose.
-        var methodName = current.getNodeSourcePosition() != null
-                ? current.getNodeSourcePosition().getMethod()
-                : null;
-
-        if (methodName != null && "Test.java".equals(methodName.getDeclaringClass().getSourceFileName())) {
-            int bci = -1;
-            String sourceDesc = "<unknown>";
-            if (current != null && current.getNodeSourcePosition() != null) {
-                bci = current.getNodeSourcePosition().getBCI();
-                sourceDesc = current.getNodeSourcePosition().toString();
-            }
-            System.out.println("-------------------------------------------------");
-            System.out.println(
-                    "[VirtualizerToolImpl.java] Creating virtual object with id: " + id + " in class: "
-                            + methodName.getDeclaringClass().toJavaName());
-            // System.out.println("[VirtualizerToolImpl.java] BCI of current node: " + bci);
-            System.out.println("[VirtualizerToolImpl.java] Current node: " + current);
-            System.out.println("[VirtualizerToolImpl.java] Source position of current node: " + sourceDesc);
-            System.out.println("-------------------------------------------------");
-        }
-
-        // ----------------------------- my code ------------------------------------- //
-
-        /*
-            // for compiletime counting
-            PartialEscapeClosure.COUNTER_PEA_VIRTUALIZED_OBJECTS.increment(debug);
-
-            // for runtime counting
-            if (PartialEscapePhase.Options.PEARuntimeCounters.getValue(options) &&
-                    current instanceof VirtualizableAllocation &&
-                    current instanceof FixedNode fixed) {
-                effects.addFixedNodeBefore(
-                        new DynamicCounterNode(
-                                "PEA outcomes",
-                                "virtualized objects",
-                                ConstantNode.forLong(1, current.graph()),
-                                false),
-                        fixed);
-            }
-        */
-        /*
-        if (PartialEscapePhase.runtimeCountersEnabled(options)
-                && isTrackedPEASourceAllocation()
-                && current instanceof FixedNode fixed) {
-            DynamicCounterNode.addCounterBefore(
-                    "PEA outcomes",
-                    "initially virtualized",
-                    1,
-                    false,
-                    fixed);
-        }
-        */
-
-        // ----------------------------- my code ------------------------------------- //
-
         state.addObject(id, new ObjectState(entryState, locks, ensureVirtualized));
         closure.addVirtualAlias(virtualObject, virtualObject);
         PartialEscapeClosure.COUNTER_ALLOCATION_REMOVED.increment(debug);
@@ -545,11 +476,12 @@ class VirtualizerToolImpl extends CoreProvidersDelegate implements VirtualizerTo
     @Override
     public boolean ensureMaterialized(VirtualObjectNode virtualObject) {
         return closure.ensureMaterialized(
-            state,
-            virtualObject.getObjectId(),
-            position,
-            effects,
-            PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED, "virtualizable-requested-materialization");
+                        state,
+                        virtualObject.getObjectId(),
+                        position,
+                        effects,
+                        PartialEscapeClosure.COUNTER_MATERIALIZATIONS_UNHANDLED,
+                        closure.materializationCauseForVirtualizer(current));
     }
 
     @Override

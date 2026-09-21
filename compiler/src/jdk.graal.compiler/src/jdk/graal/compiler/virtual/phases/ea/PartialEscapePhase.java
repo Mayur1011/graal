@@ -106,9 +106,6 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         public static final OptionKey<Boolean> OptEarlyReadElimination = new OptionKey<>(true);
         //@formatter:on
 
-        // ----------------------------- my code ------------------------------------- //
-
-        // i have written this to counter materializations during runtime
         @Option(help = "Insert runtime counters for final PEA allocation outcomes.", type = OptionType.Debug)
         public static final OptionKey<Boolean> PEARuntimeCounters = new OptionKey<>(false);
 
@@ -118,14 +115,17 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         @Option(help = "File to which the compact PEA allocation-effectiveness report is written.", type = OptionType.Debug)
         public static final OptionKey<String> PEAEffectivenessReportFile = new OptionKey<>(null);
 
+        @Option(help = "File to which final PEA materialization reasons are written.", type = OptionType.Debug)
+        public static final OptionKey<String> PEAMaterializationReasonReportFile = new OptionKey<>(null);
+
         @Option(help = "Comma-separated declaring-class prefixes included in all PEA effectiveness counters and reports.", type = OptionType.Debug)
         public static final OptionKey<String> PEAEffectivenessReportFilter = new OptionKey<>(null);
     }
 
-    // ----------------------------- my code ------------------------------------- //
     public static boolean runtimeCountersEnabled(OptionValues options) {
         return Options.PEARuntimeCounters.getValue(options);
     }
+
     public static boolean effectivenessReportEnabled(OptionValues options) {
         return Options.PEAEffectivenessReport.getValue(options);
     }
@@ -134,11 +134,13 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         return Options.PEAEffectivenessReportFile.getValue(options);
     }
 
+    public static String materializationReasonReportFile(OptionValues options) {
+        return Options.PEAMaterializationReasonReportFile.getValue(options);
+    }
+
     public static String effectivenessReportFilter(OptionValues options) {
         return Options.PEAEffectivenessReportFilter.getValue(options);
     }
-
-    // ----------------------------- my code ------------------------------------- //
 
     private final boolean readElimination;
     private final BasePhase<CoreProviders> cleanupPhase;
@@ -242,30 +244,14 @@ public class PartialEscapePhase extends EffectsPhase<CoreProviders> {
         }
     }
 
-    // TODO: Function to print only the user defined method
-    public void checkUserMethod(StructuredGraph graph) {
-        var method = graph.method();
-        if (method != null) {
-            if ("Test.java".equals(
-                    method.getDeclaringClass().getSourceFileName())) {
-                System.err.println("[PartialEscapePhase.java]: Running PartialEscapePhase on method: "
-                        + method.format("%H.%n(%p)"));
-                System.out.println("==========================================================");
-                System.out.println(
-                        "[PartialEscapePhase.java] Running on: " +
-                                method.format("%H.%n(%p)"));
-            }
-        }
-    }
-
     @Override
     @SuppressWarnings("try")
     protected void run(StructuredGraph graph, CoreProviders context) {
         if (matchGraph(graph)) {
-            checkUserMethod(graph);
             if (readElimination || graph.hasVirtualizableAllocation()) {
 
-                // Record source allocation sites before this PEA invocation can remove them. The reporter deduplicates sites across repeated PEA invocations and recompilations.
+                // Record source allocation sites before this PEA invocation can remove them. The
+                // reporter deduplicates sites across repeated PEA invocations and recompilations.
                 PEAEffectivenessReporter.recordCandidates(graph);
                 try (
                         DebugCloseable ignored = graph

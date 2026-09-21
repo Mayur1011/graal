@@ -46,6 +46,7 @@ import jdk.graal.compiler.nodes.java.MonitorIdNode;
 import jdk.graal.compiler.nodes.virtual.AllocatedObjectNode;
 import jdk.graal.compiler.nodes.virtual.CommitAllocationNode;
 import jdk.graal.compiler.nodes.virtual.LockState;
+import jdk.graal.compiler.nodes.virtual.PEAMaterializationReason;
 import jdk.graal.compiler.nodes.virtual.VirtualObjectNode;
 
 import jdk.graal.compiler.options.OptionValues;
@@ -211,10 +212,9 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
      * reachable from the
      * entries.
      */
-    // TODO: this is entry materialization function
     @SuppressWarnings("try")
     public void materializeBefore(FixedNode fixed, VirtualObjectNode virtual, boolean requiresStrictLockOrder,
-            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
+            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects, PEAMaterializationCause cause) {
         PartialEscapeClosure.COUNTER_MATERIALIZATIONS.increment(fixed.getDebug());
         List<AllocatedObjectNode> objects = new ArrayList<>(2);
         List<ValueNode> values = new ArrayList<>(8);
@@ -222,19 +222,7 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
         List<ValueNode> otherAllocations = new ArrayList<>(2);
         List<Boolean> ensureVirtual = new ArrayList<>(2);
         materializeWithCommit(fixed, virtual, objects, locks, values, ensureVirtual, otherAllocations,
-                requiresStrictLockOrder, virtualObjects, materializeEffects);
-        // ----------------------------- my code ------------------------------------- //
-        // int materializedObjectCount = objects.size() + otherAllocations.size();
-        // PartialEscapeClosure.COUNTER_PEA_MATERIALIZED_OBJECTS.add(fixed.getDebug(), materializedObjectCount);
-        /*
-         * because all currently virtualized allocations will be materialized in 1
-         * commit alloc node
-         * with barriers, we ignore other allocations as we only process new instance
-         * and commit
-         * allocation nodes
-         */
-        // ----------------------------- my code ------------------------------------- //
-
+                requiresStrictLockOrder, virtualObjects, materializeEffects, cause);
         materializeEffects.addAllocationDelta(objects.size() > 0 ? -1 : 0);
         materializeEffects.addVirtualizationDelta(-(objects.size() + otherAllocations.size()));
         materializeEffects.add(new Effect("materializeBefore") {
@@ -304,21 +292,6 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                         }
                     }
                 }
-                // ----------------------------- my code ------------------------------------- //
-                //if (PartialEscapePhase.Options.PEARuntimeCounters.getValue(
-                //        fixed.getOptions())) {
-                //    int count = objects.size() + otherAllocations.size();
-                //    if (count != 0) {
-                //        DynamicCounterNode.addCounterBefore(
-                //                "PEA runtime",
-                //                "materialized virtual objects",
-                //                count,
-                //                false,
-                //                fixed);
-                //    }
-                //}
-                // ----------------------------- my code ------------------------------------- //
-
             }
 
             @Override
@@ -332,23 +305,19 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
     private void materializeWithCommit(FixedNode fixed, VirtualObjectNode virtual, List<AllocatedObjectNode> objects,
             List<List<MonitorIdNode>> locks, List<ValueNode> values,
             List<Boolean> ensureVirtual, List<ValueNode> otherAllocations, boolean requiresStrictLockOrder,
-            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects) {
+            ArrayList<VirtualObjectNode> virtualObjects, GraphEffectList materializeEffects, PEAMaterializationCause cause) {
         ObjectState obj = getObjectState(virtual);
 
         ValueNode[] entries = obj.getEntries();
 
-        // compiler here creates a allocatedobjectnode to show that this virtual object
-        // should be allocated on heap.
         ValueNode representation = virtual.getMaterializedRepresentation(fixed, entries, obj.getLocks());
-        // System.out.println("Escaping object " + virtual + " with materialized value "
-        // + representation);
-
-        // updating the state of this virtual object from virtual to materialized representation
         escape(virtual.getObjectId(), representation);
         obj = getObjectState(virtual);
         PartialEscapeClosure.updateStatesForMaterialized(this, virtual, obj.getMaterializedValue());
         if (representation instanceof AllocatedObjectNode) {
-            objects.add((AllocatedObjectNode) representation);
+            AllocatedObjectNode allocatedObject = (AllocatedObjectNode) representation;
+            allocatedObject.setPEAMaterializationMetadata(cause.reason(), cause.rootReason(), cause.triggerNode(), cause.triggerPosition(), cause.detail());
+            objects.add(allocatedObject);
             locks.add(materializedLocks(obj.getLocks()));
             ensureVirtual.add(obj.getEnsureVirtualized());
             int pos = values.size();
@@ -361,7 +330,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                     ObjectState entryObj = getObjectState(entryVirtual);
                     if (entryObj.isVirtual()) {
                         materializeWithCommit(fixed, entryVirtual, objects, locks, values, ensureVirtual,
-                                otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects);
+                                otherAllocations, requiresStrictLockOrder, virtualObjects, materializeEffects,
+                                cause.propagated(PEAMaterializationReason.OBJECT_GRAPH_DEPENDENCY));
                         entryObj = getObjectState(entryVirtual);
                     }
                     values.set(pos + i, entryObj.getMaterializedValue());
@@ -378,7 +348,8 @@ public abstract class PartialEscapeBlockState<T extends PartialEscapeBlockState<
                         if (otherState.isVirtual() && otherState.hasLocks()
                                 && otherState.getMinimumLockDepth() < lockDepth) {
                             materializeWithCommit(fixed, other, objects, locks, values, ensureVirtual, otherAllocations,
-                                    requiresStrictLockOrder, virtualObjects, materializeEffects);
+                                    requiresStrictLockOrder, virtualObjects, materializeEffects,
+                                    cause.propagated(PEAMaterializationReason.LOCK_ORDER_DEPENDENCY));
                         }
                     }
                 }
