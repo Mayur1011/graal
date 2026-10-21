@@ -146,6 +146,10 @@ public class PriorityInliningPhase extends AbstractPriorityInliningPhase {
 
         @Option(help = "Benefit amplifier applied to call sites named in OfflineEscapeSummaryFile.", type = OptionType.Debug)
         public static final OptionKey<Double> OfflineEscapeBenefitAmplifier = new OptionKey<>(3.0);
+
+        @Option(help = "Inline call sites named in OfflineEscapeSummaryFile unconditionally (like a force-inline rule) instead of only " +
+                       "raising their priority by OfflineEscapeBenefitAmplifier. Recursive call sites are never forced.", type = OptionType.Debug)
+        public static final OptionKey<Boolean> OfflineEscapeForceInline = new OptionKey<>(false);
         /*---------------------- CODE BY ME ---------------------- */
 
         @Option(help = "The policy to use, must be empty for automatic resolution.")

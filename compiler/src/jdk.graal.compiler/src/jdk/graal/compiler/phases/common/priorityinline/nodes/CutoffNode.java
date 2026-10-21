@@ -33,6 +33,7 @@ import jdk.graal.compiler.nodeinfo.NodeInfo;
 import jdk.graal.compiler.nodes.Invoke;
 import jdk.graal.compiler.phases.common.priorityinline.InliningMath;
 import jdk.graal.compiler.phases.common.priorityinline.data.BenefitKind;
+import jdk.graal.compiler.phases.common.priorityinline.data.OfflineEscapeHints;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
@@ -101,7 +102,8 @@ public class CutoffNode extends CallTreeNode {
 
     @Override
     public boolean isForceInlined() {
-        return targetMethod().shouldBeInlined() || callTree().matchesForceInlineFilter(targetMethod()) || callTree().matchDirectedInline(this) != null;
+        return targetMethod().shouldBeInlined() || callTree().matchesForceInlineFilter(targetMethod()) || callTree().matchDirectedInline(this) != null ||
+                        OfflineEscapeHints.forcesInlining(getOptions(), benefits, getRecursionDepth());
     }
 
     @Override
