@@ -43,7 +43,9 @@ public enum BenefitKind {
     Exact,
     Type,
     Devirtualization,
-    NewAllocation;
+    NewAllocation,
+    /** An offline analysis reported that inlining this call site lets PEA scalar-replace an allocation. */
+    OfflineNonEscaping;
 
     public static EnumSet<BenefitKind> estimateBenefit(Invoke invoke) {
         return estimateBenefit(invoke, () -> StampFactory.createParameterStamps(invoke.asNode().graph().getAssumptions(), invoke.callTarget().targetMethod()));

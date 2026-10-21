@@ -28,6 +28,7 @@ import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPh
 import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.ExpandAllProximityBonus;
 import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.ExpandAllProximityBonusInertia;
 import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.ExpansionInertiaMax;
+import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.OfflineEscapeBenefitAmplifier;
 import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.RelativeBenefitInliningCoefficient;
 import static jdk.graal.compiler.phases.common.priorityinline.PriorityInliningPhase.Options.TypicalGraphSizeMax;
 
@@ -99,7 +100,6 @@ public final class InliningMath {
         // Make sure to scale recursion penalty with frequency, and conservative lower bound
         // which is biased against methods that have low frequency anyway.
         recursionPenalty *= Math.max(1.0D, cutoffNode.getFrequency());
-
         return recursionPenalty;
     }
 
@@ -149,7 +149,14 @@ public final class InliningMath {
     public static double defaultBenefitAmplifier(CallTreeNode node) {
         if (node instanceof ParentNode || node instanceof CutoffNode) {
             final EnumSet<BenefitKind> benefits = node instanceof ParentNode ? ((ParentNode) node).getBenefits() : ((CutoffNode) node).getBenefits();
-            return BenefitKind.containsTypeOrConstant(benefits) ? 2.0D : 1.0D;
+            double amplifier = BenefitKind.containsTypeOrConstant(benefits) ? 2.0D : 1.0D;
+            /*-------------------- CODE BY ME ---------------------- */
+            if (benefits.contains(BenefitKind.OfflineNonEscaping)) {
+                // Never lower a bonus the call site already earned (e.g. Type/Constant = 2.0).
+                amplifier = Math.max(amplifier, OfflineEscapeBenefitAmplifier.getValue(node.getOptions()));
+            }
+            /*-------------------- CODE BY ME ---------------------- */
+            return amplifier;
         } else {
             return 1.0D;
         }

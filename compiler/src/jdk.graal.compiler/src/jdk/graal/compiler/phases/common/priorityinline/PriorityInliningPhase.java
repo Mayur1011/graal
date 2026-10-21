@@ -139,6 +139,15 @@ public class PriorityInliningPhase extends AbstractPriorityInliningPhase {
         @Option(help = "Turn on partial escape analysis during inlining.")
         public static final OptionKey<Boolean> UsePriorityInliningPEA = new OptionKey<>(true);
 
+        /*---------------------- CODE BY ME ---------------------- */
+        @Option(help = "File naming call sites (class;method;descriptor;callBci per line) whose inlining an offline " +
+                       "escape analysis reported as letting PEA scalar-replace an allocation. Null disables the feature.", type = OptionType.Debug)
+        public static final OptionKey<String> OfflineEscapeSummaryFile = new OptionKey<>(null);
+
+        @Option(help = "Benefit amplifier applied to call sites named in OfflineEscapeSummaryFile.", type = OptionType.Debug)
+        public static final OptionKey<Double> OfflineEscapeBenefitAmplifier = new OptionKey<>(3.0);
+        /*---------------------- CODE BY ME ---------------------- */
+
         @Option(help = "The policy to use, must be empty for automatic resolution.")
         public static final OptionKey<String> PriorityInliningPolicy = new OptionKey<>("");
 

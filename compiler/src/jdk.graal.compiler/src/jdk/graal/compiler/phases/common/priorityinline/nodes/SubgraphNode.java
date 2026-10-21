@@ -61,6 +61,7 @@ import jdk.graal.compiler.phases.common.priorityinline.GraphCache;
 import jdk.graal.compiler.phases.common.priorityinline.InliningMath;
 import jdk.graal.compiler.phases.common.priorityinline.data.BenefitCostTuple;
 import jdk.graal.compiler.phases.common.priorityinline.data.BenefitKind;
+import jdk.graal.compiler.phases.common.priorityinline.data.OfflineEscapeHints;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
@@ -305,6 +306,9 @@ public class SubgraphNode extends ParentNode {
     public void inline(CoreProviders context, Consumer<CallTreeNode> considerChild, Consumer<CallTreeNode> removeChild,
                     Consumer<EconomicSet<Node>> trackCanonicalizable) {
         callTree().state().incNumMethodsInlined();
+        if (benefits.contains(BenefitKind.OfflineNonEscaping)) {
+            OfflineEscapeHints.reportInlined(invoke());
+        }
         String reason = getInlineCause().longDescription();
         InliningUtil.traceInlinedMethod(invoke(), getDepth(), true, invoke().callTarget().targetMethod(), reason);
         EconomicSet<Node> canonicalizableNodes = InliningUtil.inlineForCanonicalization(invoke(), getReadonlySubgraph(), true, dispatchedMethod, m -> removeDeletedInvokes(considerChild, m), reason,

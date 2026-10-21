@@ -73,6 +73,7 @@ import jdk.graal.compiler.phases.common.inlining.InliningUtil;
 import jdk.graal.compiler.phases.common.inlining.walker.InliningData;
 import jdk.graal.compiler.phases.common.inlining.walker.InliningData.DevirtualizationInfo;
 import jdk.graal.compiler.phases.common.priorityinline.data.BenefitKind;
+import jdk.graal.compiler.phases.common.priorityinline.data.OfflineEscapeHints;
 import jdk.graal.compiler.phases.common.priorityinline.nodes.CallTreeNode;
 import jdk.graal.compiler.phases.common.priorityinline.nodes.CutoffNode;
 import jdk.graal.compiler.phases.common.priorityinline.nodes.DeletedNode;
@@ -260,7 +261,13 @@ public class CallTree extends Graph {
     }
 
     protected EnumSet<BenefitKind> estimateBenefits(Invoke invoke) {
-        return BenefitKind.estimateBenefit(invoke);
+        EnumSet<BenefitKind> benefits = BenefitKind.estimateBenefit(invoke);
+        NodeSourcePosition position = invoke.asNode().getNodeSourcePosition();
+        if (position != null && position.getMethod() != null &&
+                        OfflineEscapeHints.hasOfflineBenefit(invoke.asNode().getOptions(), position.getMethod(), position.getBCI())) {
+            benefits.add(BenefitKind.OfflineNonEscaping);
+        }
+        return benefits;
     }
 
     public CallTreeNode createInlineCacheOrIndirectChild(CallTreeNode caller, Invoke invoke, MethodCallTargetNode target, double frequency, AbstractJavaProfile<?, ?> alternativeProfile) {
